@@ -59,6 +59,7 @@ ${% if tools.by_kind.read -%}
 - `${{ tools.by_kind.read }}` prefixes each line with "LINE_NUMBER→". That prefix is not part of the file: match only what comes after the →, with its exact indentation.
 ${% endif -%}
 - `${{ params.edit.old_string }}` must match exactly one place in the file. If it appears more than once, add surrounding lines to make it unique, or set `${{ params.edit.replace_all }}` to change every occurrence (handy for renaming an identifier).
+- Read the file before editing text that came from a search result: search bodies can be truncated and are not a snapshot of the whole file.
 - To create a new file, set `${{ params.edit.old_string }}` to an empty string. An empty `${{ params.edit.old_string }}` cannot overwrite an existing non-empty file."#;
 /// The overwrite-guard sentence in [`DESCRIPTION_FULL`]. Only accurate while
 /// `empty_old_string_does_not_override` is enabled (opt-in; the default is the legacy overwrite

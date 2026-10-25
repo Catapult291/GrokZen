@@ -8,6 +8,7 @@ It is okay to read a file that does not exist; an error will be returned.
 Usage:
 - You can optionally specify ${{ params.read.offset }} and ${{ params.read.limit }} (especially handy for long files)${%- if whole_read.skill_markdown and whole_read.instruction_files %} (SKILL.md and AGENTS.md/CLAUDE.md files are always returned whole; ${{ params.read.offset }} and ${{ params.read.limit }} are ignored for them)${%- elif whole_read.skill_markdown %} (SKILL.md files are always returned whole; ${{ params.read.offset }} and ${{ params.read.limit }} are ignored for them)${%- elif whole_read.instruction_files %} (AGENTS.md/CLAUDE.md files are always returned whole; ${{ params.read.offset }} and ${{ params.read.limit }} are ignored for them)${%- endif %}.
 - Lines in the output are numbered starting at 1, using following format: LINE_NUMBER→LINE_CONTENT.
+- A content search may already include the enclosing body; read the file for the whole file or exact edit text.
 - You have the capability to call multiple tools in a single response. It is always better to speculatively read multiple files as a batch that are potentially useful."#;
 use crate::types::output::ReadFileOutput;
 use crate::types::requirements::{Expr, ToolRequirement};

@@ -1238,7 +1238,11 @@ mod tests {
         );
         assert_eq!(siblings.role.as_deref(), Some("router"));
         assert_eq!(
-            siblings.metadata.as_ref().and_then(|m| m.get("spec-version")).map(String::as_str),
+            siblings
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("spec-version"))
+                .map(String::as_str),
             Some("1.0")
         );
     }

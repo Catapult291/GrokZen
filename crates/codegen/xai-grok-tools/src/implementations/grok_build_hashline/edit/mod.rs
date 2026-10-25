@@ -53,6 +53,7 @@ validation, ALL edits in the batch are rejected (none are applied).
 Overlapping ranges are also rejected.
 
 Range safety:
+- Anchors must come from an anchor-aware read or search of the same file. Plain content-search bodies carry no anchors — read the file to get them.
 - Multi-line edits may return caution warnings, especially for broader rewrites.
 - Larger rewrites are allowed, but use them when you are confident about the target range.
 - For very large rewrites (most of the file), prefer a single "write" op over many replace ops.

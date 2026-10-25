@@ -77,6 +77,9 @@ This read format uses `→` between the anchor and content.${%- if tools.by_kind
 ${{ tools.by_kind.search }} keeps grep-style separators after the anchor: `:` for
 match lines and `-` for context lines.${%- endif %}
 
+A plain content search returns function bodies without anchors. Read the file
+with this tool whenever you need anchors to edit with.
+
 The ANCHOR (e.g. "{example_anchor}") is a compact fingerprint of the line's content
 and surrounding context.${%- if tools.by_kind.edit %} Pass anchors to ${{ tools.by_kind.edit }} to make edits —
 they verify the targeted location still matches the snapshot you saw.
