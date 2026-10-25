@@ -133,6 +133,14 @@ impl From<std::io::Error> for ComputerError {
 
 #[async_trait::async_trait]
 pub trait AsyncFileSystem: Send + Sync {
+    /// Whether paths under this backend are files this process can read
+    /// directly. Backends that proxy reads to another machine or to a sandbox
+    /// process return `false`; the in-process code index relies on local disk
+    /// access, so it refuses those sessions instead of indexing the wrong tree.
+    fn is_local(&self) -> bool {
+        true
+    }
+
     async fn read_file(&self, path: &Path) -> Result<Vec<u8>, ComputerError>;
 
     fn supports_bounded_read(&self) -> bool {

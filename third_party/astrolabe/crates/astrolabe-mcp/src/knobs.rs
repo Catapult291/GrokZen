@@ -47,6 +47,10 @@ pub(crate) struct McpKnobs {
     /// `<root>/.astrolabe/`; hosts use it for repositories that must stay
     /// untouched.
     pub persist_enabled: bool,
+    /// Whether scans and watcher admissions honor `.gitignore`/`.ignore`.
+    /// `false` indexes and searches gitignored files, matching a host `grep`
+    /// that was told not to respect ignore files.
+    pub respect_gitignore: bool,
 }
 
 impl Default for McpKnobs {
@@ -63,6 +67,7 @@ impl Default for McpKnobs {
             loop_guard: crate::loop_guard::LoopGuardConfig::default(),
             lsp_enabled: true,
             persist_enabled: true,
+            respect_gitignore: true,
         }
     }
 }
@@ -99,7 +104,19 @@ impl McpKnobs {
             loop_guard: crate::loop_guard::LoopGuardConfig::from_env(),
             lsp_enabled: true,
             persist_enabled: persist_enabled_from_env(),
+            respect_gitignore: respect_gitignore_from_env(),
         }
+    }
+}
+
+/// `ASTROLABE_RESPECT_GITIGNORE=0` indexes and searches gitignored files.
+fn respect_gitignore_from_env() -> bool {
+    match std::env::var("ASTROLABE_RESPECT_GITIGNORE") {
+        Err(_) => true,
+        Ok(raw) => !matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
     }
 }
 

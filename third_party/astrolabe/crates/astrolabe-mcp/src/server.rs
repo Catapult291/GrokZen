@@ -1932,11 +1932,20 @@ impl AstrolabeServer {
     /// policy. `persist = false` never takes the indexer lock and never
     /// creates `<root>/.astrolabe/`: the index lives in memory only.
     #[cfg(feature = "native")]
-    pub fn new_native_with_options(
+    pub fn new_native_with_options(root: PathBuf, watch: bool, lsp: bool, persist: bool) -> Self {
+        Self::new_native_full(root, watch, lsp, persist, true)
+    }
+
+    /// [`Self::new_native_with_options`] plus the `.gitignore` policy.
+    /// `respect_gitignore = false` indexes and searches ignored files, so the
+    /// tool sees the same set a host `grep` configured to ignore nothing does.
+    #[cfg(feature = "native")]
+    pub fn new_native_full(
         root: PathBuf,
         watch: bool,
         lsp: bool,
         persist: bool,
+        respect_gitignore: bool,
     ) -> Self {
         let mut knobs = McpKnobs::from_env();
         if !watch {
@@ -1944,6 +1953,7 @@ impl AstrolabeServer {
         }
         knobs.lsp_enabled = lsp;
         knobs.persist_enabled = persist && knobs.persist_enabled;
+        knobs.respect_gitignore = respect_gitignore;
         let mut server = Self::assemble(
             root,
             cache_budget_from_env(),
@@ -2337,7 +2347,7 @@ impl AstrolabeServer {
         let started = std::time::Instant::now();
         let scanned = astrolabe_core::scan::scan(
             &session.root,
-            &astrolabe_core::scan::ScanOptions::default(),
+            &crate::session::scan_options(&session.knobs),
         );
         let mut total = 0usize;
         let mut files_hit = 0usize;

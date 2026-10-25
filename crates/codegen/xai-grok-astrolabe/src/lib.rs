@@ -22,8 +22,8 @@ pub use config::{
     AstrolabeConfig, AstrolabeMode, AstrolabeToolsetConfig, IndexPersist, IndexRoot, LspFallback,
 };
 pub use engine::{
-    AstrolabeEngine, EngineError, engine_for, install_config, note_edited_on_disk, process_config,
-    root_for_cwd, shutdown_all,
+    AstrolabeEngine, EngineError, engine_for, engine_for_session, install_config,
+    note_edited_on_disk, process_config, root_for_cwd, shutdown_all,
 };
 pub use paths::{DenyPolicy, PathError, PathMap};
 pub use types::{

@@ -47,11 +47,14 @@ pub enum EngineError {
     TooManyFiles { root: String, limit: u64 },
 }
 
-/// A shared index for one root.
+/// A shared index for one root and one ignore policy. Sessions that disagree
+/// about `.gitignore` get separate indexes: the admitted file set is fixed at
+/// build time, so serving both from one engine would answer one of them wrong.
 pub struct AstrolabeEngine {
     root: PathBuf,
     server: Arc<AstrolabeServer>,
     cfg: AstrolabeConfig,
+    respect_gitignore: bool,
     started: AtomicBool,
 }
 
@@ -59,12 +62,19 @@ impl std::fmt::Debug for AstrolabeEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AstrolabeEngine")
             .field("root", &self.root)
+            .field("respect_gitignore", &self.respect_gitignore)
             .field("started", &self.started.load(Ordering::Relaxed))
             .finish()
     }
 }
 
-static ENGINES: LazyLock<Mutex<HashMap<PathBuf, Arc<AstrolabeEngine>>>> =
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct EngineKey {
+    root: PathBuf,
+    respect_gitignore: bool,
+}
+
+static ENGINES: LazyLock<Mutex<HashMap<EngineKey, Arc<AstrolabeEngine>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 static CONFIG: OnceLock<AstrolabeConfig> = OnceLock::new();
@@ -106,12 +116,27 @@ pub fn note_edited_on_disk(paths: &[PathBuf]) {
 /// Engine for `root`, creating it on first use. The root must already be
 /// canonical (see [`root_for_cwd`]).
 pub fn engine_for(root: &Path, cfg: &AstrolabeConfig) -> Result<Arc<AstrolabeEngine>, EngineError> {
+    engine_for_session(root, cfg, cfg.respect_gitignore)
+}
+
+/// [`engine_for`] with the session's `.gitignore` policy. `respect_gitignore`
+/// comes from the host's `RespectGitignore` resource, so a session that told
+/// `grep` to look at ignored files gets an index that contains them.
+pub fn engine_for_session(
+    root: &Path,
+    cfg: &AstrolabeConfig,
+    respect_gitignore: bool,
+) -> Result<Arc<AstrolabeEngine>, EngineError> {
+    let key = EngineKey {
+        root: root.to_path_buf(),
+        respect_gitignore,
+    };
     let mut engines = ENGINES.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(engine) = engines.get(root) {
+    if let Some(engine) = engines.get(&key) {
         return Ok(Arc::clone(engine));
     }
-    let engine = Arc::new(AstrolabeEngine::open(root, cfg.clone())?);
-    engines.insert(root.to_path_buf(), Arc::clone(&engine));
+    let engine = Arc::new(AstrolabeEngine::open(root, cfg.clone(), respect_gitignore)?);
+    engines.insert(key, Arc::clone(&engine));
     Ok(engine)
 }
 
@@ -139,12 +164,20 @@ fn canonical(path: &Path) -> PathBuf {
 }
 
 impl AstrolabeEngine {
-    fn open(root: &Path, cfg: AstrolabeConfig) -> Result<Self, EngineError> {
+    fn open(
+        root: &Path,
+        cfg: AstrolabeConfig,
+        respect_gitignore: bool,
+    ) -> Result<Self, EngineError> {
         let root = canonical(root);
         // The upstream MCP binary refuses a root above `max_files` while it
         // resolves one; the in-process facade must apply the same guard, or a
         // fifty-thousand-file tree would be parsed before the first answer.
-        let count = count_files(&root, &Default::default(), cfg.max_files.saturating_add(1));
+        let scan = astrolabe_core::scan::ScanOptions {
+            respect_gitignore,
+            ..Default::default()
+        };
+        let count = count_files(&root, &scan, cfg.max_files.saturating_add(1));
         if count.files > cfg.max_files {
             return Err(EngineError::TooManyFiles {
                 root: root.display().to_string(),
@@ -155,18 +188,29 @@ impl AstrolabeEngine {
         // engine must not start Astrolabe's own pool in that mode.
         let builtin_lsp = cfg.lsp_fallback == LspFallback::Astrolabe;
         let persist = cfg.persist == IndexPersist::Repo;
-        let server =
-            AstrolabeServer::new_native_with_options(root.clone(), cfg.watch, builtin_lsp, persist);
+        let server = AstrolabeServer::new_native_full(
+            root.clone(),
+            cfg.watch,
+            builtin_lsp,
+            persist,
+            respect_gitignore,
+        );
         Ok(Self {
             root,
             server: Arc::new(server),
             cfg,
+            respect_gitignore,
             started: AtomicBool::new(false),
         })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The ignore policy this index was built with.
+    pub fn respects_gitignore(&self) -> bool {
+        self.respect_gitignore
     }
 
     pub fn config(&self) -> &AstrolabeConfig {

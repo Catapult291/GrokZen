@@ -275,6 +275,7 @@ pub(crate) fn build_session_index(session: &RootSession, persist: bool) -> Optio
             &session.root,
             persist,
             session.knobs.parse_cache_bytes,
+            session.knobs.respect_gitignore,
             &session.closed,
         )
     }));
@@ -389,7 +390,8 @@ fn wait_for_watcher_baseline(session: &RootSession) {
 fn start_watching(session: &Arc<RootSession>, mode: WatchMode) {
     let watcher = Watcher::new(session.root.clone())
         .safety_interval(session.knobs.safety_interval)
-        .storm_paths(session.knobs.storm_paths);
+        .storm_paths(session.knobs.storm_paths)
+        .scan_options(scan_options(&session.knobs));
     let (rx, handle, log) = match mode {
         WatchMode::Events => {
             tracing::info!(root = %session.root.display(), "watching for changes (native OS events)");
@@ -455,7 +457,11 @@ pub(crate) fn note_edited(session: &RootSession, changes: &ChangeSet) -> bool {
 
 fn publish_ready(session: &RootSession, mut outcome: IndexState) {
     let persist = session.persist_enabled();
-    let opts = crate::reindex::mcp_index_options(persist, session.knobs.parse_cache_bytes);
+    let opts = crate::reindex::mcp_index_options(
+        persist,
+        session.knobs.parse_cache_bytes,
+        session.knobs.respect_gitignore,
+    );
 
     let mut pending = session.pending.lock_or_recover();
 
@@ -503,7 +509,11 @@ fn apply_pending(session: &RootSession, pending: &mut ChangeSet) -> bool {
         return true;
     }
     let persist = session.persist_enabled();
-    let opts = crate::reindex::mcp_index_options(persist, session.knobs.parse_cache_bytes);
+    let opts = crate::reindex::mcp_index_options(
+        persist,
+        session.knobs.parse_cache_bytes,
+        session.knobs.respect_gitignore,
+    );
     let mut applied = older.clone();
     applied.merge(changes.clone());
     let (inc, left) = apply_with_fallback(session, previous.incremental(), older, changes, &opts);
@@ -780,11 +790,21 @@ fn wait_watermark_advance(log: &FreshnessLog, before: Instant, timeout: Duration
     }
 }
 
+/// Scan gates for this session: the same `.gitignore` policy must apply to
+/// the cold build, inline repairs, and watcher admissions, or a file can be
+/// indexed by one path and rejected by another.
+pub(crate) fn scan_options(knobs: &McpKnobs) -> astrolabe_core::scan::ScanOptions {
+    astrolabe_core::scan::ScanOptions {
+        respect_gitignore: knobs.respect_gitignore,
+        ..astrolabe_core::scan::ScanOptions::default()
+    }
+}
+
 fn inline_repair(session: &RootSession, paths: Vec<RelPath>) {
     // Suspects are raw event paths: classify them with the scan gates so a
     // gitignored / deleted / oversized path is removed instead of being
     // blindly parsed into the index.
-    let scan_opts = astrolabe_core::scan::ScanOptions::default();
+    let scan_opts = scan_options(&session.knobs);
     let mut repair = ChangeSet::default();
     for path in paths {
         match astrolabe_core::scan::path_admission(&session.root, &path, &scan_opts) {
@@ -866,7 +886,11 @@ pub(crate) fn trigger_background_rebuild_arc(session: &Arc<RootSession>) {
 /// the old index (journal) or buffered (pending) while it was building.
 fn publish_rebuilt(session: &RootSession, mut outcome: IndexState) {
     let persist = session.persist_enabled();
-    let opts = crate::reindex::mcp_index_options(persist, session.knobs.parse_cache_bytes);
+    let opts = crate::reindex::mcp_index_options(
+        persist,
+        session.knobs.parse_cache_bytes,
+        session.knobs.respect_gitignore,
+    );
     let mut pending = session.pending.lock_or_recover();
     let mut replay = std::mem::take(&mut *session.rebuild_journal.lock_or_recover());
     replay.merge(std::mem::take(&mut *pending));
