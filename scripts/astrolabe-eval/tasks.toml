@@ -1,0 +1,258 @@
+# Astrolabe tool-selection eval set (Phase 4 §10.3).
+#
+# Each task is one headless turn run against this repository. `expect` is the
+# tool the routing matrix in the plan names as the first choice; `accept` also
+# lists fallbacks that still solve the task. The runner records the first tool
+# the model calls, the call list, turns, tokens and wall time for each arm.
+
+[[task]]
+id = "string_grep_timeout"
+category = "known_string"
+prompt = "Find the places that read GREP_TIMEOUT_WSL_SECS and show the enclosing function."
+expect = "search_code"
+accept = ["search_code", "grep"]
+
+[[task]]
+id = "string_refuse_index"
+category = "known_string"
+prompt = "Where is the message \"astrolabe refuses to index\" produced? Show the code around it."
+expect = "search_code"
+accept = ["search_code", "grep"]
+
+[[task]]
+id = "string_truncated_by_host"
+category = "known_string"
+prompt = "Search for \"output truncated by host\" and show the function it lives in."
+expect = "search_code"
+accept = ["search_code", "grep"]
+
+[[task]]
+id = "string_hashline_note"
+category = "known_string"
+prompt = "Where is the literal string \"note: these bodies carry no edit anchors\" defined? Show the surrounding code."
+expect = "search_code"
+accept = ["search_code", "grep"]
+
+[[task]]
+id = "symbol_tool_server_config"
+category = "known_symbol"
+prompt = "Locate the struct ToolServerConfig and give its file and line."
+expect = "find_symbol"
+accept = ["find_symbol", "search_code", "grep"]
+
+[[task]]
+id = "symbol_finalize"
+category = "known_symbol"
+prompt = "Find the definition of finalize_with_trunc_config."
+expect = "find_symbol"
+accept = ["find_symbol", "search_code", "grep"]
+
+[[task]]
+id = "symbol_listing_enabled"
+category = "known_symbol"
+prompt = "Where is listing_enabled_for defined?"
+expect = "find_symbol"
+accept = ["find_symbol", "search_code", "grep"]
+
+[[task]]
+id = "start_astrolabe_config"
+category = "task_start"
+prompt = "I need to change how the [toolset.astrolabe] TOML section is parsed. Which files and symbols are involved?"
+expect = "resolve_context"
+accept = ["resolve_context", "search_code", "find_symbol", "grep", "list_dir"]
+
+[[task]]
+id = "start_hashline"
+category = "task_start"
+prompt = "Which parts of the codebase implement the hashline file tool set?"
+expect = "resolve_context"
+accept = ["resolve_context", "search_code", "find_symbol", "grep", "list_dir"]
+
+[[task]]
+id = "start_output_budget"
+category = "task_start"
+prompt = "Give me a map of the code involved in truncating tool output at 40 KB."
+expect = "resolve_context"
+accept = ["resolve_context", "search_code", "find_symbol", "grep"]
+
+[[task]]
+id = "callers_grep_timeout"
+category = "callers"
+prompt = "List all callers of grep_timeout_secs."
+expect = "find_references"
+accept = ["find_references", "grep", "lsp", "search_code"]
+
+[[task]]
+id = "callers_note_edited"
+category = "callers"
+prompt = "What calls note_edited_on_disk? List the call sites."
+expect = "find_references"
+accept = ["find_references", "grep", "lsp", "search_code"]
+
+[[task]]
+id = "callers_deny_globs"
+category = "callers"
+prompt = "Find every reference to DenyReadGlobs."
+expect = "find_references"
+accept = ["find_references", "grep", "lsp", "search_code"]
+
+[[task]]
+id = "def_grep_line"
+category = "definition"
+prompt = "In crates/codegen/xai-grok-tools/src/implementations/grok_build/grep/mod.rs line 181, what is defined there?"
+expect = "goto_definition"
+accept = ["goto_definition", "find_symbol", "read_file", "lsp", "search_code"]
+
+[[task]]
+id = "def_precise_location"
+category = "definition"
+prompt = "Jump to the definition of PreciseLocation."
+expect = "goto_definition"
+accept = ["goto_definition", "find_symbol", "read_file", "lsp", "search_code"]
+
+[[task]]
+id = "def_truncate"
+category = "definition"
+prompt = "Where is truncate defined in the astrolabe crate?"
+expect = "goto_definition"
+accept = ["goto_definition", "find_symbol", "read_file", "lsp", "search_code"]
+
+[[task]]
+id = "diag_config"
+category = "diagnostics"
+prompt = "Check crates/codegen/xai-grok-astrolabe/src/config.rs for syntax or type errors."
+expect = "get_diagnostics"
+accept = ["get_diagnostics", "lsp", "bash", "read_file"]
+
+[[task]]
+id = "diag_registry"
+category = "diagnostics"
+prompt = "Does crates/codegen/xai-grok-tools/src/registry/types.rs currently have any diagnostics?"
+expect = "get_diagnostics"
+accept = ["get_diagnostics", "lsp", "bash", "read_file"]
+
+[[task]]
+id = "diag_engine"
+category = "diagnostics"
+prompt = "I just edited crates/codegen/xai-grok-astrolabe/src/engine.rs; check that file for errors."
+expect = "get_diagnostics"
+accept = ["get_diagnostics", "lsp", "bash", "read_file"]
+
+[[task]]
+id = "glob_toml"
+category = "glob_type"
+prompt = "Search only *.toml files for the string tree-sitter."
+expect = "grep"
+accept = ["grep", "search_code", "bash"]
+
+[[task]]
+id = "glob_rust"
+category = "glob_type"
+prompt = "Find all Rust files that contain the word astrolabe, ignoring other file types."
+expect = "grep"
+accept = ["grep", "search_code", "bash"]
+
+[[task]]
+id = "glob_multiline"
+category = "glob_type"
+prompt = "Search for a multi-line pattern: a line containing fn main() followed by a blank line."
+expect = "grep"
+accept = ["grep", "bash", "search_code"]
+
+[[task]]
+id = "hover_precise_references"
+category = "hover_symbol"
+prompt = "Show the type signature of precise_references in the LspBackend trait."
+expect = "lsp"
+accept = ["lsp", "read_file", "find_symbol", "search_code"]
+
+[[task]]
+id = "impl_lsp_backend"
+category = "hover_symbol"
+prompt = "List the implementations of the LspBackend trait."
+expect = "lsp"
+accept = ["lsp", "grep", "search_code", "find_symbol"]
+
+[[task]]
+id = "workspace_symbol_search_code"
+category = "hover_symbol"
+prompt = "List all symbols named search_code in the workspace."
+expect = "lsp"
+accept = ["lsp", "find_symbol", "search_code", "grep"]
+
+[[task]]
+id = "outside_plan_title"
+category = "outside_workspace"
+prompt = "Read ../astrolabe-native-search-code-plan.md and quote its title."
+expect = "grep"
+accept = ["grep", "bash", "read_file", "search_code"]
+
+[[task]]
+id = "outside_home_grok"
+category = "outside_workspace"
+prompt = "Search my home directory ~/.grok for the word astrolabe and list which files mention it."
+expect = "grep"
+accept = ["grep", "bash", "search_code"]
+
+[[task]]
+id = "outside_parent_plan_count"
+category = "outside_workspace"
+prompt = "In ../astrolabe-native-search-code-plan.md, how many times does the word search_code appear?"
+expect = "grep"
+accept = ["grep", "bash", "read_file", "search_code"]
+
+[[task]]
+id = "languages_coverage"
+category = "languages"
+prompt = "What languages does the code index cover, and which source extensions are not indexed?"
+expect = "get_languages"
+accept = ["get_languages", "bash", "grep"]
+
+[[task]]
+id = "languages_size"
+category = "languages"
+prompt = "How many Rust files and lines does the indexed workspace have?"
+expect = "get_languages"
+accept = ["get_languages", "bash", "grep"]
+
+[[task]]
+id = "anchor_tool_server_config"
+category = "edit_anchor"
+prompt = "Show the exact lines around pub struct ToolServerConfig with line numbers so I can edit them."
+expect = "read_file"
+accept = ["read_file", "search_code", "grep"]
+
+[[task]]
+id = "anchor_render"
+category = "edit_anchor"
+prompt = "Read crates/codegen/xai-grok-astrolabe/src/render.rs and quote its first paragraph."
+expect = "read_file"
+accept = ["read_file", "search_code"]
+
+[[task]]
+id = "wide_dirs_timeout"
+category = "wide_count"
+prompt = "How many directories contain the word timeout? Give per-directory counts."
+expect = "search_code"
+accept = ["search_code", "grep", "bash"]
+
+[[task]]
+id = "wide_files_unwrap"
+category = "wide_count"
+prompt = "Which files have the most occurrences of unwrap_or_default?"
+expect = "search_code"
+accept = ["search_code", "grep", "bash"]
+
+[[task]]
+id = "wide_dirs_astrolabe"
+category = "wide_count"
+prompt = "Count occurrences of the word astrolabe per directory."
+expect = "search_code"
+accept = ["search_code", "grep", "bash"]
+
+[[task]]
+id = "wide_budget_set"
+category = "wide_count"
+prompt = "Show me the three places where budget_tokens is assigned."
+expect = "search_code"
+accept = ["search_code", "grep"]

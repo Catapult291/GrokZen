@@ -4599,6 +4599,12 @@ impl MvpAgent {
         };
         {
             let cfg = self.cfg.borrow();
+            // The registry and `by_kind` are process-wide, so the Astrolabe
+            // configuration has to be installed before the toolset is
+            // finalized. The first session wins; later ones reuse it.
+            xai_grok_astrolabe::install_config(xai_grok_astrolabe::AstrolabeConfig::from_toolset(
+                &cfg.toolset.astrolabe,
+            ));
             let effective = cfg
                 .toolset
                 .resolve_file_toolset(cfg.remote_settings.as_ref());

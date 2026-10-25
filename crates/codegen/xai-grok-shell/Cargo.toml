@@ -151,6 +151,8 @@ xai-grok-session-search = { workspace = true }
 xai-token-estimation = { workspace = true }
 xai-grok-sampling-types = { path = "../xai-grok-sampling-types" }
 xai-grok-tools = { path = "../xai-grok-tools" }
+# `[toolset.astrolabe]` parsing and the process-wide engine configuration.
+xai-grok-astrolabe = { workspace = true }
 xai-tty-utils = { workspace = true }
 xai-workflow = { path = "../xai-workflow" }
 xai-grok-workspace = { workspace = true }

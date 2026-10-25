@@ -216,6 +216,39 @@ pub struct ShellToolsetConfig {
     /// Only used when `file_toolset = "hashline"`.
     #[serde(default)]
     pub hashline: HashlineSchemeConfig,
+    /// `[toolset.astrolabe]`: index tools, engine knobs, precise-tool LSP
+    /// backend. Installed process-wide before the toolset is finalized.
+    #[serde(default, deserialize_with = "deserialize_astrolabe")]
+    pub astrolabe: xai_grok_astrolabe::AstrolabeToolsetConfig,
+}
+
+/// Accept the table form plus the two shorthands users reach for:
+/// `astrolabe = false` and `astrolabe = "off"`. A typo inside the table must
+/// not reset the rest of `[toolset]`.
+fn deserialize_astrolabe<'de, D>(
+    deserializer: D,
+) -> Result<xai_grok_astrolabe::AstrolabeToolsetConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Bool(bool),
+        Text(String),
+        Table(xai_grok_astrolabe::AstrolabeToolsetConfig),
+    }
+    Ok(match Raw::deserialize(deserializer)? {
+        Raw::Table(cfg) => cfg,
+        Raw::Bool(enabled) => xai_grok_astrolabe::AstrolabeToolsetConfig {
+            enabled,
+            ..Default::default()
+        },
+        Raw::Text(mode) => xai_grok_astrolabe::AstrolabeToolsetConfig {
+            mode,
+            ..Default::default()
+        },
+    })
 }
 
 impl Default for ShellToolsetConfig {
@@ -293,6 +326,7 @@ impl ShellToolsetConfig {
             codemode: CodemodeToolConfig::default(),
             file_toolset: FileToolset::default(),
             hashline: HashlineSchemeConfig::default(),
+            astrolabe: xai_grok_astrolabe::AstrolabeToolsetConfig::default(),
         });
         if let Some(sc) = sampling_config {
             toolset.web_search = web_search_sampling_config(sc);
@@ -535,6 +569,39 @@ mod tests {
         assert_eq!(standard, FileToolset::Standard);
         let hashline: FileToolset = serde_json::from_str("\"hashline\"").unwrap();
         assert_eq!(hashline, FileToolset::Hashline);
+    }
+
+    #[test]
+    fn astrolabe_section_deserializes_with_defaults() {
+        let cfg: ShellToolsetConfig = toml::from_str(
+            r#"
+astrolabe = { mode = "all", max_files = 9000, persist = "none" }
+"#,
+        )
+        .expect("[toolset] parses");
+        assert_eq!(cfg.astrolabe.mode, "all");
+        assert_eq!(cfg.astrolabe.max_files, 9000);
+        assert_eq!(cfg.astrolabe.persist, "none");
+        // Unset keys keep the documented defaults.
+        assert!(cfg.astrolabe.enabled);
+        assert_eq!(cfg.astrolabe.index_root, "git");
+        assert_eq!(cfg.astrolabe.lsp_fallback, "grok");
+        assert!(cfg.astrolabe.replace_grep);
+        assert_eq!(cfg.astrolabe.budget_tokens, 2_500);
+    }
+
+    #[test]
+    fn astrolabe_shorthands_do_not_break_the_section() {
+        for text in ["astrolabe = false", r#"astrolabe = "off""#] {
+            let cfg: ShellToolsetConfig =
+                toml::from_str(&format!("file_toolset = \"hashline\"\n{text}\n"))
+                    .unwrap_or_else(|err| panic!("{text} must parse: {err}"));
+            assert_eq!(cfg.file_toolset, FileToolset::Hashline, "{text}");
+        }
+        let off: ShellToolsetConfig = toml::from_str("astrolabe = false").unwrap();
+        assert!(!off.astrolabe.enabled);
+        let mode: ShellToolsetConfig = toml::from_str(r#"astrolabe = "off""#).unwrap();
+        assert_eq!(mode.astrolabe.mode, "off");
     }
 
     // -- resolve_file_toolset precedence tests ---
