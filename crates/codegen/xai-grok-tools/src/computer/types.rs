@@ -137,6 +137,14 @@ pub trait AsyncFileSystem: Send + Sync {
     /// directly. Backends that proxy reads to another machine or to a sandbox
     /// process return `false`; the in-process code index relies on local disk
     /// access, so it refuses those sessions instead of indexing the wrong tree.
+    ///
+    /// The default stays `true` for local and in-memory backends. A new
+    /// remote/sandbox backend that implements **this** trait must override
+    /// `is_local` and return `false`; finalize only hides the index tools when
+    /// it sees that mark (`remote_fs_finalize_hides_only_the_seven_index_tools`
+    /// covers the filter, not an unmarked remote). Note:
+    /// `xai_grok_workspace::file_system::AcpSessionFs` implements the
+    /// *workspace* filesystem trait and is not wired into tools finalize.
     fn is_local(&self) -> bool {
         true
     }

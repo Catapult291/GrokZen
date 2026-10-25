@@ -2918,6 +2918,86 @@ mod tests {
         assert_eq!(schema["properties"], serde_json::json!({}), "{schema}");
         assert_eq!(schema["required"], serde_json::json!([]), "{schema}");
     }
+    /// Remote/sandbox `SessionContext.fs` must drop the seven in-process index
+    /// tools at finalize (before the model ever sees them) while leaving the
+    /// local file tools alone. Complements the pure `listed_for` unit test with
+    /// a real builder + `SessionContext`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_fs_finalize_hides_only_the_seven_index_tools() {
+        struct RemoteFs;
+        #[async_trait::async_trait]
+        impl AsyncFileSystem for RemoteFs {
+            fn is_local(&self) -> bool {
+                false
+            }
+            async fn read_file(
+                &self,
+                _path: &std::path::Path,
+            ) -> Result<Vec<u8>, crate::computer::types::ComputerError> {
+                Err(crate::computer::types::ComputerError::io_with_kind(
+                    "remote reads are not available in this test",
+                    std::io::ErrorKind::Unsupported,
+                ))
+            }
+            async fn write_file(
+                &self,
+                _path: &std::path::Path,
+                _data: &[u8],
+            ) -> Result<(), crate::computer::types::ComputerError> {
+                Err(crate::computer::types::ComputerError::io_with_kind(
+                    "remote writes are not available in this test",
+                    std::io::ErrorKind::Unsupported,
+                ))
+            }
+            async fn delete_file(
+                &self,
+                _path: &std::path::Path,
+            ) -> Result<(), crate::computer::types::ComputerError> {
+                Err(crate::computer::types::ComputerError::io_with_kind(
+                    "remote deletes are not available in this test",
+                    std::io::ErrorKind::Unsupported,
+                ))
+            }
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let mut ctx = test_session_context(&tmp);
+        ctx.fs = Arc::new(RemoteFs);
+        let index_ids = [
+            "GrokBuild:search_code",
+            "GrokBuild:find_symbol",
+            "GrokBuild:resolve_context",
+            "GrokBuild:get_languages",
+            "GrokBuild:find_references",
+            "GrokBuild:goto_definition",
+            "GrokBuild:get_diagnostics",
+        ];
+        let mut ids: Vec<String> = index_ids.iter().map(|id| (*id).to_string()).collect();
+        ids.push("GrokBuild:grep".to_string());
+        ids.push("GrokBuild:read_file".to_string());
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(
+                ToolServerConfig {
+                    tools: ids.into_iter().map(ToolConfig::from_id).collect(),
+                    behavior_preset: None,
+                },
+                ctx,
+            )
+            .expect("remote finalize should succeed and drop the index tools");
+        let definitions = toolset.tool_definitions();
+        let names: Vec<&str> = definitions
+            .iter()
+            .map(|definition| definition.function.name.as_str())
+            .collect();
+        for index_tool in ["search_code", "find_symbol", "resolve_context", "get_languages"] {
+            assert!(
+                !names.contains(&index_tool),
+                "{index_tool} must not be finalized for a remote workspace: {names:?}"
+            );
+        }
+        assert!(names.contains(&"grep"), "{names:?}");
+        assert!(names.contains(&"read_file"), "{names:?}");
+    }
     /// `merge_tool_meta` (the harness emission path) must stamp `x.ai/tool` for a
     /// known tool while preserving existing markers, and leave meta untouched for
     /// an unknown tool.

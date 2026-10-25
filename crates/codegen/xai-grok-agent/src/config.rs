@@ -266,11 +266,12 @@ fn grok_build_core_toolset_with(
 ) -> ToolServerConfig {
     let mut tools = vec![
         // Index-layer tools come first: `by_kind.search` is first-come, so
-        // `search_code` owns the Search slot and `grep` stays the fallback for
+        // `resolve_context` leads (task-start map questions) while
+        // `search_code` still precedes `grep` for content search fallback.
         // glob/type/multiline and paths outside the workspace.
+        (&astrolabe::ResolveContextTool).into(),
         (&astrolabe::SearchCodeTool).into(),
         (&astrolabe::FindSymbolTool).into(),
-        (&astrolabe::ResolveContextTool).into(),
         (&astrolabe::GetLanguagesTool).into(),
         (&astrolabe::FindReferencesTool).into(),
         (&astrolabe::GotoDefinitionTool).into(),
@@ -381,9 +382,9 @@ fn explore_toolset() -> ToolServerConfig {
         tools: vec![
             (&grok_build::ReadFileTool).into(),
             (&grok_build::ListDirTool).into(),
+            (&astrolabe::ResolveContextTool).into(),
             (&astrolabe::SearchCodeTool).into(),
             (&astrolabe::FindSymbolTool).into(),
-            (&astrolabe::ResolveContextTool).into(),
             (&astrolabe::GetLanguagesTool).into(),
             (&astrolabe::FindReferencesTool).into(),
             (&astrolabe::GotoDefinitionTool).into(),
@@ -401,9 +402,9 @@ fn plan_toolset() -> ToolServerConfig {
         tools: vec![
             (&grok_build::ReadFileTool).into(),
             (&grok_build::ListDirTool).into(),
+            (&astrolabe::ResolveContextTool).into(),
             (&astrolabe::SearchCodeTool).into(),
             (&astrolabe::FindSymbolTool).into(),
-            (&astrolabe::ResolveContextTool).into(),
             (&astrolabe::GetLanguagesTool).into(),
             (&astrolabe::FindReferencesTool).into(),
             (&astrolabe::GotoDefinitionTool).into(),
@@ -422,9 +423,9 @@ fn grok_build_plan_toolset() -> ToolServerConfig {
     ToolServerConfig {
         tools: vec![
             // Standard grok-build tools
+            (&astrolabe::ResolveContextTool).into(),
             (&astrolabe::SearchCodeTool).into(),
             (&astrolabe::FindSymbolTool).into(),
-            (&astrolabe::ResolveContextTool).into(),
             (&astrolabe::GetLanguagesTool).into(),
             (&astrolabe::FindReferencesTool).into(),
             (&astrolabe::GotoDefinitionTool).into(),
@@ -509,9 +510,9 @@ fn grok_build_plan_no_subagents_toolset() -> ToolServerConfig {
         tools: vec![
             // Standard grok-build tools, minus TaskTool only
             // KillTaskTool and TaskOutputTool are kept because BashTool's background mode requires them
+            (&astrolabe::ResolveContextTool).into(),
             (&astrolabe::SearchCodeTool).into(),
             (&astrolabe::FindSymbolTool).into(),
-            (&astrolabe::ResolveContextTool).into(),
             (&astrolabe::GetLanguagesTool).into(),
             (&astrolabe::FindReferencesTool).into(),
             (&astrolabe::GotoDefinitionTool).into(),
@@ -545,9 +546,9 @@ fn grok_build_plan_no_subagents_toolset() -> ToolServerConfig {
 fn grok_build_ask_user_toolset() -> ToolServerConfig {
     ToolServerConfig {
         tools: vec![
+            (&astrolabe::ResolveContextTool).into(),
             (&astrolabe::SearchCodeTool).into(),
             (&astrolabe::FindSymbolTool).into(),
-            (&astrolabe::ResolveContextTool).into(),
             (&astrolabe::GetLanguagesTool).into(),
             (&astrolabe::FindReferencesTool).into(),
             (&astrolabe::GotoDefinitionTool).into(),
@@ -1748,13 +1749,14 @@ mod tests {
         assert!(explore.tools.len() < plan.tools.len());
         assert!(plan.tools.len() < gb.tools.len());
     }
-    /// `by_kind` resolution is first-come, so the index tools must be listed
-    /// ahead of `grep` for `${{ tools.by_kind.search }}` to name `search_code`.
-    /// The read-only presets must carry them too, or subagents keep searching
-    /// with `grep` while the main agent uses the index.
+    /// `by_kind` resolution is first-come, so `search_code` must stay ahead of
+    /// `grep` (content-search templates); `resolve_context` leads the index
+    /// block for task-start routing. The read-only presets must carry the
+    /// index tools too, or subagents keep searching with `grep`.
     #[test]
     fn index_tools_lead_the_search_slot_and_ship_in_read_only_presets() {
         let index_tools = [
+            ToolConfig::from(&astrolabe::ResolveContextTool).id,
             ToolConfig::from(&astrolabe::SearchCodeTool).id,
             ToolConfig::from(&astrolabe::FindSymbolTool).id,
             ToolConfig::from(&astrolabe::ResolveContextTool).id,
@@ -1796,12 +1798,13 @@ mod tests {
                 "{label}: search_code must precede grep"
             );
         }
-        // The concise preset keeps only the search tool; it still has to hold
+        // The concise preset keeps only `search_code`; it still has to hold
         // the Search slot ahead of `grep`.
         let concise = toolset_for_preset("grok-build-concise").unwrap();
-        assert!(position(&concise, &index_tools[0]).is_some());
+        let concise_search = ToolConfig::from(&astrolabe::SearchCodeTool).id;
+        assert!(position(&concise, &concise_search).is_some());
         assert!(
-            position(&concise, &index_tools[0]).unwrap() < position(&concise, &grep_id).unwrap()
+            position(&concise, &concise_search).unwrap() < position(&concise, &grep_id).unwrap()
         );
     }
     /// `by_kind.lsp` is first-come; the generic `lsp` tool owns that slot and
