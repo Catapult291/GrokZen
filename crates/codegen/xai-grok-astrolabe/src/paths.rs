@@ -276,16 +276,26 @@ impl DenyPolicy {
         self.set.is_none()
     }
 
-    /// Deny globs in the shape the engine's `exclude` list accepts, so a
-    /// search never reads a denied file at all.
+    /// Deny globs in the shape the engine's scan `extra_excludes` accepts, so
+    /// a build never reads a denied file at all. The list is exactly the
+    /// variants [`DenyPolicy`] matches with (see `deny_variants`), sorted and
+    /// deduplicated: build-time exclusion and query-time filtering agree, and
+    /// two sessions with equal policies hash to the same engine key.
     pub fn engine_excludes(&self) -> Vec<String> {
-        let mut out = Vec::with_capacity(self.patterns.len());
-        for raw in &self.patterns {
-            let base = raw.trim_start_matches("./").trim_end_matches('/');
-            if !base.is_empty() {
-                out.push(base.to_string());
-            }
-        }
+        let mut out: Vec<String> = self
+            .patterns
+            .iter()
+            .flat_map(|raw| {
+                let base = raw.trim_start_matches("./").trim_end_matches('/');
+                if base.is_empty() {
+                    Vec::new()
+                } else {
+                    deny_variants(base)
+                }
+            })
+            .collect();
+        out.sort();
+        out.dedup();
         out
     }
 
@@ -623,6 +633,29 @@ mod tests {
         assert!(!deny.is_empty());
         assert!(deny.is_denied("a/b/key.pem"));
         assert!(!deny.is_denied("a/b/key.pem.md"));
+    }
+
+    #[test]
+    fn engine_excludes_are_the_query_variants_sorted_and_deduped() {
+        let deny = DenyPolicy::new(&[".env".to_string(), "./secrets/".to_string()]);
+        let excludes = deny.engine_excludes();
+        // Same variants the query-time GlobSet matches with, so build-time
+        // exclusion and query-time filtering admit/keep the same set.
+        assert_eq!(excludes, vec!["**/.env", "**/.env/**", "**/secrets", "**/secrets/**", ".env", "secrets"]);
+        // Equal policies in a different input order share one engine key.
+        let other = DenyPolicy::new(&["./secrets/".to_string(), ".env".to_string()]);
+        assert_eq!(excludes, other.engine_excludes());
+    }
+
+    #[test]
+    fn engine_excludes_drop_patterns_that_cannot_match_the_root() {
+        // Absolute patterns outside the root never enter `patterns`, so the
+        // exclude list — and the engine key — stays empty.
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let policy =
+            DenyPolicy::for_root(tmp.path(), &[outside.path().join("shadow").display().to_string()]);
+        assert!(policy.engine_excludes().is_empty());
     }
 
     #[test]

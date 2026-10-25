@@ -213,14 +213,15 @@ async fn call_env(
     })
 }
 
-/// The shared engine for this session's root and ignore policy.
+/// The shared engine for this session's root, ignore policy and deny set.
 async fn open_engine(
     env: &CallEnv,
 ) -> Result<Arc<xai_grok_astrolabe::AstrolabeEngine>, xai_tool_runtime::ToolError> {
     let root = env.paths.root().to_path_buf();
     let cfg = xai_grok_astrolabe::process_config().clone();
     let respect_gitignore = env.respect_gitignore;
-    blocking(move || engine_for_session(&root, &cfg, respect_gitignore))
+    let deny = env.deny.clone();
+    blocking(move || engine_for_session(&root, &cfg, respect_gitignore, &deny))
         .await?
         .map_err(engine_error)
 }

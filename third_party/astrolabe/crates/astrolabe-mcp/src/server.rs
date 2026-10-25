@@ -1964,12 +1964,17 @@ impl AstrolabeServer {
     /// creates `<root>/.astrolabe/`: the index lives in memory only.
     #[cfg(feature = "native")]
     pub fn new_native_with_options(root: PathBuf, watch: bool, lsp: bool, persist: bool) -> Self {
-        Self::new_native_full(root, watch, lsp, persist, true)
+        Self::new_native_full(root, watch, lsp, persist, true, Vec::new())
     }
 
-    /// [`Self::new_native_with_options`] plus the `.gitignore` policy.
-    /// `respect_gitignore = false` indexes and searches ignored files, so the
-    /// tool sees the same set a host `grep` configured to ignore nothing does.
+    /// [`Self::new_native_with_options`] plus the `.gitignore` policy and the
+    /// host's deny/exclude globs. `respect_gitignore = false` indexes and
+    /// searches ignored files, so the tool sees the same set a host `grep`
+    /// configured to ignore nothing does. `extra_excludes` are applied as
+    /// scan/watcher/incremental excludes: matching files are never parsed
+    /// into the index (they stay invisible to search and symbols), which is
+    /// the build-time half of the host's `DenyReadGlobs` policy — queries
+    /// filter a second time on the way out.
     #[cfg(feature = "native")]
     pub fn new_native_full(
         root: PathBuf,
@@ -1977,6 +1982,7 @@ impl AstrolabeServer {
         lsp: bool,
         persist: bool,
         respect_gitignore: bool,
+        extra_excludes: Vec<String>,
     ) -> Self {
         let mut knobs = McpKnobs::from_env();
         if !watch {
@@ -1985,6 +1991,7 @@ impl AstrolabeServer {
         knobs.lsp_enabled = lsp;
         knobs.persist_enabled = persist && knobs.persist_enabled;
         knobs.respect_gitignore = respect_gitignore;
+        knobs.extra_excludes = extra_excludes;
         let mut server = Self::assemble(
             root,
             cache_budget_from_env(),
