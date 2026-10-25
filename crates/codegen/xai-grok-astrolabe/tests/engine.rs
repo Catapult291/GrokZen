@@ -13,7 +13,7 @@ use xai_grok_astrolabe::config::IndexRoot;
 use xai_grok_astrolabe::{
     AstrolabeConfig, DenyPolicy, DiagnosticsRequest, EngineError, FindReferencesRequest,
     FindSymbolRequest, GotoDefinitionRequest, IndexPersist, LanguagesRequest, PathMap,
-    ResolveContextRequest, SearchCodeRequest, engine_for, root_for_cwd,
+    ResolveContextRequest, SearchCodeRequest, engine_for, engine_for_session, root_for_cwd,
 };
 
 struct Fixture {
@@ -540,6 +540,60 @@ fn roots_above_max_files_are_refused_before_indexing() {
         matches!(err, EngineError::TooManyFiles { limit: 2, .. }),
         "{err}"
     );
+}
+
+/// Scale check: `count_files` early-stops at `max_files + 1`, so the
+/// `TooManyFiles` refusal stays fast even on a fifty-thousand-file tree.
+/// Marked `#[ignore]`: creating 50k files is slow; run on demand with
+/// `cargo test -p xai-grok-astrolabe --test engine -- --ignored count_files`.
+#[test]
+#[ignore = "creates 50k files; run with -- --ignored"]
+fn count_files_on_a_50k_tree_is_fast() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("big");
+    // 100 directories × 500 files = 50 000 regular files.
+    for d in 0..100 {
+        let dir = root.join(format!("d{d:03}"));
+        fs::create_dir_all(&dir).unwrap();
+        for f in 0..500 {
+            fs::write(dir.join(format!("f{f:03}.rs")), "// pad\n").unwrap();
+        }
+    }
+
+    let cfg = AstrolabeConfig {
+        index_root: IndexRoot::Cwd,
+        watch: false,
+        max_files: 20_000,
+        ..AstrolabeConfig::default()
+    };
+
+    // respect_gitignore = true: the default `.gitignore` chain is active but
+    // the tree has none, so the count is the full 50 000 (early-stopped at
+    // the cap).
+    let start = std::time::Instant::now();
+    let err = engine_for(&root, &cfg).unwrap_err();
+    let elapsed = start.elapsed();
+    assert!(
+        matches!(err, EngineError::TooManyFiles { limit: 20_000, .. }),
+        "{err}"
+    );
+    assert!(elapsed < Duration::from_secs(2), "refusal took {elapsed:?}");
+    eprintln!("respect_gitignore=true  refusal: {elapsed:?}");
+
+    // respect_gitignore = false: default excludes (`.git`, `node_modules`,
+    // …) still prune via `ExcludeMatcher`; gitignored files that are *not*
+    // in a default-excluded directory would be counted, but the early-stop
+    // at the cap keeps the walk bounded either way.
+    let start = std::time::Instant::now();
+    let err =
+        engine_for_session(&root, &cfg, false, &DenyPolicy::default()).unwrap_err();
+    let elapsed = start.elapsed();
+    assert!(
+        matches!(err, EngineError::TooManyFiles { limit: 20_000, .. }),
+        "{err}"
+    );
+    assert!(elapsed < Duration::from_secs(2), "refusal took {elapsed:?}");
+    eprintln!("respect_gitignore=false refusal: {elapsed:?}");
 }
 
 #[test]
