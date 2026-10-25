@@ -62,6 +62,9 @@ python scripts/astrolabe-eval/run.py --arms auto,off
 
 # Full sweep with a turn cap: open-ended "where do I start" tasks can loop.
 python scripts/astrolabe-eval/run.py --arms auto,off --max-turns 10
+
+# Repeat each task N times and majority-vote the first tool (default N=1).
+python scripts/astrolabe-eval/run.py --arms auto,off --repeat 3
 ```
 
 Open-ended tasks hold their own limits. `[category_limits.<category>]` in
@@ -113,6 +116,24 @@ the index or `git status`.
   inflating the miss list.
 - The summary header records a short hash of `tasks.toml`; two sweeps with the
   same hash are directly comparable.
+
+### `--repeat N` and majority votes
+
+When `--repeat N` is greater than 1 the runner launches N independent samples
+of each `(arm, task)` and aggregates them before writing the summary:
+
+- **routing** (`first_tool` / `strict` / `acceptable` / `status`) uses the
+  majority first tool among *completed* samples only;
+- exact ties prefer `expect`, then the first `accept` entry, then
+  lexicographic order;
+- when every sample is unfinished the row keeps the most common incomplete
+  status;
+- cost metrics (calls / turns / tokens / seconds) stay the arithmetic mean
+  over all samples;
+- the summary header records `repeat: N`, and a **Majority votes** section
+  lists the vote breakdown per task so a 2–1 split stays visible;
+- the `results-*.jsonl` file still contains every raw sample (with a
+  `sample` field) for later re-aggregation.
 
 Tasks are prompts, not fixtures: they run against this repository, so symbol
 names in `tasks.toml` must be updated when the code they mention moves.
