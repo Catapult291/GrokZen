@@ -115,6 +115,23 @@ pub struct ResolveContextRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct LanguagesRequest {}
 
+/// One host language-server registration from the session's `lsp.json`
+/// (or plugins), with whether a live client is currently running.
+///
+/// Passed from the tool layer into `get_languages` so the LSP column
+/// reflects the host pool when `lsp_fallback = grok`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostLspServer {
+    /// Config key in `lsp.json` (e.g. `rust-analyzer`).
+    pub name: String,
+    /// Command that starts (or is running) this server.
+    pub command: String,
+    /// Language ids from the extension map values (e.g. `rust`, `typescript`).
+    pub languages: Vec<String>,
+    /// `true` when the host manager holds a live client for this server.
+    pub running: bool,
+}
+
 /// `find_references`: precise references, callers and rename impact.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct FindReferencesRequest {

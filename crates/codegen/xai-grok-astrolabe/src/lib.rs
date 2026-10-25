@@ -28,6 +28,6 @@ pub use engine::{
 pub use paths::{DenyPolicy, PathError, PathMap};
 pub use types::{
     Anchor, CancelHandle, DiagnosticsRequest, EngineMeta, EngineOutput, FindReferencesRequest,
-    FindSymbolRequest, GotoDefinitionRequest, LanguagesRequest, LspDiagnostic, LspLocation,
-    LspSeverity, PreciseOutcome, ResolveContextRequest, SearchCodeRequest,
+    FindSymbolRequest, GotoDefinitionRequest, HostLspServer, LanguagesRequest, LspDiagnostic,
+    LspLocation, LspSeverity, PreciseOutcome, ResolveContextRequest, SearchCodeRequest,
 };

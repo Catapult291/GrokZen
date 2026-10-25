@@ -353,16 +353,29 @@ impl AstrolabeServer {
         split(self.get_diagnostics(Parameters(params)))
     }
 
-    /// In-process `get_languages` with the default budget.
+    /// In-process `get_languages` with the default budget and no host LSP
+    /// override (PATH-probe status only).
     pub fn native_get_languages(&self) -> NativeOutput {
-        self.native_get_languages_with_budget(DEFAULT_BUDGET)
+        self.native_get_languages_with_budget(DEFAULT_BUDGET, Vec::new())
     }
 
-    /// In-process `get_languages` with an explicit token budget.
-    pub fn native_get_languages_with_budget(&self, budget_tokens: usize) -> NativeOutput {
+    /// In-process `get_languages` with an explicit token budget and the
+    /// host's registered language servers (from `lsp.json` / plugins). When
+    /// `host_lsp` is non-empty the LSP column reports that pool instead of
+    /// Astrolabe's PATH probe.
+    pub fn native_get_languages_with_budget(
+        &self,
+        budget_tokens: usize,
+        host_lsp: Vec<crate::server::HostLspServer>,
+    ) -> NativeOutput {
         split(self.get_languages(Parameters(BudgetOnly {
             root: None,
             budget_tokens: budget(budget_tokens),
+            host_lsp: if host_lsp.is_empty() {
+                None
+            } else {
+                Some(host_lsp)
+            },
         })))
     }
 

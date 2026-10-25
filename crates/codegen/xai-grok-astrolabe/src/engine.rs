@@ -347,19 +347,32 @@ impl AstrolabeEngine {
     }
 
     /// `get_languages`. Blocking; the answer only needs the scan report.
+    /// `host_lsp` is the session's registered language servers (from
+    /// `lsp.json`); when non-empty the LSP column reports that pool
+    /// instead of Astrolabe's PATH probe.
     pub fn get_languages(
         &self,
         paths: &PathMap,
         deny: &DenyPolicy,
         _req: LanguagesRequest,
+        host_lsp: &[crate::types::HostLspServer],
     ) -> Result<EngineOutput, EngineError> {
         let status = self.await_ready();
         if let Some(err) = self.failed_status(&status) {
             return Err(err);
         }
+        let host: Vec<astrolabe_mcp::HostLspServer> = host_lsp
+            .iter()
+            .map(|s| astrolabe_mcp::HostLspServer {
+                name: s.name.clone(),
+                command: s.command.clone(),
+                languages: s.languages.clone(),
+                running: s.running,
+            })
+            .collect();
         let out = self
             .server
-            .native_get_languages_with_budget(self.cfg.budget_tokens);
+            .native_get_languages_with_budget(self.cfg.budget_tokens, host);
         Ok(self.finish(paths, deny, out))
     }
 

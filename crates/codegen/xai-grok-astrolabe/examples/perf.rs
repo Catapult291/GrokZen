@@ -100,7 +100,7 @@ fn main() {
     println!(
         "languages={}",
         engine
-            .get_languages(&map, &deny, Default::default())
+            .get_languages(&map, &deny, Default::default(), &[])
             .map(|out| out.text.lines().next().unwrap_or_default().to_string())
             .unwrap_or_default()
     );

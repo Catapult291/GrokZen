@@ -21,8 +21,9 @@ pub use dispatch::LspBackendAdapter;
 pub use manager::{DiagnosticsSummary, LspManager, drain_lsp_diagnostics};
 pub use restart::restart_monitor;
 pub use types::{
-    DiagnosticEntry, DiagnosticSeverityLevel, DiskChangeKind, FileDiagnosticEntry, LspBackend,
-    LspConfig, LspOperation, LspToolInput, LspToolResult, PreciseDiagnostic, PreciseLocation,
+    DiagnosticEntry, DiagnosticSeverityLevel, DiskChangeKind, FileDiagnosticEntry,
+    HostLspServerStatus, LspBackend, LspConfig, LspOperation, LspToolInput, LspToolResult,
+    PreciseDiagnostic, PreciseLocation,
 };
 
 // ── Shared types used across submodules ─────────────────────────────────

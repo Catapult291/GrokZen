@@ -48,7 +48,7 @@ pub use root::{
     child_git_repos, count_root_files, find_project_root, is_cwd_sentinel, resolve_index_root,
     resolve_root, ResolvedRoot, DEFAULT_MAX_ROOT_FILES,
 };
-pub use server::{AstrolabeServer, StartupFailedServer};
+pub use server::{AstrolabeServer, HostLspServer, StartupFailedServer};
 
 pub const TOOL_CATALOG_TTL_MS: u64 = 86_400_000;
 /// Catalog tools: `resolve_context`, `search_code`, `find_symbol`,

@@ -248,7 +248,12 @@ fn get_languages_reports_the_indexed_languages() {
     let map = fixture.map(&fixture.root);
 
     let out = engine
-        .get_languages(&map, &DenyPolicy::default(), LanguagesRequest::default())
+        .get_languages(
+            &map,
+            &DenyPolicy::default(),
+            LanguagesRequest::default(),
+            &[],
+        )
         .unwrap();
 
     assert!(out.text.contains("rust"), "{}", out.text);
