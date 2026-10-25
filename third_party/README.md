@@ -23,6 +23,7 @@ when re-vendoring.
 | [`ordered_hashmap`](./ordered_hashmap/) | 0.0.3 | Apache-2.0 | [r3alst/ordered-hashmap](https://github.com/r3alst/ordered-hashmap) | [`LICENCE`](./ordered_hashmap/LICENCE) |
 | [`nfsserve`](./nfsserve/) | 0.11.0 | BSD-3-Clause | [huggingface/nfsserve](https://github.com/huggingface/nfsserve) | [`LICENSE`](./nfsserve/LICENSE) |
 | [`fuser`](./fuser/) | 0.18.0 | MIT | [cberner/fuser](https://github.com/cberner/fuser) | [`LICENSE.md`](./fuser/LICENSE.md) |
+| [`astrolabe`](./astrolabe/) | 0.17.0 | MIT OR Apache-2.0 | [wojiushirencai/Astrolabe](https://github.com/wojiushirencai/Astrolabe) | [`LICENSE-APACHE`](./astrolabe/LICENSE-APACHE), [`LICENSE-MIT`](./astrolabe/LICENSE-MIT) |
 
 Mermaid layout stack:
 

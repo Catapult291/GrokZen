@@ -1,0 +1,6 @@
+# Cursor drops structured-only tool responses, but Astrolabe always sends
+# non-empty content[0] text, so structured output is safe and useful here.
+name: cursor
+notes: Cursor needs content[0] text (always sent). Structured output is on and includes full text plus root.
+structured_tool_output: true
+excluded_tools: []

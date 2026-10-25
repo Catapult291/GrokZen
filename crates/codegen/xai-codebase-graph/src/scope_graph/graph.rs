@@ -518,7 +518,7 @@ pub fn scope_graph_from_definitions_query(
         let mut alias_original: Option<String> = None;
         let mut alias_name: Option<String> = None;
 
-        for capture in match_.captures {
+        for capture in match_.captures() {
             let range = Range::for_tree_node(&capture.node);
             let Some(capture_name) = query.capture_names().get(capture.index as usize) else {
                 continue;
@@ -613,7 +613,7 @@ pub fn extract_symbols_fast(
         let mut alias_original: Option<&[u8]> = None;
         let mut alias_name: Option<&[u8]> = None;
 
-        for capture in match_.captures {
+        for capture in match_.captures() {
             let idx = capture.index as usize;
             let node = capture.node;
             let byte_range = node.byte_range();

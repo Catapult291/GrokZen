@@ -1,0 +1,45 @@
+[package]
+name = "astrolabe-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+description = "MCP server for code search and navigation (search_code, find_symbol, find_references, goto_definition) for AI coding agents."
+documentation = "https://docs.rs/astrolabe-mcp"
+keywords = ["mcp", "code-search", "tree-sitter", "lsp", "ai-agent"]
+categories = ["development-tools", "command-line-utilities", "parsing"]
+
+[[bin]]
+name = "astrolabe"
+path = "src/main.rs"
+
+[features]
+# In-process facade (`src/native.rs`): lets a host link the tool layer and call
+# it as plain Rust instead of speaking MCP. Off by default; the bin is unchanged.
+native = []
+
+[dependencies]
+# `version` is required alongside `path` for `cargo publish`: crates.io cannot
+# resolve a path dependency, so it needs a registry version to fall back on.
+# Publish order is therefore astrolabe-core first, then this crate.
+astrolabe-core = { path = "../astrolabe-core", version = "0.17.0" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rmcp = { workspace = true, features = ["server", "transport-io", "schemars"] }
+schemars.workspace = true
+regex.workspace = true
+rayon.workspace = true
+globset.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std", "signal"] }
+
+# malloc_trim after index builds (src/alloc.rs). glibc only; already in the
+# lockfile through astrolabe-core.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc.workspace = true

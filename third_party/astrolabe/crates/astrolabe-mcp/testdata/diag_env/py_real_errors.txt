@@ -1,0 +1,2 @@
+@a.py:5 [error reportMissingImports] Import "flask" could not be resolved
+@a.py:9 [error reportAttributeAccessIssue] Cannot access attribute "foo" for class "Bar"

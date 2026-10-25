@@ -1,4 +1,6 @@
 /target
+# 自带上游 workspace 的 vendor 目录，`/target` 锚定在仓库根管不到
+/third_party/astrolabe/target/
 **/*.rs.bk
 .DS_Store
 

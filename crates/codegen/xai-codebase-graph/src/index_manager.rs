@@ -1415,7 +1415,7 @@ fn intern_symbols_directly(
         let mut alias_original: Option<&[u8]> = None;
         let mut alias_name: Option<&[u8]> = None;
 
-        for capture in m.captures {
+        for capture in m.captures() {
             let idx = capture.index as usize;
             let node = capture.node;
             let byte_range = node.byte_range();

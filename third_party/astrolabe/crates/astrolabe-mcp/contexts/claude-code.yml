@@ -1,0 +1,6 @@
+# Claude Code substitutes structuredContent for content[0].text instead of
+# unpacking it. Matching Serena's claude-code context: keep structured off.
+name: claude-code
+notes: Claude Code replaces text with structuredContent; never send a metadata-only stub.
+structured_tool_output: false
+excluded_tools: []

@@ -1,0 +1,6 @@
+# Product default when no client is named. Structured output stays off so a
+# Claude Code-shaped client (the common MCP config) cannot hide hits.
+name: default
+notes: Unspecified client. structured_tool_output is off; always send content[0] text.
+structured_tool_output: false
+excluded_tools: []

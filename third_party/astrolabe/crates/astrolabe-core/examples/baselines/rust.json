@@ -1,0 +1,162 @@
+{
+  "call_edges": false,
+  "git_dirty": true,
+  "git_head": "a66eef580d450bc8e16195d623fee6dba23bb709",
+  "host": {
+    "arch": "aarch64",
+    "cpu": "Apple M4",
+    "cpus": 10,
+    "os": "macos"
+  },
+  "jitter": {
+    "elapsed_ms_pct": 14.169531713100177,
+    "peak_rss_pct": 3.1684698608964452
+  },
+  "max": {
+    "elapsed_ms": 46.238,
+    "elapsed_us": 46238,
+    "peak_rss_bytes": 21381120
+  },
+  "measured_unix": 1789119040,
+  "median": {
+    "call_edges": 0,
+    "elapsed_ms": 42.175,
+    "elapsed_us": 42175,
+    "files_parsed": 110,
+    "files_scanned": 229,
+    "held_rss_bytes": 21200896,
+    "import_edges": 157,
+    "parse_failures": 0,
+    "peak_rss_bytes": 21200896,
+    "symbols": 4728,
+    "unresolved_imports": 0
+  },
+  "min": {
+    "elapsed_ms": 40.262,
+    "elapsed_us": 40262,
+    "peak_rss_bytes": 20709376
+  },
+  "mode": "aggregate",
+  "name": "rust",
+  "regressions": [],
+  "repo": "corpus/rust",
+  "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+  "runs": 7,
+  "samples": [
+    {
+      "call_edges": 0,
+      "elapsed_ms": 42.125,
+      "elapsed_us": 42125,
+      "files_parsed": 110,
+      "files_scanned": 229,
+      "held_rss_bytes": 21299200,
+      "import_edges": 157,
+      "parse_failures": 0,
+      "peak_rss_bytes": 21299200,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 21299200,
+      "symbols": 4728,
+      "unresolved_imports": 0
+    },
+    {
+      "call_edges": 0,
+      "elapsed_ms": 40.262,
+      "elapsed_us": 40262,
+      "files_parsed": 110,
+      "files_scanned": 229,
+      "held_rss_bytes": 20889600,
+      "import_edges": 157,
+      "parse_failures": 0,
+      "peak_rss_bytes": 20889600,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 20889600,
+      "symbols": 4728,
+      "unresolved_imports": 0
+    },
+    {
+      "call_edges": 0,
+      "elapsed_ms": 41.055,
+      "elapsed_us": 41055,
+      "files_parsed": 110,
+      "files_scanned": 229,
+      "held_rss_bytes": 21364736,
+      "import_edges": 157,
+      "parse_failures": 0,
+      "peak_rss_bytes": 21364736,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 21364736,
+      "symbols": 4728,
+      "unresolved_imports": 0
+    },
+    {
+      "call_edges": 0,
+      "elapsed_ms": 42.175,
+      "elapsed_us": 42175,
+      "files_parsed": 110,
+      "files_scanned": 229,
+      "held_rss_bytes": 21200896,
+      "import_edges": 157,
+      "parse_failures": 0,
+      "peak_rss_bytes": 21200896,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 21200896,
+      "symbols": 4728,
+      "unresolved_imports": 0
+    },
+    {
+      "call_edges": 0,
+      "elapsed_ms": 42.295,
+      "elapsed_us": 42295,
+      "files_parsed": 110,
+      "files_scanned": 229,
+      "held_rss_bytes": 20709376,
+      "import_edges": 157,
+      "parse_failures": 0,
+      "peak_rss_bytes": 20709376,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 20709376,
+      "symbols": 4728,
+      "unresolved_imports": 0
+    },
+    {
+      "call_edges": 0,
+      "elapsed_ms": 43.171,
+      "elapsed_us": 43171,
+      "files_parsed": 110,
+      "files_scanned": 229,
+      "held_rss_bytes": 20742144,
+      "import_edges": 157,
+      "parse_failures": 0,
+      "peak_rss_bytes": 20742144,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 20742144,
+      "symbols": 4728,
+      "unresolved_imports": 0
+    },
+    {
+      "call_edges": 0,
+      "elapsed_ms": 46.238,
+      "elapsed_us": 46238,
+      "files_parsed": 110,
+      "files_scanned": 229,
+      "held_rss_bytes": 21381120,
+      "import_edges": 157,
+      "parse_failures": 0,
+      "peak_rss_bytes": 21381120,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 21381120,
+      "symbols": 4728,
+      "unresolved_imports": 0
+    }
+  ],
+  "schema": "astrolabe-bench/v1",
+  "spawn": true,
+  "thresholds": {
+    "rss_ratio": 1.2,
+    "time_ratio": 2.5,
+    "rss_floor_bytes": 4194304,
+    "time_floor_ms": 150.0
+  },
+  "verdict": "BASELINE",
+  "warmup": 2
+}

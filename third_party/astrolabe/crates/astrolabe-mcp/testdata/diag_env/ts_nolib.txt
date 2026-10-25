@@ -1,0 +1,7 @@
+@a.ts:1 [error 2318] Cannot find global type 'Array'.
+@a.ts:1 [error 2318] Cannot find global type 'Boolean'.
+@a.ts:1 [error 2318] Cannot find global type 'Function'.
+@a.ts:1 [error 2318] Cannot find global type 'IArguments'.
+@a.ts:1 [error 2318] Cannot find global type 'Number'.
+@a.ts:1 [error 2318] Cannot find global type 'Object'.
+@a.ts:4 [error 2585] 'Promise' only refers to a type, but is being used as a value here. Do you need to change your target library? Try changing the 'lib' compiler option to es2015 or later.

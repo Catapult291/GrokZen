@@ -5,6 +5,11 @@ async-openai = { git = "https://github.com/our-forks/async-openai.git", rev = "9
 
 [workspace]
 resolver = "2"
+# `third_party/astrolabe` is a self-contained upstream workspace (vendored, own
+# `[workspace.package]` inheritance). Keep it out of this workspace: path
+# dependencies are otherwise auto-included as members and would inherit the
+# wrong package fields.
+exclude = ["third_party/astrolabe"]
 members = [
     "crates/build/xai-proto-build",
     "crates/codegen/ptyctl",
@@ -23,6 +28,7 @@ members = [
     "crates/codegen/xai-gix-status",
     "crates/codegen/xai-grok-active-sessions",
     "crates/codegen/xai-grok-agent",
+    "crates/codegen/xai-grok-astrolabe",
     "crates/codegen/xai-grok-announcements",
     "crates/codegen/xai-grok-auth",
     "crates/codegen/xai-grok-bundle",
@@ -305,7 +311,7 @@ tower-http = "0.6"
 tracing = "0.1"
 tracing-opentelemetry = "0.33"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter", "smallvec", "tracing-log", "std", "ansi"] }
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 ts-rs = "12.0"
 tui-scrollbar = "0.2"
 two-face = { version = "0.4", default-features = false, features = ["syntect-onig"] }
@@ -328,6 +334,8 @@ wildmatch = "2"
 windows = { version = "0.61", features = ["Win32_Security", "Win32_Security_Authorization", "Win32_Foundation", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_ProcessStatus"] }
 wiremock = "0.6"
 wl-clipboard-rs = "0.9"
+astrolabe-core = { path = "third_party/astrolabe/crates/astrolabe-core" }
+astrolabe-mcp = { path = "third_party/astrolabe/crates/astrolabe-mcp", features = ["native"] }
 xai-acp-lib = { path = "crates/codegen/xai-acp-lib" }
 xai-agent-lifecycle = { path = "crates/codegen/xai-agent-lifecycle" }
 xai-circuit-breaker = { path = "crates/common/xai-circuit-breaker" }
@@ -339,6 +347,7 @@ xai-fuzzy-file-search = { path = "crates/codegen/xai-fuzzy-file-search" }
 xai-gix-status = { path = "crates/codegen/xai-gix-status" }
 xai-grok-active-sessions = { path = "crates/codegen/xai-grok-active-sessions" }
 xai-grok-agent = { path = "crates/codegen/xai-grok-agent" }
+xai-grok-astrolabe = { path = "crates/codegen/xai-grok-astrolabe" }
 xai-grok-announcements = { path = "crates/codegen/xai-grok-announcements" }
 xai-grok-auth = { path = "crates/codegen/xai-grok-auth" }
 xai-grok-bundle = { path = "crates/codegen/xai-grok-bundle" }

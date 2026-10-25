@@ -1,0 +1,7 @@
+# Codex consumes standard MCP structuredContent when present.
+# OpenAI-compatible tool APIs reject JSON Schema `integer` / null unions;
+# `list_tools` rewrites inputSchema via sanitize_for_openai_tools (see openai_schema.rs).
+name: codex
+notes: Codex-style MCP client. Structured output on; content[0] text always sent. list_tools sanitizes inputSchema for OpenAI tools (integer→number+multipleOf:1, strip null unions).
+structured_tool_output: true
+excluded_tools: []
