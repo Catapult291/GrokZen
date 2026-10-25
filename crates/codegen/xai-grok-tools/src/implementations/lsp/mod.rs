@@ -22,7 +22,7 @@ pub use manager::{DiagnosticsSummary, LspManager, drain_lsp_diagnostics};
 pub use restart::restart_monitor;
 pub use types::{
     DiagnosticEntry, DiagnosticSeverityLevel, DiskChangeKind, FileDiagnosticEntry, LspBackend,
-    LspConfig, LspOperation, LspToolInput, LspToolResult,
+    LspConfig, LspOperation, LspToolInput, LspToolResult, PreciseDiagnostic, PreciseLocation,
 };
 
 // ── Shared types used across submodules ─────────────────────────────────

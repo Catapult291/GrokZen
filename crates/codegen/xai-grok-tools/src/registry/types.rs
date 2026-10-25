@@ -51,8 +51,22 @@ pub const LOCK_PATH_SHAPED_PROPERTIES: &[&str] = &[
 ];
 /// Registered tools with a path-shaped property that deliberately declare no
 /// [`ToolMetadata::lock_path_param`]. Every entry needs a reason; the audit skips these ids.
-pub const LOCK_PATH_UNLOCKED_BY_DESIGN: &[&str] =
-    &["OpenCode:glob", "Pi:find", "Pi:ls", "GrokBuild:memory_get"];
+/// Index queries take a prefix, not a file to serialise: two concurrent
+/// `search_code` calls on the same subtree are safe, so no write lock is needed.
+pub const LOCK_PATH_UNLOCKED_BY_DESIGN: &[&str] = &[
+    "OpenCode:glob",
+    "Pi:find",
+    "Pi:ls",
+    "GrokBuild:memory_get",
+    "GrokBuild:search_code",
+    "GrokBuild:find_symbol",
+    "GrokBuild:resolve_context",
+    // Precise reads: a lock would serialize concurrent index-backed queries
+    // for no benefit; they never write the file they name.
+    "GrokBuild:find_references",
+    "GrokBuild:goto_definition",
+    "GrokBuild:get_diagnostics",
+];
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolConfig {
     pub id: String,
@@ -730,6 +744,16 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::WebSearchTool>();
         b.register_with_params::<grok_build::WebFetchTool, grok_build::web_fetch::WebFetchParams>();
         b.register::<grok_build::LspTool>();
+        b.register_with_params::<
+                crate::implementations::astrolabe::SearchCodeTool,
+                crate::implementations::astrolabe::SearchCodeParams,
+            >();
+        b.register::<crate::implementations::astrolabe::FindSymbolTool>();
+        b.register::<crate::implementations::astrolabe::ResolveContextTool>();
+        b.register::<crate::implementations::astrolabe::GetLanguagesTool>();
+        b.register::<crate::implementations::astrolabe::FindReferencesTool>();
+        b.register::<crate::implementations::astrolabe::GotoDefinitionTool>();
+        b.register::<crate::implementations::astrolabe::GetDiagnosticsTool>();
         b.register::<grok_build::ImageGenTool>();
         b.register::<grok_build::ImageEditTool>();
         b.register::<grok_build::ImageToVideoTool>();
@@ -1033,6 +1057,20 @@ impl ToolRegistryBuilder {
         truncation_config: crate::types::context::TruncationConfig,
         workspace_viewer_ctx: Option<xai_tool_runtime::WorkspaceViewerContext>,
     ) -> Result<FinalizedToolset, Vec<RequirementError>> {
+        // `GROK_ASTROLABE=off` hides the index tools here, before `by_kind` is
+        // resolved, so the prompt never points at a tool that is not listed.
+        let mut tools: Vec<_> = config
+            .tools
+            .into_iter()
+            .filter(|tool| crate::implementations::astrolabe::listing_enabled(&tool.id))
+            .collect();
+        if !xai_grok_astrolabe::process_config().replace_grep {
+            crate::implementations::astrolabe::demote_search_code(&mut tools);
+        }
+        let config = ToolServerConfig {
+            tools,
+            behavior_preset: config.behavior_preset,
+        };
         let errors = self.validate_config(&config);
         if !errors.is_empty() {
             return Err(errors);
@@ -2796,6 +2834,86 @@ mod tests {
             grok.tool_name_for_kind(ToolKind::Execute).as_deref(),
             Some("run_terminal_cmd")
         );
+    }
+    /// `tool_name_for_kind_resolves_execute` companion: the Search slot is
+    /// first-come, so listing `search_code` before `grep` is what makes
+    /// `${{ tools.by_kind.search }}` name the index tool.
+    #[tokio::test]
+    async fn search_slot_follows_registration_order() {
+        use crate::types::tool::ToolKind;
+        let tmp = TempDir::new().unwrap();
+        let finalize = |ids: &[&str]| {
+            ToolRegistryBuilder::new()
+                .finalize(
+                    ToolServerConfig {
+                        tools: ids
+                            .iter()
+                            .map(|id| ToolConfig::from_id((*id).to_string()))
+                            .collect(),
+                        behavior_preset: None,
+                    },
+                    test_session_context(&tmp),
+                )
+                .expect("toolset should finalize")
+        };
+        let index_first = finalize(&["GrokBuild:search_code", "GrokBuild:grep"]);
+        assert_eq!(
+            index_first.tool_name_for_kind(ToolKind::Search).as_deref(),
+            Some("search_code")
+        );
+        let grep_first = finalize(&["GrokBuild:grep", "GrokBuild:search_code"]);
+        assert_eq!(
+            grep_first.tool_name_for_kind(ToolKind::Search).as_deref(),
+            Some("grep")
+        );
+    }
+    /// The four index tools must finalize into model-visible definitions with a
+    /// rendered description and a schema whose required field is `query`.
+    #[tokio::test]
+    async fn index_tools_finalize_into_model_definitions() {
+        let tmp = TempDir::new().unwrap();
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(
+                ToolServerConfig {
+                    tools: vec![
+                        ToolConfig::from(&crate::implementations::astrolabe::SearchCodeTool),
+                        ToolConfig::from(&crate::implementations::astrolabe::FindSymbolTool),
+                        ToolConfig::from(&crate::implementations::astrolabe::ResolveContextTool),
+                        ToolConfig::from(&crate::implementations::astrolabe::GetLanguagesTool),
+                        ToolConfig::from(&crate::implementations::grok_build::GrepTool),
+                    ],
+                    behavior_preset: None,
+                },
+                test_session_context(&tmp),
+            )
+            .expect("index toolset should finalize");
+        let definitions = toolset.tool_definitions();
+        let names: Vec<&str> = definitions
+            .iter()
+            .map(|definition| definition.function.name.as_str())
+            .collect();
+        assert!(names.contains(&"search_code"), "{names:?}");
+        assert!(names.contains(&"find_symbol"), "{names:?}");
+        assert!(names.contains(&"resolve_context"), "{names:?}");
+        assert!(names.contains(&"get_languages"), "{names:?}");
+        let definition = |name: &str| {
+            definitions
+                .iter()
+                .find(|definition| definition.function.name == name)
+                .expect("definition")
+        };
+        let search = definition("search_code");
+        let description = search.function.description.clone().unwrap_or_default();
+        assert!(!description.contains("${{"), "{description}");
+        assert!(description.contains("workspace"), "{description}");
+        let schema = serde_json::to_value(&search.function.parameters).unwrap();
+        assert_eq!(schema["required"], serde_json::json!(["query"]));
+        assert!(schema["properties"].get("glob").is_some(), "{schema}");
+        // `get_languages` takes no arguments.
+        let languages = definition("get_languages");
+        let schema = serde_json::to_value(&languages.function.parameters).unwrap();
+        assert_eq!(schema["properties"], serde_json::json!({}), "{schema}");
+        assert_eq!(schema["required"], serde_json::json!([]), "{schema}");
     }
     /// `merge_tool_meta` (the harness emission path) must stamp `x.ai/tool` for a
     /// known tool while preserving existing markers, and leave meta untouched for
