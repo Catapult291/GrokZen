@@ -45,6 +45,25 @@ python scripts/astrolabe-eval/run.py --arms auto,off
 python scripts/astrolabe-eval/run.py --arms auto,off --max-turns 10
 ```
 
+Open-ended tasks hold their own limits. `[category_limits.<category>]` in
+`tasks.toml` sets `max_turns` / `timeout_s` for a whole category, and a task's
+own key wins over it:
+
+```toml
+[category_limits.wide_count]
+max_turns = 20
+timeout_s = 600
+```
+
+Without these the global `--max-turns 10` cuts exploration tasks mid-answer,
+and the summary cannot tell a routing miss from an unfinished run. The
+`task_start`, `wide_count`, `outside_workspace`, `languages`, `diagnostics` and
+`glob_type` categories carry overrides. `--max-turns` / `--timeout` set the
+default for tasks whose category and task entries are both absent.
+
+Transient session-creation failures (`0x80070005`, `FS_OTHER`) are retried
+`--retries` times (default 1) before being recorded as `error`.
+
 The runner requires a binary with `-p/--print`, `--output-format
 streaming-json` and `--always-approve`; override the path with `--bin`.
 Debug builds are fine for selection/turn/token numbers; wall time is only
@@ -61,9 +80,19 @@ the index or `git status`.
   working but the routing hints are not decisive.
 - **avg calls / turns** — fewer means the result carried enough context.
 - **tokens** — input and output for the whole turn, summed over responses.
-- **Misses** — one line per task with the expected tool and the actual first
-  calls, so a routing regression can be traced to a description or an order
-  change rather than re-read raw transcripts.
+- **status** — each run is `ok` (first tool is `expect`), `alt` (first tool is
+  an accepted fallback), `miss` (routing), `max_turns`, `timeout` or `error`.
+  `strict` and `acceptable` stay comparable with earlier sweeps; the
+  `completed` / `max turns` / `timeout+error` columns keep unfinished runs out
+  of the routing discussion.
+- **Routing misses** — one line per task with the expected tool and the actual
+  first calls, so a routing regression can be traced to a description or an
+  order change rather than re-read raw transcripts.
+- **Incomplete runs** — the `max_turns` / `timeout` / `error` rows with the
+  limits that applied, so a cap that is too tight is visible as such instead of
+  inflating the miss list.
+- The summary header records a short hash of `tasks.toml`; two sweeps with the
+  same hash are directly comparable.
 
 Tasks are prompts, not fixtures: they run against this repository, so symbol
 names in `tasks.toml` must be updated when the code they mention moves.
