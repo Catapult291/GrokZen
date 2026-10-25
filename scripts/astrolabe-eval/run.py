@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -47,6 +48,10 @@ REPO = HERE.parent.parent
 LIMIT_KEYS = ("max_turns", "timeout_s")
 MAX_TURNS_MARKERS = ("max turns reached", "max_turns_reached")
 IO_DENIED_MARKERS = ("0x80070005", "access is denied", "拒绝访问")
+# `hover_symbol` expects `lsp` in the tool table. Without a non-empty
+# lsp.json plus GROK_LSP_TOOLS the tool is not registered, so both arms
+# score 0/3 for environment reasons rather than routing.
+LSP_CATEGORIES = frozenset({"hover_symbol"})
 
 
 def load_tasks(path: Path) -> list[dict]:
@@ -119,6 +124,52 @@ def parse_stream(lines: list[str]) -> dict:
         "stop_reason": end.get("stopReason"),
         "errors": errors,
     }
+
+
+def find_rust_analyzer() -> str | None:
+    """Locate rust-analyzer for the optional LSP fixture."""
+    for name in ("rust-analyzer", "rust-analyzer.exe"):
+        found = shutil.which(name)
+        if found:
+            return found
+    for candidate in (
+        Path.home() / ".cargo" / "bin" / "rust-analyzer.exe",
+        Path.home() / ".cargo" / "bin" / "rust-analyzer",
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def prepare_lsp_fixture(home: Path, enabled: bool) -> str | None:
+    """Write an optional lsp.json into the isolated home.
+
+    Preference order: the host's real ``~/.grok/lsp.json``, then a
+    rust-analyzer fixture when the binary is on PATH or in ``~/.cargo/bin``.
+    Returns the server description for the summary, or None when no fixture
+    could be prepared (``hover_symbol`` then stays environment-gated).
+    """
+    if not enabled:
+        return None
+    user_lsp = Path.home() / ".grok" / "lsp.json"
+    if user_lsp.is_file():
+        (home / "lsp.json").write_bytes(user_lsp.read_bytes())
+        return f"copied {user_lsp}"
+    ra = find_rust_analyzer()
+    if not ra:
+        return None
+    fixture = {
+        "rust": {
+            "command": ra,
+            "args": [],
+            "extensionToLanguage": {".rs": "rust"},
+            "startupTimeout": 60000,
+        }
+    }
+    (home / "lsp.json").write_text(
+        json.dumps(fixture, indent=2) + "\n", encoding="utf-8"
+    )
+    return f"rust-analyzer fixture ({ra})"
 
 
 def prepare_isolated_home(out_dir: Path) -> Path:
@@ -238,13 +289,18 @@ def run_one(args: argparse.Namespace, task: dict, arm: str) -> dict:
     env.setdefault("NO_COLOR", "1")
     if args.home_path:
         env["GROK_HOME"] = args.home_path
+    if args.lsp_ready:
+        # Feature flag is independent of the config file; both are required
+        # for the model-visible `lsp` tool.
+        env["GROK_LSP_TOOLS"] = "1"
     max_turns = task.get("max_turns") or args.max_turns
     timeout = task.get("timeout_s") or args.timeout
     if args.dry_run:
         cmd = build_cmd(args, task, max_turns)
+        lsp_note = "GROK_LSP_TOOLS=1" if args.lsp_ready else "GROK_LSP_TOOLS unset"
         print(
             f"[dry-run] ({arm}) cwd={args.repo} GROK_ASTROLABE={env['GROK_ASTROLABE']} "
-            f"timeout={timeout}s"
+            f"{lsp_note} timeout={timeout}s"
         )
         print("          " + " ".join(shlex.quote(part) for part in cmd))
         return {**task, "arm": arm, "dry_run": True}
@@ -265,11 +321,24 @@ def run_one(args: argparse.Namespace, task: dict, arm: str) -> dict:
 
 
 def summarize(
-    results: list[dict], arms: list[str], tasks: dict[str, dict], tasks_hash: str = ""
+    results: list[dict],
+    arms: list[str],
+    tasks: dict[str, dict],
+    tasks_hash: str = "",
+    lsp_ready: str | None = None,
 ) -> str:
     lines = ["# Astrolabe tool-selection eval", ""]
     if tasks_hash:
         lines += [f"tasks: {len(tasks)} (`sha256:{tasks_hash}`)", ""]
+    if lsp_ready:
+        lines += [f"lsp fixture: {lsp_ready} (`GROK_LSP_TOOLS=1`)", ""]
+    else:
+        lines += [
+            "lsp fixture: none — `hover_symbol` is environment-gated "
+            "(no host lsp.json / rust-analyzer); those tasks do not "
+            "participate in the strict two-arm comparison.",
+            "",
+        ]
     header = (
         "| arm | tasks | completed | max turns | timeout+error | strict | acceptable "
         "| avg calls | avg turns | avg input tok | avg output tok | avg total tok | avg seconds |"
@@ -310,7 +379,10 @@ def summarize(
                 if r["arm"] == arm and r["category"] == category and not r.get("dry_run")
             ]
             completed = sum(1 for r in subset if r["status"] in ("ok", "alt", "miss"))
-            cells.append(f"{sum(1 for r in subset if r['strict'])}/{len(subset)} ({completed})")
+            label = f"{sum(1 for r in subset if r['strict'])}/{len(subset)} ({completed})"
+            if category in LSP_CATEGORIES and not lsp_ready:
+                label += " no-lsp"
+            cells.append(label)
         lines.append(f"| {category} | " + " | ".join(cells) + " |")
     lines += ["", "## Routing misses", ""]
     for arm in arms:
@@ -381,9 +453,19 @@ def main() -> int:
         default=True,
         help="run with a GROK_HOME whose config disables the astrolabe MCP server",
     )
+    parser.add_argument(
+        "--lsp-fixture",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "prepare an lsp.json in the isolated home (host lsp.json, else "
+            "rust-analyzer) and set GROK_LSP_TOOLS=1 so hover_symbol can see `lsp`"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     args.home_path = None
+    args.lsp_ready = None
 
     arms = [arm.strip() for arm in args.arms.split(",") if arm.strip()]
     unknown = set(arms) - {"auto", "off"}
@@ -404,8 +486,39 @@ def main() -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    if not args.dry_run and args.isolated_home:
-        args.home_path = str(prepare_isolated_home(out / f"home-{stamp}"))
+    if args.dry_run and args.lsp_fixture and (args.isolated_home or (
+        Path.home() / ".grok" / "lsp.json"
+    ).is_file()):
+        # Probe only: dry-run must not create a home tree.
+        if (Path.home() / ".grok" / "lsp.json").is_file():
+            args.lsp_ready = "host ~/.grok/lsp.json (dry-run)"
+        elif find_rust_analyzer():
+            args.lsp_ready = "rust-analyzer fixture (dry-run)"
+    elif not args.dry_run and args.isolated_home:
+        home_root = out / f"home-{stamp}"
+        args.home_path = str(prepare_isolated_home(home_root))
+        args.lsp_ready = prepare_lsp_fixture(Path(args.home_path), args.lsp_fixture)
+        if args.lsp_fixture and not args.lsp_ready:
+            print(
+                "[lsp] no host ~/.grok/lsp.json and rust-analyzer not found; "
+                "hover_symbol stays environment-gated",
+                flush=True,
+            )
+        elif args.lsp_ready:
+            print(f"[lsp] fixture: {args.lsp_ready}", flush=True)
+    elif not args.dry_run and args.lsp_fixture:
+        # Real home: only enable the feature flag when the host already has
+        # a user lsp.json; the fixture path needs an isolated home to write to.
+        user_lsp = Path.home() / ".grok" / "lsp.json"
+        if user_lsp.is_file():
+            args.lsp_ready = f"host {user_lsp}"
+            print(f"[lsp] using host {user_lsp}", flush=True)
+        else:
+            print(
+                "[lsp] no host ~/.grok/lsp.json and no isolated home; "
+                "hover_symbol stays environment-gated",
+                flush=True,
+            )
 
     results: list[dict] = []
     live = out / "latest.jsonl"
@@ -434,7 +547,9 @@ def main() -> int:
         for result in results:
             handle.write(json.dumps(result, ensure_ascii=False) + "\n")
     tasks_hash = hashlib.sha256(tasks_path.read_bytes()).hexdigest()[:12]
-    summary = summarize(results, arms, tasks_by_id, tasks_hash)
+    summary = summarize(
+        results, arms, tasks_by_id, tasks_hash, lsp_ready=args.lsp_ready
+    )
     report = out / f"summary-{stamp}.md"
     report.write_text(summary, encoding="utf-8")
     print()

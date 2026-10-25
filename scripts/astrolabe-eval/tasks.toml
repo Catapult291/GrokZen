@@ -160,6 +160,10 @@ prompt = "Search across line boundaries: a line containing fn main() followed im
 expect = "grep"
 accept = ["grep", "run_terminal_command"]
 
+# hover_symbol expects the model-visible `lsp` tool. That tool needs a
+# non-empty lsp.json plus GROK_LSP_TOOLS=1; the runner prepares both via the
+# isolated-home fixture (`--lsp-fixture`, default on). Without a fixture these
+# tasks are environment-gated and the summary marks the category `no-lsp`.
 [[task]]
 id = "hover_precise_references"
 category = "hover_symbol"
@@ -285,5 +289,11 @@ timeout_s = 420
 # File-type-filtered searches legitimately take a second pass when the first
 # result is wide; 10 turns cut two of three glob samples mid-answer.
 [category_limits.glob_type]
+max_turns = 16
+timeout_s = 420
+
+# First LSP call can wait on rust-analyzer startup against a large workspace;
+# keep a cap so a hung server cannot eat the whole sweep.
+[category_limits.hover_symbol]
 max_turns = 16
 timeout_s = 420

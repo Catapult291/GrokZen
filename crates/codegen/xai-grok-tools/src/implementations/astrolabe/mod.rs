@@ -31,12 +31,14 @@ use crate::types::resources::{
 use crate::types::tool::{ToolKind, ToolNamespace};
 use crate::types::tool_metadata::{ToolMetadata, resolve_cwd, shared_resources};
 
-pub const SEARCH_CODE_DESC: &str = r#"Exhaustive literal/regex search over the indexed workspace. Each hit comes with its enclosing function or type body, so you often do not need read_file. Wide results are summarized per file, or counted with aggregate; page with offset. Searches respect .gitignore and the workspace read policy. Use grep for paths outside the workspace or for multiline patterns."#;
+pub const SEARCH_CODE_DESC: &str = r#"Exhaustive literal/regex search over the indexed workspace. Hits include the enclosing function or type body, so you often need no read_file. Limit paths/file types with glob. Wide results summarize per file, or count with aggregate; page with offset. Respects .gitignore and the workspace read policy. Use grep outside the workspace or for multiline. Code-map/which-files: resolve_context first."#;
 
 pub const FIND_SYMBOL_DESC: &str = r#"Locate a symbol by name, prefix, `Class/method` path, or file outline; returns its signature and path:line."#;
 
+// Task-start routing: match the eval phrasings ("which files and symbols",
+// "which parts implement", "map of the code") and force the first call.
 pub const RESOLVE_CONTEXT_DESC: &str =
-    r#"Task-ranked map of related files and symbols; use it at the start of an unfamiliar task."#;
+    r#"First when asked which files/symbols are involved, which parts implement X, or a map of the code: task-ranked related files and symbols."#;
 
 pub const GET_LANGUAGES_DESC: &str =
     r#"Indexed languages, file and LOC counts, index gaps, and language-server readiness."#;
@@ -1428,6 +1430,8 @@ mod tests {
 
     #[test]
     fn remote_file_systems_hide_only_the_index_tools() {
+        // Pure filter; the finalize-level path is
+        // `registry::types::remote_fs_finalize_hides_only_the_seven_index_tools`.
         use xai_grok_astrolabe::AstrolabeMode;
         for id in TOOL_IDS {
             assert!(

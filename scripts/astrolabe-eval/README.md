@@ -24,6 +24,25 @@ whose `config.toml` is a copy of the user's with `astrolabe` added to
 `search_tool` → `astrolabe__search_code`, so it would not measure grep/lsp.
 Pass `--no-isolated-home` to run against the real home.
 
+### LSP fixture (`hover_symbol`)
+
+The model-visible `lsp` tool needs two things: a non-empty `lsp.json`
+(user or project) and `GROK_LSP_TOOLS=1` (`[features] lsp_tools`). The
+`hover_symbol` category expects `lsp` as the first call, so without both
+arms score 0/3 for environment reasons, not routing.
+
+With `--isolated-home` (default) the runner prepares a fixture:
+
+1. copy the host `~/.grok/lsp.json` if present;
+2. else write a rust-analyzer fixture when the binary is on `PATH` or in
+   `~/.cargo/bin`.
+
+When a fixture is written the runner sets `GROK_LSP_TOOLS=1` for every run
+and records the fixture in the summary header. Pass `--no-lsp-fixture` to
+skip. Without a fixture the summary marks `hover_symbol` as `no-lsp` and
+states that the category does not participate in the strict two-arm
+comparison.
+
 Optional extra arms for a later pass: `GROK_ASTROLABE_INDEX=1` for
 `mode=index`, and `GROK_ASTROLABE_REPLACE_GREP=0` for the grep-first Search
 slot (`mode` and `replace_grep` are honored by the same environment layer).
@@ -57,9 +76,10 @@ timeout_s = 600
 
 Without these the global `--max-turns 10` cuts exploration tasks mid-answer,
 and the summary cannot tell a routing miss from an unfinished run. The
-`task_start`, `wide_count`, `outside_workspace`, `languages`, `diagnostics` and
-`glob_type` categories carry overrides. `--max-turns` / `--timeout` set the
-default for tasks whose category and task entries are both absent.
+`task_start`, `wide_count`, `outside_workspace`, `languages`, `diagnostics`,
+`glob_type` and `hover_symbol` categories carry overrides. `--max-turns` /
+`--timeout` set the default for tasks whose category and task entries are both
+absent.
 
 Transient session-creation failures (`0x80070005`, `FS_OTHER`) are retried
 `--retries` times (default 1) before being recorded as `error`.

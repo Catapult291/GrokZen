@@ -3,6 +3,11 @@ use agent_client_protocol as acp;
 use std::path::{Path, PathBuf};
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 
+/// Workspace-side ACP filesystem: every read/write goes through the gateway to
+/// the client (or its sandbox). Implements `xai_grok_workspace::file_system::AsyncFileSystem`,
+/// **not** the tools-trait `xai_grok_tools::computer::types::AsyncFileSystem`;
+/// tools finalize never sees this type. The tools-side remote mark lives on
+/// `AcpFsAdapter::is_local`.
 pub struct AcpSessionFs {
     root: PathBuf,
     gateway: GatewaySender,
