@@ -128,7 +128,7 @@ fn includes_model_disabled_and_held_conditional_skills() {
         "/home/user/.grok/skills/conditional/SKILL.md",
     );
     dynamic.paths = Some(vec!["src/**".to_owned()]);
-    assert!(!manager.add_discovered(vec![dynamic]));
+    assert!(manager.add_discovered(vec![dynamic]).is_empty());
 
     for requested in [
         "/wrong/root/manual/SKILL.md",

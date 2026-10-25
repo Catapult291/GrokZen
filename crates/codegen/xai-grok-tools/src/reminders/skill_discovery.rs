@@ -30,14 +30,22 @@ use crate::types::tool::{Reminder, ToolKind};
 /// relying on the model to notice the listing increment (Phase 4 soft path).
 /// Emission is gated by `SystemRemindersEnabled`: the registry skips
 /// `collect_reminders` entirely in concise mode, so this never fires there.
-const ABSORPTION_JUDGMENT_HINT: &str = "New skills were just added to the skill listing. When the current task wraps up or the user is idle, run the absorption judgment (skill-curator skill): for each new skill decide absorb / standalone / noted against the accepted router skills, and record one line in ~/.grok/skill-router-ledger.md.";
+/// The skill names are listed so the model judges only those entries, not the
+/// whole listing (reading an already-listed SKILL.md must not look "new").
+fn absorption_hint_text(names: &[String]) -> String {
+    format!(
+        "New skills were just added to the skill listing: {}. When the current task wraps up or the user is idle, run the absorption judgment (skill-curator skill): for each of those skills decide absorb / standalone / noted against the accepted router skills, and record one line in ~/.grok/skill-router-ledger.md.",
+        names.join(", ")
+    )
+}
 
-/// Hint vector for a discovery that did (not) add skills to the listing.
-fn absorption_hint(any_new: bool) -> Vec<String> {
-    if any_new {
-        vec![ABSORPTION_JUDGMENT_HINT.to_string()]
-    } else {
+/// Hint vector for a discovery that entered N skills into the listing.
+fn absorption_hint(entered: Vec<crate::implementations::skills::types::SkillInfo>) -> Vec<String> {
+    if entered.is_empty() {
         vec![]
+    } else {
+        let names: Vec<String> = entered.iter().map(|s| s.name.clone()).collect();
+        vec![absorption_hint_text(&names)]
     }
 }
 
@@ -292,8 +300,10 @@ mod tests {
             "first discovery must emit exactly the hint: {first:?}"
         );
         assert!(
-            first[0].contains("skill-curator") && first[0].contains("skill-router-ledger"),
-            "hint must point at the absorption protocol: {}",
+            first[0].contains("skill-curator")
+                && first[0].contains("skill-router-ledger")
+                && first[0].contains("newleaf"),
+            "hint must name the new skill and point at the absorption protocol: {}",
             first[0]
         );
 
@@ -303,6 +313,61 @@ mod tests {
         assert!(
             second.is_empty(),
             "already-registered skill must not re-emit the hint: {second:?}"
+        );
+    }
+
+    /// Reading a SKILL.md that is already in the startup listing must not emit
+    /// the absorption hint (Bettbox-Mod 14:54 false positive: stage-recap write
+    /// re-opened existing skills and launched skill-curator).
+    #[tokio::test]
+    async fn startup_listed_skill_md_read_emits_no_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join(".grok").join("skills").join("stage-recap");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let skill_md = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &skill_md,
+            "---\nname: stage-recap\ndescription: Already in the startup listing.\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        let mut mgr = SkillManager::new();
+        mgr.cwd = Some(tmp.path().to_path_buf());
+        mgr.git_root = None;
+        mgr.seed(
+            Some(tmp.path().to_path_buf()),
+            None,
+            vec![crate::implementations::skills::types::SkillInfo {
+                name: "stage-recap".to_string(),
+                description: "Already in the startup listing.".to_string(),
+                path: skill_md.to_string_lossy().to_string(),
+                ..crate::implementations::skills::types::SkillInfo::default()
+            }],
+            None,
+            None,
+            None,
+        );
+        let mut res = Resources::default();
+        res.insert(mgr);
+        let shared: SharedResources = std::sync::Arc::new(tokio::sync::Mutex::new(res));
+
+        let output = ToolOutput::ReadFile(ReadFileOutput::FileContent(FileContent {
+            content: String::new(),
+            content_concise: None,
+            absolute_path: skill_md,
+            offset: None,
+            limit: None,
+            raw_output: String::new(),
+            total_lines: 0,
+            extracted_images: Vec::new(),
+        }));
+
+        let hints = SkillDiscoveryReminder
+            .collect_reminders(shared, &output)
+            .await;
+        assert!(
+            hints.is_empty(),
+            "startup-listed SKILL.md must not fire absorption hint: {hints:?}"
         );
     }
 

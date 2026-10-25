@@ -489,14 +489,29 @@ impl SkillManager {
             .then_some(PendingKind::BaselineAdded(queued));
     }
 
-    /// Add newly discovered skills. Returns true if any entered the listing. Deduplication is by
-    /// canonical filesystem path. `paths:`-gated skills are held back (same gate as `seed`) so
-    /// dynamic discovery can't leak them into the listing before a matching file is touched.
-    pub fn add_discovered(&mut self, skills: Vec<SkillInfo>) -> bool {
-        let mut any_new = false;
+    /// Add newly discovered skills. Returns the skills that entered the listing
+    /// (empty when none did). Deduplication is by canonical filesystem path, and
+    /// paths already present in the startup baseline are ignored: reading a
+    /// startup-listed `SKILL.md` must not re-register it as a mid-session
+    /// discovery (that path fires the skill-curator absorption hint). `paths:`-gated
+    /// skills are held back (same gate as `seed`) so dynamic discovery can't leak
+    /// them into the listing before a matching file is touched.
+    pub fn add_discovered(&mut self, skills: Vec<SkillInfo>) -> Vec<SkillInfo> {
+        let mut entered = Vec::new();
         for skill in skills {
             let canonical = canonical_path(&skill.path);
             if self.discovered_canonical_paths.contains(&canonical) {
+                continue;
+            }
+            // Already in the session-start listing. The reminder's "direct
+            // SKILL.md" path re-parses every skill file the model opens;
+            // without this check, reading e.g. stage-recap/SKILL.md during a
+            // stage-recap wrongly reports "new skills" and launches skill-curator.
+            if self
+                .startup_skills
+                .iter()
+                .any(|s| canonical_path(&s.path) == canonical)
+            {
                 continue;
             }
             if self.conditional.is_pending(&skill) {
@@ -504,13 +519,13 @@ impl SkillManager {
                 continue;
             }
             self.discovered_canonical_paths.insert(canonical);
-            self.discovered_skills.push(skill);
-            any_new = true;
+            self.discovered_skills.push(skill.clone());
+            entered.push(skill);
         }
-        if any_new {
+        if !entered.is_empty() {
             self.has_pending_discovery = true;
         }
-        any_new
+        entered
     }
 
     /// Activate conditional skills whose `paths:` match any touched file, then
@@ -526,7 +541,7 @@ impl SkillManager {
         if newly.is_empty() {
             return false;
         }
-        self.add_discovered(newly)
+        !self.add_discovered(newly).is_empty()
     }
 
     /// Drain the pending reconciliation, computing projections internally and returning only the runtime skills and session
@@ -785,13 +800,13 @@ mod tests {
         mgr.seed(Some(cwd.clone()), None, vec![], None, None, None);
 
         // Dynamic discovery (reminder path) must apply the `paths:` gate too.
-        let any_new = mgr.add_discovered(vec![make_conditional_skill(
+        let entered = mgr.add_discovered(vec![make_conditional_skill(
             "gated",
             "/g/SKILL.md",
             &["src/**"],
         )]);
         assert!(
-            !any_new,
+            entered.is_empty(),
             "gated skill must not enter the listing on discovery"
         );
         assert!(mgr.discovered_skills().is_empty());
@@ -1001,9 +1016,40 @@ mod tests {
         let path = skill_dir.join("SKILL.md").to_str().unwrap().to_string();
 
         let mut tracker = SkillManager::new();
-        assert!(tracker.add_discovered(vec![make_skill("alpha", &path)]));
-        assert!(!tracker.add_discovered(vec![make_skill("alpha", &path)]));
+        assert!(!tracker.add_discovered(vec![make_skill("alpha", &path)]).is_empty());
+        assert!(tracker.add_discovered(vec![make_skill("alpha", &path)]).is_empty());
         assert_eq!(tracker.discovered_skills().len(), 1);
+    }
+
+    /// Reading a SKILL.md that is already in the session-start listing must not
+    /// re-register it as a mid-session discovery. That path was firing the
+    /// skill-curator absorption hint during unrelated stage-recap work.
+    #[test]
+    fn add_discovered_skips_startup_baseline_skills() {
+        let mut tracker = SkillManager::new();
+        tracker.seed(
+            None,
+            None,
+            vec![make_skill("stage-recap", "/.grok/skills/stage-recap/SKILL.md")],
+            None,
+            None,
+            None,
+        );
+        let _ = tracker.take_pending_reconciliation();
+
+        let entered = tracker.add_discovered(vec![make_skill(
+            "stage-recap",
+            "/.grok/skills/stage-recap/SKILL.md",
+        )]);
+        assert!(
+            entered.is_empty(),
+            "startup-listed skill must not re-enter via add_discovered: {entered:?}"
+        );
+        assert!(tracker.discovered_skills().is_empty());
+        assert!(
+            tracker.take_pending_reconciliation().is_none(),
+            "no discovery pending after re-reading a startup skill"
+        );
     }
 
     #[test]
@@ -1159,7 +1205,7 @@ mod tests {
 
     /// Re-discovery of the same skill after compaction must not produce duplicates. `checked_dirs`
     /// is cleared (so the dir is re-scanned), but `discovered_canonical_paths` is preserved (so
-    /// `add_discovered` deduplicates and returns `false`).
+    /// `add_discovered` deduplicates and returns an empty vec).
     #[test]
     fn rediscovery_after_compaction_does_not_duplicate() {
         let mut tracker = SkillManager::new();
@@ -1171,8 +1217,8 @@ mod tests {
         assert!(tracker.checked_dirs.is_empty(), "checked_dirs cleared");
 
         // Re-discover the same skill (same canonical path)
-        let is_new = tracker.add_discovered(vec![make_skill("dyn", "/d/SKILL.md")]);
-        assert!(!is_new, "same canonical path must not be treated as new");
+        let entered = tracker.add_discovered(vec![make_skill("dyn", "/d/SKILL.md")]);
+        assert!(entered.is_empty(), "same canonical path must not be treated as new");
         assert_eq!(
             tracker.discovered_skills().len(),
             1,
