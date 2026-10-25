@@ -1,0 +1,14 @@
+# Template for a new Astrolabe client context (Serena-inspired, no prompts).
+# Copy to <name>.yml, fill fields, add a BUILTINS row in src/context.rs.
+name: example
+# Short human note (shown in docs / logs only).
+notes: Describe which client this targets and why structured is on or off.
+# true | false | null (null = auto → currently off unless ASTROLABE_STRUCTURED overrides)
+structured_tool_output: null
+# Optional catalog filter; empty list means expose every tool.
+excluded_tools: []
+# Hard-deny host Grep / Glob / shell text-search (grep/rg/ag/ack/git grep) on first use
+# via `astrolabe hooks remind --context=…`. Default false keeps soft GREP_THRESHOLD.
+# Prefer also setting ASTROLABE_DENY_TEXT_SEARCH in mcp.json env (and the hook command)
+# so each Astrolabe process / client can choose independently.
+deny_text_search: false

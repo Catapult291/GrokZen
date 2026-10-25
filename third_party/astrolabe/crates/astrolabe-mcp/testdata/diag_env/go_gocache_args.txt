@@ -1,0 +1,13 @@
+@args.go:1 [error] loading compiled Go files from cache: reading srcfiles list: cache entry not found: open /home/box/.cache/go-build/33/33fb076d1af946e6fd5d2ab1b976198fc82a37009685330786666882dd6c1b33-a: no such file or directory
+@args.go:22 [error UndeclaredName] undefined: Command
+@args.go:28 [error UndeclaredName] undefined: Command
+@args.go:42 [error UndeclaredName] undefined: Command
+@args.go:51 [error UndeclaredName] undefined: Command
+@args.go:60 [error UndeclaredName] undefined: stringInSlice
+@args.go:69 [error UndeclaredName] undefined: Command
+@args.go:82 [error UndeclaredName] undefined: Command
+@args.go:88 [error UndeclaredName] undefined: Command
+@args.go:98 [error UndeclaredName] undefined: Command
+@args.go:108 [error UndeclaredName] undefined: Command
+@args.go:118 [error UndeclaredName] undefined: Command
+@args.go:128 [error UndeclaredName] undefined: Command

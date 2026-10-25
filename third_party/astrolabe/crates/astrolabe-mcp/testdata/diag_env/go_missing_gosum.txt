@@ -1,0 +1,1 @@
+@main.go:5 [error] missing go.sum entry for module providing package github.com/spf13/pflag (imported by example.com/g1); to add:

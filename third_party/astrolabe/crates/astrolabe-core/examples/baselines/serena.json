@@ -1,0 +1,162 @@
+{
+  "call_edges": false,
+  "git_dirty": true,
+  "git_head": "a66eef580d450bc8e16195d623fee6dba23bb709",
+  "host": {
+    "arch": "aarch64",
+    "cpu": "Apple M4",
+    "cpus": 10,
+    "os": "macos"
+  },
+  "jitter": {
+    "elapsed_ms_pct": 98.06331750708428,
+    "peak_rss_pct": 3.464322647362978
+  },
+  "max": {
+    "elapsed_ms": 246.518,
+    "elapsed_us": 246518,
+    "peak_rss_bytes": 32538624
+  },
+  "measured_unix": 1789119041,
+  "median": {
+    "call_edges": 0,
+    "elapsed_ms": 159.861,
+    "elapsed_us": 159861,
+    "files_parsed": 492,
+    "files_scanned": 1028,
+    "held_rss_bytes": 31686656,
+    "import_edges": 1529,
+    "parse_failures": 0,
+    "peak_rss_bytes": 31686656,
+    "symbols": 10051,
+    "unresolved_imports": 0
+  },
+  "min": {
+    "elapsed_ms": 89.753,
+    "elapsed_us": 89753,
+    "peak_rss_bytes": 31440896
+  },
+  "mode": "aggregate",
+  "name": "serena",
+  "regressions": [],
+  "repo": "../serena",
+  "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+  "runs": 7,
+  "samples": [
+    {
+      "call_edges": 0,
+      "elapsed_ms": 246.518,
+      "elapsed_us": 246518,
+      "files_parsed": 492,
+      "files_scanned": 1028,
+      "held_rss_bytes": 32538624,
+      "import_edges": 1529,
+      "parse_failures": 0,
+      "peak_rss_bytes": 32538624,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 32538624,
+      "symbols": 10051,
+      "unresolved_imports": 0
+    },
+    {
+      "call_edges": 0,
+      "elapsed_ms": 150.391,
+      "elapsed_us": 150391,
+      "files_parsed": 492,
+      "files_scanned": 1028,
+      "held_rss_bytes": 31686656,
+      "import_edges": 1529,
+      "parse_failures": 0,
+      "peak_rss_bytes": 31686656,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 31686656,
+      "symbols": 10051,
+      "unresolved_imports": 0
+    },
+    {
+      "call_edges": 0,
+      "elapsed_ms": 166.137,
+      "elapsed_us": 166137,
+      "files_parsed": 492,
+      "files_scanned": 1028,
+      "held_rss_bytes": 31506432,
+      "import_edges": 1529,
+      "parse_failures": 0,
+      "peak_rss_bytes": 31506432,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 31506432,
+      "symbols": 10051,
+      "unresolved_imports": 0
+    },
+    {
+      "call_edges": 0,
+      "elapsed_ms": 210.44,
+      "elapsed_us": 210440,
+      "files_parsed": 492,
+      "files_scanned": 1028,
+      "held_rss_bytes": 31965184,
+      "import_edges": 1529,
+      "parse_failures": 0,
+      "peak_rss_bytes": 31965184,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 31965184,
+      "symbols": 10051,
+      "unresolved_imports": 0
+    },
+    {
+      "call_edges": 0,
+      "elapsed_ms": 159.861,
+      "elapsed_us": 159861,
+      "files_parsed": 492,
+      "files_scanned": 1028,
+      "held_rss_bytes": 31916032,
+      "import_edges": 1529,
+      "parse_failures": 0,
+      "peak_rss_bytes": 31916032,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 31916032,
+      "symbols": 10051,
+      "unresolved_imports": 0
+    },
+    {
+      "call_edges": 0,
+      "elapsed_ms": 125.08,
+      "elapsed_us": 125080,
+      "files_parsed": 492,
+      "files_scanned": 1028,
+      "held_rss_bytes": 31686656,
+      "import_edges": 1529,
+      "parse_failures": 0,
+      "peak_rss_bytes": 31686656,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 31686656,
+      "symbols": 10051,
+      "unresolved_imports": 0
+    },
+    {
+      "call_edges": 0,
+      "elapsed_ms": 89.753,
+      "elapsed_us": 89753,
+      "files_parsed": 492,
+      "files_scanned": 1028,
+      "held_rss_bytes": 31440896,
+      "import_edges": 1529,
+      "parse_failures": 0,
+      "peak_rss_bytes": 31440896,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 31440896,
+      "symbols": 10051,
+      "unresolved_imports": 0
+    }
+  ],
+  "schema": "astrolabe-bench/v1",
+  "spawn": true,
+  "thresholds": {
+    "rss_ratio": 1.2,
+    "time_ratio": 2.5,
+    "rss_floor_bytes": 4194304,
+    "time_floor_ms": 150.0
+  },
+  "verdict": "BASELINE",
+  "warmup": 2
+}

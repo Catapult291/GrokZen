@@ -1,0 +1,72 @@
+[package]
+name = "astrolabe-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+description = "Deterministic code-graph library for coding agents: file-level questions walk the import graph, symbol-level questions go to the language server, and parse gaps are exposed instead of hidden."
+documentation = "https://docs.rs/astrolabe-core"
+keywords = ["code-graph", "tree-sitter", "static-analysis", "code-intelligence", "indexing"]
+categories = ["development-tools", "parsing"]
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+globset.workspace = true
+ignore.workspace = true
+grep-matcher.workspace = true
+grep-regex.workspace = true
+grep-searcher.workspace = true
+regex.workspace = true
+memchr.workspace = true
+encoding_rs.workspace = true
+chardetng.workspace = true
+notify.workspace = true
+rayon.workspace = true
+moka.workspace = true
+redb.workspace = true
+tracing.workspace = true
+lsp-types.workspace = true
+ast-grep-core.workspace = true
+tree-sitter.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-java.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-php.workspace = true
+tree-sitter-dart.workspace = true
+tree-sitter-c-sharp.workspace = true
+tree-sitter-vb-dotnet.workspace = true
+tree-sitter-c.workspace = true
+tree-sitter-cpp.workspace = true
+tree-sitter-swift.workspace = true
+tree-sitter-objc.workspace = true
+tree-sitter-kotlin-ng.workspace = true
+tree-sitter-bash.workspace = true
+tree-sitter-ruby.workspace = true
+tree-sitter-lua.workspace = true
+sha2.workspace = true
+hex.workspace = true
+flate2.workspace = true
+tar.workspace = true
+zip.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

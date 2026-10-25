@@ -435,7 +435,7 @@ fn extract_symbols_fast_inline(
         let mut alias_original: Option<&[u8]> = None;
         let mut alias_name: Option<&[u8]> = None;
 
-        for capture in match_.captures {
+        for capture in match_.captures() {
             let idx = capture.index as usize;
             let node = capture.node;
             let byte_range = node.byte_range();

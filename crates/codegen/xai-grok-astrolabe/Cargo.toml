@@ -1,0 +1,27 @@
+[package]
+license = "Apache-2.0"
+name = "xai-grok-astrolabe"
+version = "0.1.0"
+edition.workspace = true
+description = "In-process Astrolabe engine: native index-backed code search, symbol lookup, context ranking and language reporting for Grok Build"
+
+[dependencies]
+# Vendored upstream (third_party/astrolabe). The `native` feature exposes the
+# in-process facade this crate drives; no MCP transport is involved.
+astrolabe-core = { workspace = true }
+astrolabe-mcp = { workspace = true }
+dunce = { workspace = true }
+globset = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+toml = { workspace = true }
+
+[lints]
+workspace = true

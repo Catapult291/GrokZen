@@ -1,0 +1,4 @@
+@main.go:7 [error UndeclaredName] undefined: Commnd
+@main.go:12 [error IncompatibleAssign] cannot use "x" (untyped string constant) as int value in variable declaration
+@main.go:15 [error] expected ';', found foo
+@main.go:20 [warning unusedparams] unused parameter: ctx

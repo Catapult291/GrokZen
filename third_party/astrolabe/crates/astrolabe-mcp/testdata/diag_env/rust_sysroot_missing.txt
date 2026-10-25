@@ -1,0 +1,3 @@
+@src/main.rs:1 [error E0463] can't find crate for `std`
+@src/main.rs:3 [error unresolved-import] unresolved import `std::collections::HashMap`
+@src/main.rs:7 [error unresolved-macro-call] unresolved macro `println!`

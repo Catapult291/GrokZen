@@ -1,0 +1,3 @@
+@a.ts:1 [error 2307] Cannot find module './helpers' or its corresponding type declarations.
+@a.ts:4 [error 2322] Type 'string' is not assignable to type 'number'.
+@a.ts:9 [error 1005] ';' expected.

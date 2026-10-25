@@ -1,0 +1,162 @@
+{
+  "call_edges": false,
+  "git_dirty": true,
+  "git_head": "a66eef580d450bc8e16195d623fee6dba23bb709",
+  "host": {
+    "arch": "aarch64",
+    "cpu": "Apple M4",
+    "cpus": 10,
+    "os": "macos"
+  },
+  "jitter": {
+    "elapsed_ms_pct": 6.630320084417868,
+    "peak_rss_pct": 11.940298507462686
+  },
+  "max": {
+    "elapsed_ms": 41.174,
+    "elapsed_us": 41174,
+    "peak_rss_bytes": 15859712
+  },
+  "measured_unix": 1789119042,
+  "median": {
+    "call_edges": 0,
+    "elapsed_ms": 39.802,
+    "elapsed_us": 39802,
+    "files_parsed": 154,
+    "files_scanned": 193,
+    "held_rss_bytes": 14270464,
+    "import_edges": 280,
+    "parse_failures": 0,
+    "peak_rss_bytes": 14270464,
+    "symbols": 2234,
+    "unresolved_imports": 0
+  },
+  "min": {
+    "elapsed_ms": 38.535,
+    "elapsed_us": 38535,
+    "peak_rss_bytes": 14155776
+  },
+  "mode": "aggregate",
+  "name": "openvisio-oss",
+  "regressions": [],
+  "repo": "../openvisio-oss",
+  "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+  "runs": 7,
+  "samples": [
+    {
+      "call_edges": 0,
+      "elapsed_ms": 40.666,
+      "elapsed_us": 40666,
+      "files_parsed": 154,
+      "files_scanned": 193,
+      "held_rss_bytes": 14155776,
+      "import_edges": 280,
+      "parse_failures": 0,
+      "peak_rss_bytes": 14155776,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 14155776,
+      "symbols": 2234,
+      "unresolved_imports": 0
+    },
+    {
+      "call_edges": 0,
+      "elapsed_ms": 39.395,
+      "elapsed_us": 39395,
+      "files_parsed": 154,
+      "files_scanned": 193,
+      "held_rss_bytes": 14237696,
+      "import_edges": 280,
+      "parse_failures": 0,
+      "peak_rss_bytes": 14237696,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 14237696,
+      "symbols": 2234,
+      "unresolved_imports": 0
+    },
+    {
+      "call_edges": 0,
+      "elapsed_ms": 38.535,
+      "elapsed_us": 38535,
+      "files_parsed": 154,
+      "files_scanned": 193,
+      "held_rss_bytes": 14237696,
+      "import_edges": 280,
+      "parse_failures": 0,
+      "peak_rss_bytes": 14237696,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 14237696,
+      "symbols": 2234,
+      "unresolved_imports": 0
+    },
+    {
+      "call_edges": 0,
+      "elapsed_ms": 39.802,
+      "elapsed_us": 39802,
+      "files_parsed": 154,
+      "files_scanned": 193,
+      "held_rss_bytes": 14761984,
+      "import_edges": 280,
+      "parse_failures": 0,
+      "peak_rss_bytes": 14761984,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 14761984,
+      "symbols": 2234,
+      "unresolved_imports": 0
+    },
+    {
+      "call_edges": 0,
+      "elapsed_ms": 38.672,
+      "elapsed_us": 38672,
+      "files_parsed": 154,
+      "files_scanned": 193,
+      "held_rss_bytes": 14352384,
+      "import_edges": 280,
+      "parse_failures": 0,
+      "peak_rss_bytes": 14352384,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 14352384,
+      "symbols": 2234,
+      "unresolved_imports": 0
+    },
+    {
+      "call_edges": 0,
+      "elapsed_ms": 41.174,
+      "elapsed_us": 41174,
+      "files_parsed": 154,
+      "files_scanned": 193,
+      "held_rss_bytes": 15859712,
+      "import_edges": 280,
+      "parse_failures": 0,
+      "peak_rss_bytes": 15859712,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 15859712,
+      "symbols": 2234,
+      "unresolved_imports": 0
+    },
+    {
+      "call_edges": 0,
+      "elapsed_ms": 40.93,
+      "elapsed_us": 40930,
+      "files_parsed": 154,
+      "files_scanned": 193,
+      "held_rss_bytes": 14270464,
+      "import_edges": 280,
+      "parse_failures": 0,
+      "peak_rss_bytes": 14270464,
+      "rss_method": "mach_task_basic_info.resident_size_max+getrusage",
+      "sampled_peak_rss_bytes": 14270464,
+      "symbols": 2234,
+      "unresolved_imports": 0
+    }
+  ],
+  "schema": "astrolabe-bench/v1",
+  "spawn": true,
+  "thresholds": {
+    "rss_ratio": 1.2,
+    "time_ratio": 2.5,
+    "rss_floor_bytes": 4194304,
+    "time_floor_ms": 150.0
+  },
+  "verdict": "BASELINE",
+  "warmup": 2
+}

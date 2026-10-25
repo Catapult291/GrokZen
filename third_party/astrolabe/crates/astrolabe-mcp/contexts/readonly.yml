@@ -1,0 +1,5 @@
+# Read-only deployment. Catalog tools are already read-only.
+name: readonly
+notes: "Read-only mode. Catalog tools do not write the repository."
+structured_tool_output: false
+excluded_tools: []
