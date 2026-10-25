@@ -128,11 +128,14 @@ fn gitignored_files_follow_the_session_policy() {
     let root = root_for_cwd(&fixture.root, &cfg);
     let map = fixture.map(&fixture.root);
 
-    let respecting = xai_grok_astrolabe::engine_for_session(&root, &cfg, true).expect("engine");
+    let respecting =
+        xai_grok_astrolabe::engine_for_session(&root, &cfg, true, &DenyPolicy::default())
+            .expect("engine");
     let text = search(&respecting, &map, "ignored_policy_marker");
     assert!(!text.contains("ignored.rs"), "{text}");
 
-    let open = xai_grok_astrolabe::engine_for_session(&root, &cfg, false).expect("engine");
+    let open = xai_grok_astrolabe::engine_for_session(&root, &cfg, false, &DenyPolicy::default())
+        .expect("engine");
     let text = search(&open, &map, "ignored_policy_marker");
     assert!(text.contains("ignored.rs"), "{text}");
 }
@@ -195,6 +198,117 @@ fn deny_policy_keeps_secrets_out_of_results() {
         .text;
 
     assert!(!text.contains("do-not-leak"), "{text}");
+}
+
+/// Build-time half of the `DenyReadGlobs` contract (plan §7.5.1): with the
+/// query-side policy empty, a denied file can only stay out of the answer if
+/// the scan never admitted it. The permissive index on the same root proves
+/// the file really is indexable.
+#[test]
+fn deny_globs_are_excluded_at_index_time() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.join("src/classified.rs"),
+        "pub fn classified_only_marker() -> u8 {\n    1\n}\n",
+    )
+    .unwrap();
+    let cfg = fixture.cfg();
+    let root = root_for_cwd(&fixture.root, &cfg);
+    let map = fixture.map(&fixture.root);
+
+    let plain =
+        xai_grok_astrolabe::engine_for_session(&root, &cfg, true, &DenyPolicy::default())
+            .expect("plain");
+    let deny = DenyPolicy::new(&[".env".to_string(), "src/classified.rs".to_string()]);
+    let strict = xai_grok_astrolabe::engine_for_session(&root, &cfg, true, &deny)
+        .expect("strict");
+
+    // Warm both indexes, then compare what got admitted.
+    let plain_text = search(&plain, &map, "grep_timeout_secs");
+    assert!(plain_text.contains("main.rs"), "{plain_text}");
+    let strict_text = search(&strict, &map, "grep_timeout_secs");
+    assert!(strict_text.contains("main.rs"), "{strict_text}");
+
+    // Query-side policy is default-empty: no rewrite filter can hide these.
+    let text = search(&strict, &map, "SECRET_TOKEN");
+    assert!(!text.contains("do-not-leak"), "{text}");
+    let symbols = strict
+        .find_symbol(
+            &map,
+            &DenyPolicy::default(),
+            FindSymbolRequest {
+                query: "classified_only_marker".to_string(),
+                ..FindSymbolRequest::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        symbols.meta.total.is_none_or(|t| t == 0),
+        "a denied source file must contribute no symbols: {}",
+        symbols.text
+    );
+    assert!(
+        !symbols.text.contains("classified_only_marker"),
+        "{}",
+        symbols.text
+    );
+
+    // The permissive engine on the same root still sees both files, so the
+    // two deny sets did not pollute each other through the shared store.
+    let text = search(&plain, &map, "SECRET_TOKEN");
+    assert!(text.contains("do-not-leak"), "{text}");
+    let symbols = plain
+        .find_symbol(
+            &map,
+            &DenyPolicy::default(),
+            FindSymbolRequest {
+                query: "classified_only_marker".to_string(),
+                ..FindSymbolRequest::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        symbols.text.contains("classified_only_marker"),
+        "{}",
+        symbols.text
+    );
+
+    let strict_stats = strict.status().stats.expect("strict index ready");
+    let plain_stats = plain.status().stats.expect("plain index ready");
+    let strict_files = strict_stats["files"].as_u64().expect("files count");
+    let plain_files = plain_stats["files"].as_u64().expect("files count");
+    assert_eq!(
+        plain_files,
+        strict_files + 1,
+        "only src/classified.rs may differ: strict={strict_stats}, plain={plain_stats}"
+    );
+    assert!(
+        plain_stats["symbols"].as_u64().unwrap_or(0)
+            > strict_stats["symbols"].as_u64().unwrap_or(0),
+        "the denied file must not contribute symbols: strict={strict_stats}, plain={plain_stats}"
+    );
+}
+
+/// Reverse creation order on a fresh root: a permissive index opened *after*
+/// a denied one still sees the file the denied index skipped.
+#[test]
+fn permissive_index_is_not_blinded_by_a_prior_denied_index() {
+    let fixture = Fixture::new();
+    let cfg = fixture.cfg();
+    let root = root_for_cwd(&fixture.root, &cfg);
+    let map = fixture.map(&fixture.root);
+
+    let deny = DenyPolicy::new(&[".env".to_string()]);
+    let strict = xai_grok_astrolabe::engine_for_session(&root, &cfg, true, &deny)
+        .expect("strict");
+    let text = search(&strict, &map, "SECRET_TOKEN");
+    assert!(!text.contains("do-not-leak"), "{text}");
+
+    let plain =
+        xai_grok_astrolabe::engine_for_session(&root, &cfg, true, &DenyPolicy::default())
+            .expect("plain");
+    let text = search(&plain, &map, "SECRET_TOKEN");
+    assert!(text.contains("do-not-leak"), "{text}");
 }
 
 #[test]

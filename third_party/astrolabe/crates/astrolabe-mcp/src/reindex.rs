@@ -70,6 +70,7 @@ pub(crate) fn mcp_index_options(
     persist: bool,
     parse_cache_bytes: u64,
     respect_gitignore: bool,
+    extra_excludes: &[String],
 ) -> IndexOptions {
     IndexOptions {
         call_edges: true,
@@ -80,6 +81,7 @@ pub(crate) fn mcp_index_options(
         parse_cache_bytes,
         scan: astrolabe_core::scan::ScanOptions {
             respect_gitignore,
+            extra_excludes: extra_excludes.to_vec(),
             ..astrolabe_core::scan::ScanOptions::default()
         },
         ..IndexOptions::default()
@@ -356,7 +358,7 @@ mod tests {
     fn language_add_modify_remove_updates_graph() {
         let dir = unique_temp_dir();
         std::fs::write(dir.join("a.py"), "def alpha():\n    return 1\n").unwrap();
-        let opts = mcp_index_options(false, DEFAULT_PARSE_CACHE_BYTES, true);
+        let opts = mcp_index_options(false, DEFAULT_PARSE_CACHE_BYTES, true, &[]);
         let inc = IncrementalIndex::build(&dir, &opts);
         assert!(
             inc.graph.symbols.iter().any(|s| s.name == "alpha"),
@@ -456,7 +458,7 @@ mod tests {
         let dir = unique_temp_dir();
         std::fs::write(dir.join("a.py"), "def alpha():\n    return 1\n").unwrap();
         std::fs::write(dir.join("notes.md"), "needle\n").unwrap();
-        let opts = mcp_index_options(false, DEFAULT_PARSE_CACHE_BYTES, true);
+        let opts = mcp_index_options(false, DEFAULT_PARSE_CACHE_BYTES, true, &[]);
         let inc = IncrementalIndex::build(&dir, &opts);
         let before = RepoIndex::from_incremental(dir.clone(), inc);
         let names = |i: &RepoIndex| -> Vec<String> {
@@ -535,7 +537,7 @@ mod tests {
 
         let persist = refresh_leader(&follower_slot, &dir);
         assert!(!persist);
-        let opts = mcp_index_options(persist, DEFAULT_PARSE_CACHE_BYTES, true);
+        let opts = mcp_index_options(persist, DEFAULT_PARSE_CACHE_BYTES, true, &[]);
         let _ = IncrementalIndex::build(&dir, &opts);
         assert!(
             !store_path(&dir).exists(),
@@ -559,7 +561,7 @@ mod tests {
 
         let leader_slot = Mutex::new(None);
         assert!(refresh_leader(&leader_slot, &dir));
-        let opts = mcp_index_options(true, DEFAULT_PARSE_CACHE_BYTES, true);
+        let opts = mcp_index_options(true, DEFAULT_PARSE_CACHE_BYTES, true, &[]);
         let previous = IncrementalIndex::build(&dir, &opts);
         let redb = store_path(&dir);
         assert!(redb.exists(), "leader persist=true must write index.redb");
@@ -572,7 +574,7 @@ mod tests {
 
         let follower_slot = Mutex::new(None);
         assert!(!refresh_leader(&follower_slot, &dir));
-        let follower_opts = mcp_index_options(false, DEFAULT_PARSE_CACHE_BYTES, true);
+        let follower_opts = mcp_index_options(false, DEFAULT_PARSE_CACHE_BYTES, true, &[]);
         let _ = apply_reindex(
             &dir,
             Some(&previous),

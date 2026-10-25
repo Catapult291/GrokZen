@@ -499,21 +499,23 @@ pub(crate) fn build_with_options_full(
     parse_cache_bytes: u64,
     respect_gitignore: bool,
 ) -> anyhow::Result<RepoIndex> {
-    let opts = mcp_index_options(persist, parse_cache_bytes, respect_gitignore);
+    let opts = mcp_index_options(persist, parse_cache_bytes, respect_gitignore, &[]);
     let incremental = IncrementalIndex::build(root, &opts);
     Ok(RepoIndex::from_incremental(root.to_path_buf(), incremental))
 }
 
 /// [`build_with_options`] that returns `None` once `cancel` is set (see
-/// [`IncrementalIndex::build_cancellable`]).
+/// [`IncrementalIndex::build_cancellable`]). `extra_excludes` are the
+/// session's deny globs: the cold scan must never read those files.
 pub(crate) fn build_cancellable(
     root: &Path,
     persist: bool,
     parse_cache_bytes: u64,
     respect_gitignore: bool,
+    extra_excludes: &[String],
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Option<RepoIndex> {
-    let opts = mcp_index_options(persist, parse_cache_bytes, respect_gitignore);
+    let opts = mcp_index_options(persist, parse_cache_bytes, respect_gitignore, extra_excludes);
     let incremental = IncrementalIndex::build_cancellable(root, &opts, cancel)?;
     Some(RepoIndex::from_incremental(root.to_path_buf(), incremental))
 }

@@ -276,6 +276,7 @@ pub(crate) fn build_session_index(session: &RootSession, persist: bool) -> Optio
             persist,
             session.knobs.parse_cache_bytes,
             session.knobs.respect_gitignore,
+            &session.knobs.extra_excludes,
             &session.closed,
         )
     }));
@@ -461,6 +462,7 @@ fn publish_ready(session: &RootSession, mut outcome: IndexState) {
         persist,
         session.knobs.parse_cache_bytes,
         session.knobs.respect_gitignore,
+        &session.knobs.extra_excludes,
     );
 
     let mut pending = session.pending.lock_or_recover();
@@ -513,6 +515,7 @@ fn apply_pending(session: &RootSession, pending: &mut ChangeSet) -> bool {
         persist,
         session.knobs.parse_cache_bytes,
         session.knobs.respect_gitignore,
+        &session.knobs.extra_excludes,
     );
     let mut applied = older.clone();
     applied.merge(changes.clone());
@@ -796,6 +799,7 @@ fn wait_watermark_advance(log: &FreshnessLog, before: Instant, timeout: Duration
 pub(crate) fn scan_options(knobs: &McpKnobs) -> astrolabe_core::scan::ScanOptions {
     astrolabe_core::scan::ScanOptions {
         respect_gitignore: knobs.respect_gitignore,
+        extra_excludes: knobs.extra_excludes.clone(),
         ..astrolabe_core::scan::ScanOptions::default()
     }
 }
@@ -890,6 +894,7 @@ fn publish_rebuilt(session: &RootSession, mut outcome: IndexState) {
         persist,
         session.knobs.parse_cache_bytes,
         session.knobs.respect_gitignore,
+        &session.knobs.extra_excludes,
     );
     let mut pending = session.pending.lock_or_recover();
     let mut replay = std::mem::take(&mut *session.rebuild_journal.lock_or_recover());

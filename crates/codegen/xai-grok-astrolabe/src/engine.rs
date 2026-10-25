@@ -1,7 +1,8 @@
 //! In-process Astrolabe engine.
 //!
-//! One [`AstrolabeEngine`] per index root, shared by every session and
-//! subagent in the process. The engine owns the index and the tool semantics;
+//! One [`AstrolabeEngine`] per (index root, `.gitignore` policy, deny set),
+//! shared by every session and subagent that agrees on all three. The engine
+//! owns the index and the tool semantics;
 //! it speaks plain Rust to `astrolabe-mcp`'s native facade, so no MCP transport
 //! and no `astrolabe` child process are involved.
 //!
@@ -47,14 +48,20 @@ pub enum EngineError {
     TooManyFiles { root: String, limit: u64 },
 }
 
-/// A shared index for one root and one ignore policy. Sessions that disagree
-/// about `.gitignore` get separate indexes: the admitted file set is fixed at
-/// build time, so serving both from one engine would answer one of them wrong.
+/// A shared index for one root, one ignore policy and one deny set. Sessions
+/// that disagree about `.gitignore` or `DenyReadGlobs` get separate indexes:
+/// the admitted file set is fixed at build time, so serving both from one
+/// engine would answer one of them wrong.
 pub struct AstrolabeEngine {
     root: PathBuf,
     server: Arc<AstrolabeServer>,
     cfg: AstrolabeConfig,
     respect_gitignore: bool,
+    /// The deny policy this index was built with. Also filters
+    /// [`Self::note_edited`]: a host-side edit of a denied file must not
+    /// re-enter the graph the way a live watcher event (already excluded by
+    /// the scan gates) cannot.
+    deny: DenyPolicy,
     started: AtomicBool,
 }
 
@@ -63,6 +70,7 @@ impl std::fmt::Debug for AstrolabeEngine {
         f.debug_struct("AstrolabeEngine")
             .field("root", &self.root)
             .field("respect_gitignore", &self.respect_gitignore)
+            .field("deny_excludes", &self.deny.engine_excludes())
             .field("started", &self.started.load(Ordering::Relaxed))
             .finish()
     }
@@ -72,6 +80,9 @@ impl std::fmt::Debug for AstrolabeEngine {
 struct EngineKey {
     root: PathBuf,
     respect_gitignore: bool,
+    /// Normalized deny excludes (sorted, deduplicated); equal policies map
+    /// to one engine, differing policies to separate indexes.
+    deny_excludes: Vec<String>,
 }
 
 static ENGINES: LazyLock<Mutex<HashMap<EngineKey, Arc<AstrolabeEngine>>>> =
@@ -114,28 +125,44 @@ pub fn note_edited_on_disk(paths: &[PathBuf]) {
 }
 
 /// Engine for `root`, creating it on first use. The root must already be
-/// canonical (see [`root_for_cwd`]).
+/// canonical (see [`root_for_cwd`]). No read-deny policy: see
+/// [`engine_for_session`].
 pub fn engine_for(root: &Path, cfg: &AstrolabeConfig) -> Result<Arc<AstrolabeEngine>, EngineError> {
-    engine_for_session(root, cfg, cfg.respect_gitignore)
+    engine_for_session(
+        root,
+        cfg,
+        cfg.respect_gitignore,
+        &DenyPolicy::default(),
+    )
 }
 
-/// [`engine_for`] with the session's `.gitignore` policy. `respect_gitignore`
-/// comes from the host's `RespectGitignore` resource, so a session that told
-/// `grep` to look at ignored files gets an index that contains them.
+/// [`engine_for`] with the session's `.gitignore` policy and `DenyReadGlobs`.
+/// `respect_gitignore` comes from the host's `RespectGitignore` resource, so
+/// a session that told `grep` to look at ignored files gets an index that
+/// contains them. `deny` becomes part of the engine key and of the scan's
+/// `extra_excludes`: denied files are never parsed into this index, and two
+/// sessions with different deny sets cannot answer from each other's index.
 pub fn engine_for_session(
     root: &Path,
     cfg: &AstrolabeConfig,
     respect_gitignore: bool,
+    deny: &DenyPolicy,
 ) -> Result<Arc<AstrolabeEngine>, EngineError> {
     let key = EngineKey {
         root: root.to_path_buf(),
         respect_gitignore,
+        deny_excludes: deny.engine_excludes(),
     };
     let mut engines = ENGINES.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(engine) = engines.get(&key) {
         return Ok(Arc::clone(engine));
     }
-    let engine = Arc::new(AstrolabeEngine::open(root, cfg.clone(), respect_gitignore)?);
+    let engine = Arc::new(AstrolabeEngine::open(
+        root,
+        cfg.clone(),
+        respect_gitignore,
+        deny.clone(),
+    )?);
     engines.insert(key, Arc::clone(&engine));
     Ok(engine)
 }
@@ -168,13 +195,18 @@ impl AstrolabeEngine {
         root: &Path,
         cfg: AstrolabeConfig,
         respect_gitignore: bool,
+        deny: DenyPolicy,
     ) -> Result<Self, EngineError> {
         let root = canonical(root);
         // The upstream MCP binary refuses a root above `max_files` while it
         // resolves one; the in-process facade must apply the same guard, or a
         // fifty-thousand-file tree would be parsed before the first answer.
+        // Denied files carry the same scan excludes as the index build, so a
+        // tree full of `.env`s is not counted toward the cap either.
+        let deny_excludes = deny.engine_excludes();
         let scan = astrolabe_core::scan::ScanOptions {
             respect_gitignore,
+            extra_excludes: deny_excludes.clone(),
             ..Default::default()
         };
         let count = count_files(&root, &scan, cfg.max_files.saturating_add(1));
@@ -194,12 +226,14 @@ impl AstrolabeEngine {
             builtin_lsp,
             persist,
             respect_gitignore,
+            deny_excludes,
         );
         Ok(Self {
             root,
             server: Arc::new(server),
             cfg,
             respect_gitignore,
+            deny,
             started: AtomicBool::new(false),
         })
     }
@@ -622,7 +656,8 @@ impl AstrolabeEngine {
 
     /// Apply edits the host just made, so the next query sees them without
     /// waiting for the watcher. Paths are absolute; paths outside the root are
-    /// ignored.
+    /// ignored, and so is any path this index was built to deny — the watcher
+    /// drops those through the scan gates, and this hook must agree.
     pub fn note_edited(&self, edited: &[PathBuf]) -> bool {
         if edited.is_empty() {
             return true;
@@ -633,6 +668,7 @@ impl AstrolabeEngine {
             .map(|path| crate::paths::canonical_or_normalize(path))
             .filter_map(|path| crate::paths::relative_posix(&self.root, &path))
             .filter(|rel| rel != "." && !rel.starts_with(".."))
+            .filter(|rel| !self.deny.denies(rel))
             .collect();
         if rels.is_empty() {
             return true;

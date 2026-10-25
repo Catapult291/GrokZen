@@ -51,6 +51,12 @@ pub(crate) struct McpKnobs {
     /// `false` indexes and searches gitignored files, matching a host `grep`
     /// that was told not to respect ignore files.
     pub respect_gitignore: bool,
+    /// Host-supplied deny/exclude globs (root-relative or filename globs)
+    /// applied as [`astrolabe_core::scan::ScanOptions::extra_excludes`] on
+    /// every scan, watcher admission and incremental apply. Set through
+    /// [`crate::server::AstrolabeServer::new_native_full`]; never read from
+    /// the environment.
+    pub extra_excludes: Vec<String>,
 }
 
 impl Default for McpKnobs {
@@ -68,6 +74,7 @@ impl Default for McpKnobs {
             lsp_enabled: true,
             persist_enabled: true,
             respect_gitignore: true,
+            extra_excludes: Vec::new(),
         }
     }
 }
@@ -105,6 +112,8 @@ impl McpKnobs {
             lsp_enabled: true,
             persist_enabled: persist_enabled_from_env(),
             respect_gitignore: respect_gitignore_from_env(),
+            // Host-provided only: the native constructor overwrites this.
+            extra_excludes: Vec::new(),
         }
     }
 }
