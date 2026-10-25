@@ -809,9 +809,18 @@ impl AgentBuilder {
                 tool_config.tools.push((&grok_build::WebFetchTool).into());
             }
             if self.lsp.is_some() {
-                tool_config
+                // `by_kind.lsp` is first-come: keep the generic tool ahead of
+                // the precise Astrolabe tools so the prompt keeps naming it.
+                let lsp_config: xai_grok_tools::registry::types::ToolConfig =
+                    (&xai_grok_tools::implementations::grok_build::LspTool).into();
+                let at = tool_config
                     .tools
-                    .push((&xai_grok_tools::implementations::grok_build::LspTool).into());
+                    .iter()
+                    .position(|tool| {
+                        xai_grok_tools::implementations::astrolabe::is_precise_tool(&tool.id)
+                    })
+                    .unwrap_or(tool_config.tools.len());
+                tool_config.tools.insert(at, lsp_config);
             }
             if self.image_gen_config.image_gen_enabled() {
                 tool_config

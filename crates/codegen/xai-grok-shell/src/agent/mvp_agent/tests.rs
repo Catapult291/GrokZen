@@ -1226,6 +1226,10 @@ async fn file_toolset_override_e2e_to_finalized_toolset() {
     assert!(names.contains(&"hashline_read"), "defs: {names:?}");
     assert!(names.contains(&"hashline_edit"), "defs: {names:?}");
     assert!(names.contains(&"hashline_grep"), "defs: {names:?}");
+    // The search slot holds both `grep` and the index search; the swap moves
+    // `grep` and leaves `search_code` in place with its hashline note on.
+    assert!(names.contains(&"search_code"), "defs: {names:?}");
+    assert!(!names.contains(&"grep"), "defs: {names:?}");
     assert!(!names.contains(&"read_file"), "defs: {names:?}");
     assert!(!names.contains(&"search_replace"), "defs: {names:?}");
     assert!(names.contains(&"list_dir"), "defs: {names:?}");

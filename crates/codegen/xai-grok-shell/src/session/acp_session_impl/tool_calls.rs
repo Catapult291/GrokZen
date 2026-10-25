@@ -2438,6 +2438,66 @@ impl SessionActor {
                 Vec::new(),
             ),
             ToolInput::Grep(gs) => (gs.pattern.clone(), acp::ToolKind::Search, vec![], vec![]),
+            ToolInput::SearchCode(sc) => (
+                format!("Search code: {}", sc.query),
+                acp::ToolKind::Search,
+                sc.path
+                    .clone()
+                    .map(|path| vec![acp::ToolCallLocation::new(path)])
+                    .unwrap_or_default(),
+                vec![],
+            ),
+            ToolInput::FindSymbol(fs) => (
+                format!("Find symbol: {}", fs.query),
+                acp::ToolKind::Search,
+                fs.path
+                    .clone()
+                    .map(|path| vec![acp::ToolCallLocation::new(path)])
+                    .unwrap_or_default(),
+                vec![],
+            ),
+            ToolInput::ResolveContext(rc) => (
+                format!("Context for: {}", rc.task),
+                acp::ToolKind::Search,
+                vec![],
+                vec![],
+            ),
+            ToolInput::GetLanguages(_) => (
+                "Code index languages".to_string(),
+                acp::ToolKind::Search,
+                vec![],
+                vec![],
+            ),
+            ToolInput::FindReferences(fr) => (
+                format!("Find references: {}", fr.symbol),
+                acp::ToolKind::Search,
+                fr.path
+                    .clone()
+                    .map(|path| vec![acp::ToolCallLocation::new(path)])
+                    .unwrap_or_default(),
+                vec![],
+            ),
+            ToolInput::GotoDefinition(gd) => (
+                format!(
+                    "Go to definition: {}",
+                    gd.symbol
+                        .as_deref()
+                        .or(gd.path.as_deref())
+                        .unwrap_or("symbol")
+                ),
+                acp::ToolKind::Search,
+                gd.path
+                    .clone()
+                    .map(|path| vec![acp::ToolCallLocation::new(path)])
+                    .unwrap_or_default(),
+                vec![],
+            ),
+            ToolInput::GetDiagnostics(diag) => (
+                format!("Diagnostics: {}", diag.path),
+                acp::ToolKind::Read,
+                vec![acp::ToolCallLocation::new(diag.path.clone())],
+                vec![],
+            ),
             ToolInput::WebSearch(ws) => (
                 format!("Web search: \"{}\"", ws.query),
                 acp::ToolKind::Search,
