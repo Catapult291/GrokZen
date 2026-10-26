@@ -32,9 +32,10 @@ use crate::types::tool::{Reminder, ToolKind};
 /// `collect_reminders` entirely in concise mode, so this never fires there.
 /// The skill names are listed so the model judges only those entries, not the
 /// whole listing (reading an already-listed SKILL.md must not look "new").
+/// Wording is Simplified Chinese to match skill-curator / ledger / global rules.
 fn absorption_hint_text(names: &[String]) -> String {
     format!(
-        "New skills were just added to the skill listing: {}. When the current task wraps up or the user is idle, run the absorption judgment (skill-curator skill): for each of those skills decide absorb / standalone / noted against the accepted router skills, and record one line in ~/.grok/skill-router-ledger.md.",
+        "以下新 skill 刚进入 skill listing：{}。在当前任务收尾或用户空闲时，跑吸收判定（skill-curator skill）：对照已 accepted 的路由，对每个 skill 判 absorb / standalone / noted，并在 ~/.grok/skill-router-ledger.md 记一行。",
         names.join(", ")
     )
 }
