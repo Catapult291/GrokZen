@@ -44,8 +44,23 @@ impl Distribution {
         Self { withheld }
     }
     /// This build's distribution.
+    ///
+    /// GrokZen is independent of x.ai: no account login channel and no forced
+    /// browser redirect to `auth.x.ai` / `accounts.x.ai`. Credentials come from
+    /// the API key / BYOK models the user configures.
     pub const fn current() -> Self {
-        Self::STOCK
+        Self::withholding(&[Capability::AccountLogin])
+    }
+
+    /// [`current`](Self::current), but honors `GROK_TEST_STOCK_DISTRIBUTION=1`
+    /// under `cfg(test)` so login-stack unit tests can exercise the STOCK path.
+    /// Product code keeps calling [`current`](Self::current).
+    #[cfg(test)]
+    pub fn current_for_test() -> Self {
+        if std::env::var_os("GROK_TEST_STOCK_DISTRIBUTION").is_some() {
+            return Self::STOCK;
+        }
+        Self::current()
     }
     pub const fn allows(self, capability: Capability) -> bool {
         self.withheld & capability.bit() == 0
@@ -58,8 +73,7 @@ impl Distribution {
         }
         match capability {
             Capability::AccountLogin => Some(
-                "This build has no account to sign in to or out of: it uses only the API key it was \
-                 given.",
+                "此版本没有账号登录通道：只使用你配置的 API Key 或 BYOK 模型。",
             ),
             Capability::RemoteControl => Some("Remote Control is off in this build."),
             Capability::Voice => Some("Voice dictation is off in this build."),

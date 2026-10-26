@@ -1177,6 +1177,12 @@ mod tests {
     }
     #[tokio::test]
     async fn mint_session_noninteractive_uses_external_provider() {
+        if !xai_grok_config::Distribution::current()
+            .allows(xai_grok_config::Capability::AccountLogin)
+        {
+            // GrokZen withholds AccountLogin: this login flow is unreachable in product.
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let cfg = GrokComConfig {
             auth_provider_command: Some("printf '%s' xai-ext-token".to_string()),
@@ -1190,6 +1196,12 @@ mod tests {
     }
     #[tokio::test]
     async fn interactive_login_carries_no_expired_flag_even_over_a_stale_credential() {
+        if !xai_grok_config::Distribution::current()
+            .allows(xai_grok_config::Capability::AccountLogin)
+        {
+            // GrokZen withholds AccountLogin: this login flow is unreachable in product.
+            return;
+        }
         let echo_env = "printf '%s' \"e=${GROK_AUTH_EXPIRED:-unset}\"";
         let dir = tempfile::tempdir().unwrap();
         let mgr = Arc::new(
@@ -1211,6 +1223,12 @@ mod tests {
     /// The script is the one published in `README.md`, which operators copy.
     #[tokio::test]
     async fn a_provider_written_to_the_published_contract_can_sign_in_after_an_expiry() {
+        if !xai_grok_config::Distribution::current()
+            .allows(xai_grok_config::Capability::AccountLogin)
+        {
+            // GrokZen withholds AccountLogin: this login flow is unreachable in product.
+            return;
+        }
         let conforming =
             r#"if [ "$GROK_AUTH_EXPIRED" = "1" ]; then exit 1; else printf '%s' sso-token; fi"#;
         let dir = tempfile::tempdir().unwrap();
@@ -1255,6 +1273,12 @@ mod tests {
     /// A matching-team external token is accepted and persisted.
     #[tokio::test]
     async fn external_provider_accepts_matching_team() {
+        if !xai_grok_config::Distribution::current()
+            .allows(xai_grok_config::Capability::AccountLogin)
+        {
+            // GrokZen withholds AccountLogin: this login flow is unreachable in product.
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let jwt = team_jwt("team-good");
         let mgr = Arc::new(
@@ -1269,6 +1293,12 @@ mod tests {
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn external_reauth_without_prev_auth_enriches_inline() {
+        if !xai_grok_config::Distribution::current()
+            .allows(xai_grok_config::Capability::AccountLogin)
+        {
+            // GrokZen withholds AccountLogin: this login flow is unreachable in product.
+            return;
+        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let app = axum::Router::new().route(
@@ -1296,6 +1326,12 @@ mod tests {
     }
     #[tokio::test]
     async fn external_refresh_carries_profile_without_network() {
+        if !xai_grok_config::Distribution::current()
+            .allows(xai_grok_config::Capability::AccountLogin)
+        {
+            // GrokZen withholds AccountLogin: this login flow is unreachable in product.
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let mgr = Arc::new(
             AuthManager::new(dir.path(), GrokComConfig::default())
@@ -1316,6 +1352,12 @@ mod tests {
     }
     #[tokio::test]
     async fn device_flow_still_runs_external_provider() {
+        if !xai_grok_config::Distribution::current()
+            .allows(xai_grok_config::Capability::AccountLogin)
+        {
+            // GrokZen withholds AccountLogin: this login flow is unreachable in product.
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let cfg = GrokComConfig {
             auth_provider_command: Some("printf '%s' xai-ext-token".to_string()),
@@ -1659,6 +1701,12 @@ mod tests {
     /// When the in-memory token is expired but disk has a valid token, run_auth_flow should return the disk token without interactive login.
     #[tokio::test]
     async fn run_auth_flow_uses_valid_disk_token_when_expired() {
+        if !xai_grok_config::Distribution::current()
+            .allows(xai_grok_config::Capability::AccountLogin)
+        {
+            // GrokZen withholds AccountLogin: this login flow is unreachable in product.
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let cfg = GrokComConfig::default();
         let writer = Arc::new(
@@ -1705,6 +1753,12 @@ mod tests {
     /// When the in-memory token is valid (not expired), run_auth_flow should return it directly without checking disk.
     #[tokio::test]
     async fn run_auth_flow_returns_cached_when_valid() {
+        if !xai_grok_config::Distribution::current()
+            .allows(xai_grok_config::Capability::AccountLogin)
+        {
+            // GrokZen withholds AccountLogin: this login flow is unreachable in product.
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let cfg = GrokComConfig::default();
         let mgr = Arc::new(AuthManager::new(dir.path(), cfg.clone()));
@@ -1734,6 +1788,12 @@ mod tests {
     }
     #[tokio::test]
     async fn run_auth_flow_defers_to_consumer_refresh_on_transient_failure() {
+        if !xai_grok_config::Distribution::current()
+            .allows(xai_grok_config::Capability::AccountLogin)
+        {
+            // GrokZen withholds AccountLogin: this login flow is unreachable in product.
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let cfg = GrokComConfig::default();
         let writer = Arc::new(
@@ -1771,6 +1831,12 @@ mod tests {
     }
     #[tokio::test]
     async fn run_auth_flow_falls_through_when_no_refresh_token() {
+        if !xai_grok_config::Distribution::current()
+            .allows(xai_grok_config::Capability::AccountLogin)
+        {
+            // GrokZen withholds AccountLogin: this login flow is unreachable in product.
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = GrokComConfig::default();
         cfg.oauth2.as_mut().unwrap().issuer = "http://127.0.0.1:1".into();
@@ -1835,6 +1901,12 @@ mod tests {
     /// Piped stderr with no reader deadlocks once the child writes past the pipe buffer (~64 KiB).
     #[tokio::test]
     async fn external_provider_cli_path_does_not_deadlock_on_large_stderr() {
+        if !xai_grok_config::Distribution::current()
+            .allows(xai_grok_config::Capability::AccountLogin)
+        {
+            // GrokZen withholds AccountLogin: this login flow is unreachable in product.
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let mgr = Arc::new(
             AuthManager::new(dir.path(), GrokComConfig::default())
@@ -1862,6 +1934,12 @@ mod tests {
     /// The token runs through the same `AuthManager::new` and `auth()` engine that `try_ensure_fresh_auth` uses; it must be rejected and cleared.
     #[tokio::test]
     async fn noninteractive_auth_rejects_wrong_team_cached_token() {
+        if !xai_grok_config::Distribution::current()
+            .allows(xai_grok_config::Capability::AccountLogin)
+        {
+            // GrokZen withholds AccountLogin: this login flow is unreachable in product.
+            return;
+        }
         const REPRO_JWT: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwcmluY2lwYWxfaWQiOiJ0ZWFtLXdyb25nIiwic3ViIjoidXNlci0xIn0.Signature";
         let dir = tempfile::tempdir().unwrap();
         let cfg = GrokComConfig {
@@ -1945,6 +2023,12 @@ mod tests {
     /// Leader readiness therefore can't block on a provider command up to the 60s `STARTUP_AUTH_TIMEOUT` cap.
     #[tokio::test]
     async fn no_mint_readiness_auth_is_bounded() {
+        if !xai_grok_config::Distribution::current()
+            .allows(xai_grok_config::Capability::AccountLogin)
+        {
+            // GrokZen withholds AccountLogin: this login flow is unreachable in product.
+            return;
+        }
         let (idp_base, server) = start_hanging_oidc_idp().await;
         let dir = tempfile::tempdir().unwrap();
         let am = expired_oidc_manager(dir.path(), &idp_base);

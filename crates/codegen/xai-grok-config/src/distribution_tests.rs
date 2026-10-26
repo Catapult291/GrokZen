@@ -20,8 +20,13 @@ fn a_distribution_withholds_exactly_what_it_names() {
     }
 }
 #[test]
-fn a_default_build_is_stock() {
-    assert_eq!(Distribution::STOCK, Distribution::current());
+fn a_default_build_withholds_account_login() {
+    assert!(!Distribution::current().allows(Capability::AccountLogin));
+    assert!(Distribution::current().allows(Capability::Telemetry));
+    assert!(Distribution::current().allows(Capability::ErrorReporting));
+    assert!(Distribution::current().allows(Capability::RemoteFetch));
+    assert!(Distribution::current().allows(Capability::RemoteControl));
+    assert!(Distribution::current().allows(Capability::Voice));
 }
 #[test]
 fn only_a_withheld_capability_that_a_surface_offers_has_a_refusal() {

@@ -32,6 +32,8 @@ GrokZen 在保留完整功能与官方协议兼容的前提下，针对隐私与
 - **隐私防护**：上传路径在编译期由 `privacy` 特性排除，无法被环境变量、配置或
   服务端远程设置重新启用
 - **厂商更新禁用**：不访问 x.ai 官方更新通道，避免被替换回官方版
+- **独立于 x.ai**：内置 Grok 模型已移除；不提供账号登录通道，启动时不再强制跳转
+  `auth.x.ai` / `accounts.x.ai`。请在 `config.toml` 里配置自己的 `[model.*]` 与 API Key
 - **中文界面**：CLI、TUI、设置、提示与文档全简体中文，可 `--locale en-US` 切英文
 
 > 隐私验证三层证据链（线路层测试版本 **v1.0.13**）见 [DEVELOPER.md](DEVELOPER.md#隐私验证证据v1013)。
@@ -47,12 +49,25 @@ GrokZen 在保留完整功能与官方协议兼容的前提下，针对隐私与
 |---|---|
 | 简体中文 | CLI / TUI / 设置 / 提示 / 文档全中文 |
 | 去遥测 | Mixpanel、GCS 上报路径源码层禁用（编译期排除） |
-| 兼容官方 | 与官方版共用 `~/.grok` 数据目录，会话/登录/配置互通 |
+| 去 x.ai 登录 | 无账号登录通道，不强制跳转 x.ai；仅用你配置的 API Key / BYOK 模型 |
+| 无内置模型 | 不预置 grok-* 模型列表，模型由 `config.toml` 自行声明 |
 | 独立程序名 | `grok-zh` / `agent-zh`，不与官方 `grok` / `agent` 冲突 |
 | 自动更新 | 只从本仓库 Releases 更新，永不访问 x.ai 官方通道 |
 | 跨平台 | Windows x64、macOS ARM64、Linux x86_64 |
 | 中文会话标题 | 中文请求自动生成中文标题与计划步骤 |
 | 动态公告翻译 | 公告中文映射可独立于程序更新（1.0.16 起） |
+
+### 模型配置示例
+
+本版本不内置模型。在 `~/.grok/config.toml` 中声明至少一个模型后即可使用，例如：
+
+```toml
+[model."my-model"]
+model = "my-model"
+base_url = "https://api.example.com/v1"
+env_key = "MY_API_KEY"
+# 或直接：api_key = "sk-..."
+```
 
 ## 安装
 

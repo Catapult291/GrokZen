@@ -283,7 +283,7 @@ impl GrokComConfig {
             login_config.oauth2 = OAuth2ProviderConfig::from_env();
         }
         login_config.pin_login_team();
-        login_config.withhold_account_login(Distribution::current());
+        login_config.withhold_account_login(effective_distribution());
         Ok(login_config)
     }
     /// A distribution without account logins has no auth provider command, whatever the config or
@@ -404,9 +404,24 @@ impl Default for GrokComConfig {
             force_login_team_uuid: None,
             preferred_method: None,
         };
-        config.withhold_account_login(Distribution::current());
+        config.withhold_account_login(effective_distribution());
         config
     }
+}
+/// Distribution for login-stack internals.
+///
+/// Product (non-test) builds always use [`Distribution::current`] — AccountLogin
+/// is withheld in GrokZen. Unit tests default to STOCK so the login machinery
+/// stays testable; set `GROK_TEST_PRODUCT_DISTRIBUTION=1` to exercise the
+/// product distribution instead.
+pub(crate) fn effective_distribution() -> Distribution {
+    #[cfg(test)]
+    {
+        if std::env::var_os("GROK_TEST_PRODUCT_DISTRIBUTION").is_none() {
+            return Distribution::STOCK;
+        }
+    }
+    Distribution::current()
 }
 /// Parses a boolean env-var value for grok's on/off flags.
 /// Bare presence enables the flag, but falsy spellings (`0`, `false`, `off`, `no`, empty) count as disabled.

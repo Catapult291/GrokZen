@@ -373,7 +373,8 @@ mod tests {
 
     #[test]
     fn tokenize_uses_baked_product_default_model() {
-        assert_eq!(crate::models::default_model(), "grok-4.6");
+        // GrokZen ships an empty default_models.json (no built-in x.ai models).
+        assert_eq!(crate::models::default_model(), "");
     }
 
     #[test]

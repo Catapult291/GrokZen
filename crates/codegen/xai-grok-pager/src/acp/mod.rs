@@ -647,6 +647,12 @@ async fn eager_auth_or_login_fallback(
     Option<serde_json::Value>,
 ) {
     if auth_methods.is_empty() {
+        // GrokZen withholds AccountLogin: empty methods means API-key/BYOK-only
+        // startup, not a forced welcome-screen login to x.ai.
+        if !xai_grok_config::Distribution::current().allows(xai_grok_config::Capability::AccountLogin)
+        {
+            return (false, None, None, AuthStartMode::Pending, None);
+        }
         return (true, None, None, AuthStartMode::Pending, None);
     }
     if needs_login {
@@ -893,6 +899,7 @@ mod tests {
             enterprise_oidc_issuer: None,
             login_label: None,
             has_auth_provider_command: false,
+            allow_account_login: true,
             preferred_method: None,
         });
         let (needs, label, method_id, mode) = startup_auth_metadata(&built.methods);

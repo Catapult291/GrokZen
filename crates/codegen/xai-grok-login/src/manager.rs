@@ -333,13 +333,15 @@ impl AuthManager {
                 "GROK_AUTH_PATH": std::env::var("GROK_AUTH_PATH").unwrap_or_else(|_| "(unset)".into()),
                 "GROK_AUTH": match std::env::var("GROK_AUTH") {
                     Err(_) => "(unset)",
-                    Ok(_) if !Distribution::current().allows(Capability::AccountLogin) => "(ignored)",
+                    Ok(_) if !crate::config::effective_distribution()
+                        .allows(Capability::AccountLogin) =>
+                    "(ignored)",
                     Ok(_) => "(set)",
                 },
             })),
         );
         let path = auth_json_path(grok_home);
-        let inline_auth = Distribution::current()
+        let inline_auth = crate::config::effective_distribution()
             .allows(Capability::AccountLogin)
             .then(|| std::env::var("GROK_AUTH").ok())
             .flatten();
@@ -1281,7 +1283,7 @@ impl AuthManager {
         diagnostic_uploader: Option<super::refresh::DiagnosticUploader>,
     ) -> bool {
         use std::sync::atomic::Ordering;
-        if !Distribution::current().allows(Capability::AccountLogin) {
+        if !crate::config::effective_distribution().allows(Capability::AccountLogin) {
             return false;
         }
         if self
