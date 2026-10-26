@@ -852,6 +852,169 @@ static KILL_TOKEN_RE: LazyLock<Regex> =
 /// process table), and substring-matching them produces high noise.
 const MIN_PKILL_PATTERN_LEN: usize = 3;
 
+/// Shell content-search tools rejected at validation time. Grok Build routes
+/// content search through `search_code`/`resolve_context`; `grep`/`rg` were
+/// removed from the tool table, so the shell path is closed too.
+const SHELL_GREP_COMMANDS: &[&str] = &["grep", "egrep", "fgrep", "rg", "ripgrep", "ugrep"];
+
+/// Split a command into segments at unquoted `;`, `|`, `&`, newlines, `$(`,
+/// and backticks so each segment's first word is a command position. Quote
+/// characters stay in the segment text (only used for the first word).
+fn split_command_segments(command: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut cur = String::new();
+    let mut chars = command.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            cur.push(c);
+            if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' => {
+                quote = Some(c);
+                cur.push(c);
+            }
+            '$' if chars.peek() == Some(&'(') => {
+                segments.push(std::mem::take(&mut cur));
+                chars.next(); // consume `(`
+            }
+            '`' | ';' | '|' | '&' | '\n' => {
+                segments.push(std::mem::take(&mut cur));
+            }
+            _ => cur.push(c),
+        }
+    }
+    segments.push(cur);
+    segments
+}
+
+/// First effective command word of a segment: skips leading `VAR=value`
+/// assignments (equals before any whitespace, value ends at whitespace or a
+/// closing quote), then takes the word up to whitespace or a quote.
+fn first_command_word(segment: &str) -> Option<&str> {
+    let mut s = segment.trim_start();
+    loop {
+        let bytes = s.as_bytes();
+        if bytes.is_empty() || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_') {
+            break;
+        }
+        let eq = s.find('=');
+        let ws = s.find(char::is_whitespace);
+        let is_assignment = match (eq, ws) {
+            (Some(eq), ws) if eq > 0 && ws.map(|ws| eq < ws).unwrap_or(true) => s[..eq]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+            _ => false,
+        };
+        if !is_assignment {
+            break;
+        }
+        let eq = eq.expect("is_assignment implies Some(eq)");
+        let after = &s[eq + 1..];
+        let rest = if after.starts_with(['"', '\'']) {
+            let q = after.as_bytes()[0];
+            match after[1..].find(q as char) {
+                Some(end) => &after[1 + end + 1..],
+                None => break,
+            }
+        } else {
+            match after.find(char::is_whitespace) {
+                Some(w) => &after[w..],
+                None => "",
+            }
+        };
+        if rest.is_empty() {
+            return None;
+        }
+        s = rest.trim_start();
+    }
+    if s.is_empty() {
+        return None;
+    }
+    s.split(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+        .next()
+        .filter(|w| !w.is_empty())
+}
+
+/// Basename of a command word with an optional `.exe` suffix and surrounding quotes stripped.
+fn command_basename(word: &str) -> &str {
+    let w = word.trim_matches(['"', '\'']);
+    let w = w.rsplit(['/', '\\']).next().unwrap_or(w);
+    w.strip_suffix(".exe")
+        .or_else(|| w.strip_suffix(".EXE"))
+        .unwrap_or(w)
+        .trim_matches(['"', '\''])
+}
+
+/// `Some(cmd)` when the command invokes a removed shell search tool in command
+/// position (including pipeline stages and `$(…)` substitutions). `git grep`
+/// and `echo grep` stay allowed: only a command word named grep/rg is banned.
+fn find_shell_grep_invocation(command: &str) -> Option<&'static str> {
+    for segment in split_command_segments(command) {
+        let Some(word) = first_command_word(&segment) else {
+            continue;
+        };
+        let base = command_basename(word);
+        if let Some(&hit) = SHELL_GREP_COMMANDS.iter().find(|c| **c == base) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod shell_grep_tests {
+    use super::find_shell_grep_invocation;
+
+    #[test]
+    fn rejects_standalone_and_pipeline_grep() {
+        assert_eq!(
+            find_shell_grep_invocation("grep -n foo src/lib.rs"),
+            Some("grep")
+        );
+        assert_eq!(
+            find_shell_grep_invocation("cargo test 2>&1 | grep ': test'"),
+            Some("grep")
+        );
+        assert_eq!(find_shell_grep_invocation("rg --files"), Some("rg"));
+        assert_eq!(
+            find_shell_grep_invocation("FOO=1 grep pattern file"),
+            Some("grep")
+        );
+        assert_eq!(
+            find_shell_grep_invocation(r"C:\tools\grep.exe -n foo bar"),
+            Some("grep")
+        );
+        assert_eq!(
+            find_shell_grep_invocation("echo done; grep -c foo file"),
+            Some("grep")
+        );
+        assert_eq!(
+            find_shell_grep_invocation("echo $(grep foo file)"),
+            Some("grep")
+        );
+    }
+
+    #[test]
+    fn allows_grep_as_argument_or_git_subcommand() {
+        assert_eq!(find_shell_grep_invocation("git grep foo"), None);
+        assert_eq!(find_shell_grep_invocation("echo grep"), None);
+        assert_eq!(find_shell_grep_invocation("type grep"), None);
+        assert_eq!(find_shell_grep_invocation(r#"printf "see grep docs""#), None);
+        assert_eq!(
+            find_shell_grep_invocation("echo \"foo | grep\""),
+            None,
+            "quoted pipe is data, not a segment"
+        );
+        assert_eq!(find_shell_grep_invocation("cat notes.txt"), None);
+        assert_eq!(find_shell_grep_invocation(""), None);
+    }
+}
+
 /// A self-matching pkill/pgrep invocation: the command word that was
 /// matched and the literal pattern argument.
 struct SelfMatchingPkill {
@@ -1540,11 +1703,12 @@ Usage notes:
   - Background commands run until they exit${%- if tools.by_kind.kill_task_action %}, until you stop them with ${{ tools.by_kind.kill_task_action }},${%- endif %} or until the ${{ background_cap_hours }}h background cap.${%- if tools.by_kind.kill_task_action %} ${{ tools.by_kind.kill_task_action }}${%- else %} Stopping a command${%- endif %}${%- if is_windows %} terminates the child's Job Object, killing every descendant process immediately.${%- else %} sends SIGTERM to the process group, then SIGKILL after ~1s; processes that did not detach via `setsid` / `nohup` are killed with it.${%- endif %}
   - If the output exceeds {max_output_bytes} characters, the middle is truncated (you keep the beginning and end) and the result includes the path to a log file with the full output, which you can read or search.
   - Set `${{ params.execute.block_until_ms }}` to 0 to run the command in the background (e.g., dev servers, long builds): it returns a task id immediately and keeps running in the background.${%- if system_reminders_enabled %} You are notified when it completes, so you can keep working; only poll it with ${{ tools.by_kind.background_task_action }} when it needs close monitoring (long-running jobs that can hang or degrade before finishing), and poll later if you end up blocked on the result.${%- elif tools.by_kind.background_task_action %} Use ${{ tools.by_kind.background_task_action }} to monitor it or wait for it to finish.${%- endif %}${%- if has_unix_utilities %} You do not need to use '&' at the end of the command when using this parameter.${%- endif %}
+  - Content search: shell `grep`/`rg` is removed. Use ${% if tools.by_kind.search %}${{ tools.by_kind.search }}${% else %}the content-search tool${% endif %} instead of shell grep/rg.
 ${%- if shell_uses_semicolon %}
   - '&&' is not supported in this shell; chain sequential commands with ';'.
 ${%- endif %}
 ${%- if not has_unix_utilities %}
-  - The Unix utilities `grep`, `head`, `tail`, `sed`, `awk`, and `find` are NOT available in this shell. Use the dedicated tools instead.
+  - The Unix utilities `head`, `tail`, `sed`, `awk`, and `find` are NOT available in this shell. Use the dedicated tools instead.
 ${%- endif %}"#
     }
 
@@ -1559,11 +1723,12 @@ Usage notes:
   - If the command writes text in a known non-UTF-8 encoding (commonly GBK from Windows tools), pass its WHATWG label in the `encoding` parameter, for example `gbk`. The tool returns UTF-8 text.
   - You can use the ${{ params.execute.is_background }} parameter to run the command in the background (e.g., dev servers, long builds): it returns a task id immediately and keeps running in the background.${%- if system_reminders_enabled %} You are notified on completion, so do not poll or sleep-wait for it.${%- elif tools.by_kind.background_task_action %} Check on it later with the ${{ tools.by_kind.background_task_action }} tool.${%- endif %}${%- if has_unix_utilities %} You do not need to use '&' at the end of the command when using this parameter.${%- endif %}
   - Background tasks normally end when the session ends. When the user says a process must outlive the conversation — a service they will still want later, or work they will return to — set `detach: true` alongside ${{ params.execute.is_background }} and explain why. The user confirms before it takes effect, and the task stays running and stoppable in later sessions. Do not set it just because a command is long-running: an ordinary build or test ends with the session and should not be detached.
+  - Content search: shell `grep`/`rg` is removed. Use ${% if tools.by_kind.search %}${{ tools.by_kind.search }}${% else %}the content-search tool${% endif %} instead of shell grep/rg.
 ${%- if shell_uses_semicolon %}
   - '&&' is not supported in this shell; chain sequential commands with ';'.
 ${%- endif %}
 ${%- if not has_unix_utilities %}
-  - The Unix utilities `grep`, `head`, `tail`, `sed`, `awk`, and `find` are NOT available in this shell. Use the dedicated tools instead.
+  - The Unix utilities `head`, `tail`, `sed`, `awk`, and `find` are NOT available in this shell. Use the dedicated tools instead.
 ${%- endif %}
 ${%- if path_guidance == "msys_translating" %}
   - MSYS path translation is active for this shell, so a POSIX path handed to a Windows program is rewritten for you: `/c/Users/name` and `/tmp/file` work as written and need no `cygpath -w`.
@@ -1584,11 +1749,12 @@ Usage notes:
   - If the command writes text in a known non-UTF-8 encoding (commonly GBK from Windows tools), pass its WHATWG label in the `encoding` parameter, for example `gbk`. The tool returns UTF-8 text.
   - Timeout enforcement: when the timeout fires, the wrapper${%- if is_windows %} terminates the child's Job Object, killing every descendant process immediately (no graceful-termination grace period).${%- else %} kills the child process group (SIGTERM, escalated to SIGKILL after a ~1s grace period).${%- endif %}
   - If the output exceeds {max_output_bytes} characters, output will be truncated before being returned to you.
+  - Content search: shell `grep`/`rg` is removed. Use ${% if tools.by_kind.search %}${{ tools.by_kind.search }}${% else %}the content-search tool${% endif %} instead of shell grep/rg.
 ${%- if shell_uses_semicolon %}
   - '&&' is not supported in this shell; chain sequential commands with ';'.
 ${%- endif %}
 ${%- if not has_unix_utilities %}
-  - The Unix utilities `grep`, `head`, `tail`, `sed`, `awk`, and `find` are NOT available in this shell. Use the dedicated tools instead.
+  - The Unix utilities `head`, `tail`, `sed`, `awk`, and `find` are NOT available in this shell. Use the dedicated tools instead.
 ${%- endif %}
 ${%- if path_guidance == "msys_translating" %}
   - MSYS path translation is active for this shell, so a POSIX path handed to a Windows program is rewritten for you: `/c/Users/name` and `/tmp/file` work as written and need no `cygpath -w`.
@@ -2031,6 +2197,17 @@ impl xai_tool_runtime::Tool for BashTool {
                  Use one of: `pkill -x <basename>` (no `-f`), `pgrep -f <pat> | xargs \
                  -r kill` invoked from a separate command, a fully-qualified path that \
                  does not appear later in the script, or kill by PID file."
+            );
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(message));
+        }
+
+        // Validate: reject shell content search (`grep`/`rg`). Those tools were
+        // removed from Grok Build; the index tools own content search now.
+        if let Some(hit) = find_shell_grep_invocation(&input.command) {
+            let message = format!(
+                "shell `{hit}` is removed from Grok Build. Use the content-search \
+                 tool (`search_code` / `resolve_context`) for workspace search, \
+                 or `read_file` for a known path."
             );
             return Err(xai_tool_runtime::ToolError::invalid_arguments(message));
         }
@@ -3553,6 +3730,24 @@ mod tests {
             "Error should mention background: {}",
             err
         );
+    }
+
+    /// Shell `grep`/`rg` are removed: the tool must reject them before spawn
+    /// and point the model at the content-search tool.
+    #[tokio::test]
+    async fn shell_grep_rejected_before_spawn() {
+        let resources = make_resources(MockTerminal::success("", 0));
+        let tool = BashTool;
+        let result = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            make_input("grep -n TODO src/lib.rs"),
+        )
+        .await;
+        assert!(result.is_err(), "grep must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("shell `grep`"), "err: {err}");
+        assert!(err.contains("search_code"), "err: {err}");
     }
 
     /// With default params (flag on) a foreground `&` is accepted end-to-end, not
@@ -5479,7 +5674,7 @@ mod tests {
             BashTool::rendered_description(None, &renderer(reminders), params, BashVersion::Current)
         }
 
-        const CURRENT_DESCRIPTION_PRODUCT: &str = "Run a bash command and return its output.\n\nUsage notes:\n  - You can specify an optional block_until_ms in milliseconds (up to 36000000ms). A foreground command still running at block_until_ms is moved to the background instead of killed; once backgrounded it runs until it exits (background cap 10h). You will receive a task id; wait for it with get_task_output. `block_until_ms: 0` runs the command in the background immediately.\n  - Background commands run until they exit, until you stop them with kill_task, or until the 10h background cap. kill_task sends SIGTERM to the process group, then SIGKILL after ~1s; processes that did not detach via `setsid` / `nohup` are killed with it.\n  - If the output exceeds {max_output_bytes} characters, the middle is truncated (you keep the beginning and end) and the result includes the path to a log file with the full output, which you can read or search.\n  - Set `block_until_ms` to 0 to run the command in the background (e.g., dev servers, long builds): it returns a task id immediately and keeps running in the background. You are notified when it completes, so you can keep working; only poll it with get_task_output when it needs close monitoring (long-running jobs that can hang or degrade before finishing), and poll later if you end up blocked on the result. You do not need to use '&' at the end of the command when using this parameter.";
+        const CURRENT_DESCRIPTION_PRODUCT: &str = "Run a bash command and return its output.\n\nUsage notes:\n  - You can specify an optional block_until_ms in milliseconds (up to 36000000ms). A foreground command still running at block_until_ms is moved to the background instead of killed; once backgrounded it runs until it exits (background cap 10h). You will receive a task id; wait for it with get_task_output. `block_until_ms: 0` runs the command in the background immediately.\n  - Background commands run until they exit, until you stop them with kill_task, or until the 10h background cap. kill_task sends SIGTERM to the process group, then SIGKILL after ~1s; processes that did not detach via `setsid` / `nohup` are killed with it.\n  - If the output exceeds {max_output_bytes} characters, the middle is truncated (you keep the beginning and end) and the result includes the path to a log file with the full output, which you can read or search.\n  - Set `block_until_ms` to 0 to run the command in the background (e.g., dev servers, long builds): it returns a task id immediately and keeps running in the background. You are notified when it completes, so you can keep working; only poll it with get_task_output when it needs close monitoring (long-running jobs that can hang or degrade before finishing), and poll later if you end up blocked on the result. You do not need to use '&' at the end of the command when using this parameter.\n  - Content search: shell `grep`/`rg` is removed. Use the content-search tool instead of shell grep/rg.";
 
         /// The `current` description is the two-knob text with `block_until_ms` in place of `timeout` and `is_background`.
         /// The kill-at-timeout sentences are gone. Nothing else changed.

@@ -188,7 +188,7 @@ fn grok_computer_toolset() -> ToolServerConfig {
         (&grok_build::SearchReplaceTool).into(),
         (&opencode::OpenCodeWriteTool).into(),
         (&grok_build::ListDirTool).into(),
-        (&grok_build::GrepTool).into(),
+        (&astrolabe::SearchCodeTool).into(),
         (&grok_build::KillTerminalCommandTool).into(),
         (&grok_build::GetTerminalCommandOutputTool).into(),
         (&grok_build::SchedulerCreateTool).into(),
@@ -266,9 +266,8 @@ fn grok_build_core_toolset_with(
 ) -> ToolServerConfig {
     let mut tools = vec![
         // Index-layer tools come first: `by_kind.search` is first-come, so
-        // `resolve_context` leads (task-start map questions) while
-        // `search_code` still precedes `grep` for content search fallback.
-        // glob/type/multiline and paths outside the workspace.
+        // `resolve_context` leads (task-start map questions) and `search_code`
+        // is the content-search tool. `grep` is removed from Grok Build.
         (&astrolabe::ResolveContextTool).into(),
         (&astrolabe::SearchCodeTool).into(),
         (&astrolabe::FindSymbolTool).into(),
@@ -280,7 +279,6 @@ fn grok_build_core_toolset_with(
         (&grok_build::ReadFileTool).into(),
         (&grok_build::SearchReplaceTool).into(),
         (&grok_build::ListDirTool).into(),
-        (&grok_build::GrepTool).into(),
         kill_task_tool_config(),
         (&grok_build::TodoWriteTool).into(),
         task_output_tool_config(),
@@ -314,7 +312,6 @@ fn grok_build_concise_toolset() -> ToolServerConfig {
             (&grok_build_concise::SearchReplaceConciseTool).into(),
             (&grok_build::ListDirTool).into(),
             (&astrolabe::SearchCodeTool).into(),
-            (&grok_build::GrepTool).into(),
             kill_task_tool_config(),
             (&grok_build::TodoWriteTool).into(),
             task_output_tool_config(),
@@ -329,7 +326,9 @@ fn grok_build_concise_toolset() -> ToolServerConfig {
     }
 }
 /// Hashline toolset: anchor-based read/edit/search and standard utilities.
-/// `hashline_tools` should be the 3 hashline `ToolConfig` entries; they carry the scheme parameters as tool params.
+/// `hashline_tools` should be the 2 hashline `ToolConfig` entries (read/edit);
+/// they carry the scheme parameters as tool params. Content search stays on
+/// `search_code` — `hashline_grep` was removed with `grep`.
 pub fn grok_build_hashline_toolset(
     hashline_tools: Vec<xai_grok_tools::registry::types::ToolConfig>,
 ) -> ToolServerConfig {
@@ -389,8 +388,7 @@ fn explore_toolset() -> ToolServerConfig {
             (&astrolabe::FindReferencesTool).into(),
             (&astrolabe::GotoDefinitionTool).into(),
             (&astrolabe::GetDiagnosticsTool).into(),
-            (&grok_build::GrepTool).into(),
-        ],
+            ],
         behavior_preset: None,
     }
 }
@@ -409,7 +407,6 @@ fn plan_toolset() -> ToolServerConfig {
             (&astrolabe::FindReferencesTool).into(),
             (&astrolabe::GotoDefinitionTool).into(),
             (&astrolabe::GetDiagnosticsTool).into(),
-            (&grok_build::GrepTool).into(),
             // (&grok_build::SkillTool).into(),
             (&grok_build::TodoWriteTool).into(),
             // search_replace and run_terminal_command intentionally omitted (read-only)
@@ -434,7 +431,6 @@ fn grok_build_plan_toolset() -> ToolServerConfig {
             (&grok_build::ReadFileTool).into(),
             (&grok_build::SearchReplaceTool).into(),
             (&grok_build::ListDirTool).into(),
-            (&grok_build::GrepTool).into(),
             kill_task_tool_config(),
             (&grok_build::TodoWriteTool).into(),
             task_output_tool_config(),
@@ -465,7 +461,7 @@ fn orchestrator_toolset() -> ToolServerConfig {
             bash_tool_config(),
             (&grok_build::ReadFileTool).into(),
             (&grok_build::ListDirTool).into(),
-            (&grok_build::GrepTool).into(),
+            (&astrolabe::SearchCodeTool).into(),
             // Subagent orchestration
             task_tool_config(),
             task_output_tool_config(),
@@ -521,7 +517,6 @@ fn grok_build_plan_no_subagents_toolset() -> ToolServerConfig {
             (&grok_build::ReadFileTool).into(),
             (&grok_build::SearchReplaceTool).into(),
             (&grok_build::ListDirTool).into(),
-            (&grok_build::GrepTool).into(),
             kill_task_tool_config(),
             (&grok_build::TodoWriteTool).into(),
             task_output_tool_config(),
@@ -557,7 +552,6 @@ fn grok_build_ask_user_toolset() -> ToolServerConfig {
             (&grok_build::ReadFileTool).into(),
             (&grok_build::SearchReplaceTool).into(),
             (&grok_build::ListDirTool).into(),
-            (&grok_build::GrepTool).into(),
             kill_task_tool_config(),
             (&grok_build::TodoWriteTool).into(),
             task_output_tool_config(),
@@ -1438,18 +1432,13 @@ impl AgentDefinition {
         file_tools: Vec<xai_grok_tools::registry::types::ToolConfig>,
     ) {
         // Slot layout: `[standard id, hashline id, alternates…]`. Only the
-        // first two swap; `search_code` shares the search slot but has no
-        // anchor variant, so it stays in place.
+        // first two swap. Content search is `search_code` alone: `grep` and
+        // `hashline_grep` were removed, so there is no search-slot pair.
         const FILE_TOOL_SLOTS: &[&[&str]] = &[
             &["GrokBuild:read_file", "GrokBuildHashline:hashline_read"],
             &[
                 "GrokBuild:search_replace",
                 "GrokBuildHashline:hashline_edit",
-            ],
-            &[
-                "GrokBuild:grep",
-                "GrokBuildHashline:hashline_grep",
-                "GrokBuild:search_code",
             ],
         ];
         for slot in FILE_TOOL_SLOTS {
@@ -1749,10 +1738,8 @@ mod tests {
         assert!(explore.tools.len() < plan.tools.len());
         assert!(plan.tools.len() < gb.tools.len());
     }
-    /// `by_kind` resolution is first-come, so `search_code` must stay ahead of
-    /// `grep` (content-search templates); `resolve_context` leads the index
-    /// block for task-start routing. The read-only presets must carry the
-    /// index tools too, or subagents keep searching with `grep`.
+    /// `grep` is removed from every Grok Build toolset; `search_code` owns the
+    /// content-search slot and the index tools ship in the read-only presets.
     #[test]
     fn index_tools_lead_the_search_slot_and_ship_in_read_only_presets() {
         let index_tools = [
@@ -1762,7 +1749,7 @@ mod tests {
             ToolConfig::from(&astrolabe::ResolveContextTool).id,
             ToolConfig::from(&astrolabe::GetLanguagesTool).id,
         ];
-        let grep_id = ToolConfig::from(&grok_build::GrepTool).id;
+        let grep_id = "GrokBuild:grep";
         let position = |cfg: &ToolServerConfig, id: &str| cfg.tools.iter().position(|t| t.id == id);
         for (label, cfg) in [
             ("grok-build", default_grok_build_toolset()),
@@ -1776,11 +1763,14 @@ mod tests {
                     "{label} is missing index tool `{id}`"
                 );
             }
-            let search_at = position(&cfg, &index_tools[0]).unwrap();
-            let grep_at = position(&cfg, &grep_id).unwrap();
             assert!(
-                search_at < grep_at,
-                "{label}: search_code must precede grep so by_kind.search resolves to it"
+                position(&cfg, grep_id).is_none(),
+                "{label}: grep must not be listed"
+            );
+            let search = ToolConfig::from(&astrolabe::SearchCodeTool).id;
+            assert!(
+                position(&cfg, &search).is_some(),
+                "{label} is missing search_code"
             );
         }
         for (label, cfg) in [
@@ -1794,18 +1784,15 @@ mod tests {
                 );
             }
             assert!(
-                position(&cfg, &index_tools[0]).unwrap() < position(&cfg, &grep_id).unwrap(),
-                "{label}: search_code must precede grep"
+                position(&cfg, grep_id).is_none(),
+                "{label}: grep must not be listed"
             );
         }
-        // The concise preset keeps only `search_code`; it still has to hold
-        // the Search slot ahead of `grep`.
+        // The concise preset keeps only `search_code`.
         let concise = toolset_for_preset("grok-build-concise").unwrap();
         let concise_search = ToolConfig::from(&astrolabe::SearchCodeTool).id;
         assert!(position(&concise, &concise_search).is_some());
-        assert!(
-            position(&concise, &concise_search).unwrap() < position(&concise, &grep_id).unwrap()
-        );
+        assert!(position(&concise, grep_id).is_none());
     }
     /// `by_kind.lsp` is first-come; the generic `lsp` tool owns that slot and
     /// the precise Astrolabe tools follow it.
@@ -1827,9 +1814,9 @@ mod tests {
         }
     }
 
-    /// `search_code` shares the search slot with `grep`, so the hashline swap
-    /// must move `grep` and leave the index search in place; the hashline
-    /// toolset also turns on the "bodies carry no anchors" note.
+    /// The hashline swap only moves read/edit; content search stays on
+    /// `search_code` (hashline_grep is removed) and the toolset flags the
+    /// "bodies carry no anchors" note while hashline is active.
     #[test]
     fn hashline_override_keeps_search_code_and_flags_its_note() {
         let mut def = AgentDefinition::builtin_defaults("test-agent", "test");
@@ -1844,10 +1831,12 @@ mod tests {
             .map(|t| t.id.as_str())
             .collect();
         assert!(ids.contains(&"GrokBuild:search_code"), "{ids:?}");
-        assert!(ids.contains(&"GrokBuildHashline:hashline_grep"), "{ids:?}");
         assert!(!ids.contains(&"GrokBuild:grep"), "{ids:?}");
+        assert!(!ids.contains(&"GrokBuildHashline:hashline_grep"), "{ids:?}");
         assert!(!ids.contains(&"GrokBuild:read_file"), "{ids:?}");
         assert!(!ids.contains(&"GrokBuild:search_replace"), "{ids:?}");
+        assert!(ids.contains(&"GrokBuildHashline:hashline_read"), "{ids:?}");
+        assert!(ids.contains(&"GrokBuildHashline:hashline_edit"), "{ids:?}");
         let search = def
             .tool_config
             .tools
@@ -1865,7 +1854,7 @@ mod tests {
 
         // Swapping back to the standard file tools restores the slots and
         // clears the note.
-        let standard = ["read_file", "search_replace", "grep"]
+        let standard = ["read_file", "search_replace"]
             .map(|id| ToolConfig::from_id(format!("GrokBuild:{id}")));
         def.override_file_tools(standard.to_vec());
         let ids: Vec<&str> = def
@@ -1874,9 +1863,10 @@ mod tests {
             .iter()
             .map(|t| t.id.as_str())
             .collect();
-        assert!(ids.contains(&"GrokBuild:grep"), "{ids:?}");
         assert!(ids.contains(&"GrokBuild:read_file"), "{ids:?}");
-        assert!(!ids.contains(&"GrokBuildHashline:hashline_grep"), "{ids:?}");
+        assert!(ids.contains(&"GrokBuild:search_replace"), "{ids:?}");
+        assert!(!ids.contains(&"GrokBuildHashline:hashline_read"), "{ids:?}");
+        assert!(!ids.contains(&"GrokBuildHashline:hashline_edit"), "{ids:?}");
         let search = def
             .tool_config
             .tools

@@ -968,11 +968,8 @@ impl ToolRegistryBuilder {
             return errors;
         }
         {
-            let standard_file_ids: &[&str] = &[
-                "GrokBuild:read_file",
-                "GrokBuild:search_replace",
-                "GrokBuild:grep",
-            ];
+            let standard_file_ids: &[&str] =
+                &["GrokBuild:read_file", "GrokBuild:search_replace"];
             let hashline_file_ids: &[&str] = &[
                 "GrokBuildHashline:hashline_read",
                 "GrokBuildHashline:hashline_edit",
@@ -991,8 +988,8 @@ impl ToolRegistryBuilder {
                     RequirementError::new(
                         "(file-toolset)",
                         "mixed standard and hashline file tools are not allowed. \
-                         Use either the standard bundle (read_file, search_replace, grep) \
-                         or the hashline bundle (hashline_read, hashline_edit, hashline_grep), \
+                         Use either the standard bundle (read_file, search_replace) \
+                         or the hashline bundle (hashline_read, hashline_edit), \
                          not both.",
                     )
                     .with_field_path("tools")

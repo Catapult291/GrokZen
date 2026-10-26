@@ -403,10 +403,11 @@ impl HashlineSchemeConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileToolset {
-    /// Standard toolset: read_file, search_replace, grep.
+    /// Standard toolset: read_file, search_replace, search_code.
     #[default]
     Standard,
-    /// Hashline toolset: hashline_read, hashline_edit, hashline_grep.
+    /// Hashline toolset: hashline_read, hashline_edit (content search stays on
+    /// `search_code`; `hashline_grep` was removed with `grep`).
     Hashline,
 }
 
@@ -421,7 +422,7 @@ impl FileToolset {
             Self::Standard => Ok(vec![
                 ToolConfig::for_tool::<grok_build::ReadFileTool>(),
                 ToolConfig::for_tool::<grok_build::SearchReplaceTool>(),
-                ToolConfig::for_tool::<grok_build::GrepTool>(),
+                ToolConfig::for_tool::<xai_grok_tools::implementations::astrolabe::SearchCodeTool>(),
             ]),
             Self::Hashline => {
                 hashline_config.validate()?;
@@ -446,15 +447,6 @@ impl FileToolset {
                     },
                     ToolConfig {
                         id: "GrokBuildHashline:hashline_edit".to_owned(),
-                        params: params_map.clone(),
-                        name_override: None,
-                        params_name_overrides: None,
-                        description_override: None,
-                        behavior_version: None,
-                        kind: None,
-                    },
-                    ToolConfig {
-                        id: "GrokBuildHashline:hashline_grep".to_owned(),
                         params: params_map,
                         name_override: None,
                         params_name_overrides: None,
@@ -486,7 +478,8 @@ mod tests {
         let ids: Vec<&str> = configs.iter().map(|c| c.id.as_str()).collect();
         assert!(ids.contains(&"GrokBuild:read_file"));
         assert!(ids.contains(&"GrokBuild:search_replace"));
-        assert!(ids.contains(&"GrokBuild:grep"));
+        assert!(ids.contains(&"GrokBuild:search_code"));
+        assert!(!ids.contains(&"GrokBuild:grep"));
     }
 
     #[test]
@@ -494,11 +487,11 @@ mod tests {
         let configs = FileToolset::Hashline
             .tool_configs(&HashlineSchemeConfig::default())
             .unwrap();
-        assert_eq!(configs.len(), 3);
+        assert_eq!(configs.len(), 2);
         let ids: Vec<&str> = configs.iter().map(|c| c.id.as_str()).collect();
         assert!(ids.contains(&"GrokBuildHashline:hashline_read"));
         assert!(ids.contains(&"GrokBuildHashline:hashline_edit"));
-        assert!(ids.contains(&"GrokBuildHashline:hashline_grep"));
+        assert!(!ids.contains(&"GrokBuildHashline:hashline_grep"));
     }
 
     /// Plan/explore omit `search_replace` by contract ("no Write/Edit/MultiEdit"); the hashline override must not hand it back as `hashline_edit`.
