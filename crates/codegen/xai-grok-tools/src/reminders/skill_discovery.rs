@@ -121,6 +121,12 @@ impl Reminder for SkillDiscoveryReminder {
         resources: SharedResources,
         tool_output: &ToolOutput,
     ) -> Vec<String> {
+        // Skills that entered the listing on this tool call (conditional
+        // activation, direct SKILL.md registration, and walk discovery).
+        // Emitted as a single absorption hint at the end so one tool call
+        // cannot produce two hints for the same judgment pass.
+        let mut entered: Vec<crate::implementations::skills::types::SkillInfo> = Vec::new();
+
         // 1. Activate `paths:`-gated skills matching any file the tool touched
         //    (includes multi-file `apply_patch` edits).
         let activation_paths = Self::extract_activation_paths(tool_output);
@@ -128,13 +134,16 @@ impl Reminder for SkillDiscoveryReminder {
             let path_refs: Vec<&Path> = activation_paths.iter().map(PathBuf::as_path).collect();
             let mut res = resources.lock().await;
             if let Some(tracker) = res.get_mut::<SkillManager>() {
-                tracker.activate_conditional_skills_for_paths(&path_refs);
+                entered.extend(tracker.activate_conditional_skills_for_paths(&path_refs));
             }
         }
 
         // 2. Discovery walks from a single representative path (read/list/edit).
+        //    Tools that only produce activation paths (e.g. multi-file
+        //    apply_patch without a single target) still get a hint for skills
+        //    that just entered via step 1.
         let Some(target_path) = Self::extract_target_path(tool_output) else {
-            return vec![];
+            return absorption_hint(entered);
         };
 
         // Direct SKILL.md detection: when a tool writes (or reads) a SKILL.md file, register it immediately. The normal
@@ -158,21 +167,21 @@ impl Reminder for SkillDiscoveryReminder {
             if !skills.is_empty() {
                 let mut res = resources.lock().await;
                 if let Some(tracker) = res.get_mut::<SkillManager>() {
-                    return absorption_hint(tracker.add_discovered(skills));
+                    entered.extend(tracker.add_discovered(skills));
                 }
             }
-            return vec![];
+            return absorption_hint(entered);
         }
 
         // 2. Snapshot context under lock, then RELEASE the lock before I/O.
         let (cwd, git_root, mut checked_dirs_snapshot, compat) = {
             let res = resources.lock().await;
             let Some(tracker) = res.get::<SkillManager>() else {
-                return vec![];
+                return absorption_hint(entered);
             };
             let cwd = match tracker.cwd.clone() {
                 Some(c) => c,
-                None => return vec![],
+                None => return absorption_hint(entered),
             };
             (
                 cwd,
@@ -195,33 +204,34 @@ impl Reminder for SkillDiscoveryReminder {
 
         if discovered.is_empty() {
             // Even if no skills found, merge checked_dirs back so we don't
-            // re-stat the same directories on future calls.
+            // re-stat the same directories on future calls. Conditional skills
+            // that entered in step 1 still need their absorption hint.
             let mut res = resources.lock().await;
             if let Some(tracker) = res.get_mut::<SkillManager>() {
                 tracker.checked_dirs.extend(checked_dirs_snapshot);
             }
-            return vec![];
+            return absorption_hint(entered);
         }
 
         // Re-acquire lock and merge results into tracker. The reminder does NOT produce
         // listing text (the session drains that from the tracker via
         // take_pending_reconciliation()); it only emits the fixed absorption-judgment
         // hint when new skills actually entered the listing.
-        let any_new = {
+        {
             let mut res = resources.lock().await;
             let tracker = match res.get_mut::<SkillManager>() {
                 Some(t) => t,
-                None => return vec![],
+                None => return absorption_hint(entered),
             };
 
             // Merge checked_dirs from the snapshot back into the tracker.
             tracker.checked_dirs.extend(checked_dirs_snapshot);
 
             // Add discovered skills (dedup by canonical path, sets pending flag).
-            tracker.add_discovered(discovered)
-        };
+            entered.extend(tracker.add_discovered(discovered));
+        }
 
-        absorption_hint(any_new)
+        absorption_hint(entered)
     }
 }
 
@@ -400,5 +410,127 @@ mod tests {
             .collect_reminders(shared, &output)
             .await;
         assert!(hints.is_empty(), "expected no hint, got: {hints:?}");
+    }
+
+    /// A `paths:`-gated skill held at seed must emit the absorption hint when
+    /// a matching file is touched (F2: activation previously discarded its
+    /// return value).
+    #[tokio::test]
+    async fn conditional_skill_activation_emits_absorption_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join(".grok").join("skills").join("gated");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: gated\ndescription: Held until a trigger file is touched.\nrole: router\npaths: [\"trigger-*.txt\"]\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        let mut mgr = SkillManager::new();
+        mgr.cwd = Some(tmp.path().to_path_buf());
+        mgr.git_root = None;
+        let skill_md = skill_dir.join("SKILL.md");
+        mgr.seed(
+            Some(tmp.path().to_path_buf()),
+            None,
+            vec![crate::implementations::skills::types::SkillInfo {
+                name: "gated".to_string(),
+                description: "Held until a trigger file is touched.".to_string(),
+                path: skill_md.to_string_lossy().to_string(),
+                role: Some("router".to_string()),
+                paths: Some(vec!["trigger-*.txt".to_string()]),
+                ..crate::implementations::skills::types::SkillInfo::default()
+            }],
+            None,
+            None,
+            None,
+        );
+        // Drain the baseline so only the activation can fire a hint.
+        let _ = mgr.take_pending_reconciliation();
+        let mut res = Resources::default();
+        res.insert(mgr);
+        let shared: SharedResources = std::sync::Arc::new(tokio::sync::Mutex::new(res));
+
+        // ApplyPatch has activation paths but no single target_path — the
+        // early-return must still emit the activation hint.
+        let trigger = tmp.path().join("trigger-foo.txt");
+        let output = ToolOutput::ApplyPatch(ApplyPatchOutput::Success {
+            files: vec![edited(trigger.to_str().unwrap(), None)],
+            tool_output_for_prompt: String::new(),
+        });
+
+        let first = SkillDiscoveryReminder
+            .collect_reminders(shared.clone(), &output)
+            .await;
+        assert_eq!(
+            first.len(),
+            1,
+            "conditional activation must emit exactly the hint: {first:?}"
+        );
+        assert!(
+            first[0].contains("gated")
+                && first[0].contains("skill-curator")
+                && first[0].contains("skill-router-ledger"),
+            "hint must name the activated skill and absorption protocol: {}",
+            first[0]
+        );
+
+        let second = SkillDiscoveryReminder
+            .collect_reminders(shared.clone(), &output)
+            .await;
+        assert!(
+            second.is_empty(),
+            "already-activated conditional skill must not re-emit: {second:?}"
+        );
+    }
+
+    /// Activation-only tool output (no `extract_target_path`) still hints for
+    /// skills that just entered (F2 early-return note).
+    #[tokio::test]
+    async fn conditional_activation_with_no_target_path_still_hints() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut mgr = SkillManager::new();
+        mgr.cwd = Some(tmp.path().to_path_buf());
+        mgr.git_root = None;
+        mgr.seed(
+            Some(tmp.path().to_path_buf()),
+            None,
+            vec![crate::implementations::skills::types::SkillInfo {
+                name: "gated".to_string(),
+                description: "Held until a trigger file is touched.".to_string(),
+                path: tmp
+                    .path()
+                    .join(".grok")
+                    .join("skills")
+                    .join("gated")
+                    .join("SKILL.md")
+                    .to_string_lossy()
+                    .to_string(),
+                paths: Some(vec!["trigger-*.txt".to_string()]),
+                ..crate::implementations::skills::types::SkillInfo::default()
+            }],
+            None,
+            None,
+            None,
+        );
+        let mut res = Resources::default();
+        res.insert(mgr);
+        let shared: SharedResources = std::sync::Arc::new(tokio::sync::Mutex::new(res));
+
+        let trigger = tmp.path().join("trigger-foo.txt");
+        let output = ToolOutput::ApplyPatch(ApplyPatchOutput::Success {
+            files: vec![edited(trigger.to_str().unwrap(), None)],
+            tool_output_for_prompt: String::new(),
+        });
+        assert!(
+            SkillDiscoveryReminder::extract_target_path(&output).is_none(),
+            "ApplyPatch must not provide a single discovery target"
+        );
+
+        let hints = SkillDiscoveryReminder
+            .collect_reminders(shared, &output)
+            .await;
+        assert_eq!(hints.len(), 1, "activation-only path must hint: {hints:?}");
+        assert!(hints[0].contains("gated"), "hint names gated: {}", hints[0]);
     }
 }

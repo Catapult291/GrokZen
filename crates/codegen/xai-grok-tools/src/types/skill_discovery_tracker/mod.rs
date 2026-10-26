@@ -263,8 +263,12 @@ fn render_listing(
             announced,
             params.real_prefix,
             params.display_prefix,
-            // The XML format is only enabled by templates that request it.
-            XmlRenderMode::Verbatim,
+            // Match the startup preamble's budgeted XML so mid-session
+            // discovery renders role= the same way (F1).
+            XmlRenderMode::Budgeted {
+                budget_chars: params.budget,
+                overflow_indicator: true,
+            },
         )
         .map(|rows| format!("{envelope_open}{rows}{envelope_close}"))
     } else {
@@ -529,19 +533,25 @@ impl SkillManager {
     }
 
     /// Activate conditional skills whose `paths:` match any touched file, then
-    /// surface them via `add_discovered`. Returns true if any activated.
-    pub fn activate_conditional_skills_for_paths(&mut self, touched: &[&std::path::Path]) -> bool {
+    /// surface them via `add_discovered`. Returns the skills that actually
+    /// entered the listing (empty when nothing matched or all were already
+    /// known), so callers can emit absorption hints the same way as
+    /// [`Self::add_discovered`].
+    pub fn activate_conditional_skills_for_paths(
+        &mut self,
+        touched: &[&std::path::Path],
+    ) -> Vec<SkillInfo> {
         if self.conditional.is_empty() {
-            return false;
+            return Vec::new();
         }
         let Some(cwd) = self.cwd.clone() else {
-            return false;
+            return Vec::new();
         };
         let newly = self.conditional.activate_for_paths(touched, &cwd);
         if newly.is_empty() {
-            return false;
+            return Vec::new();
         }
-        !self.add_discovered(newly).is_empty()
+        self.add_discovered(newly)
     }
 
     /// Drain the pending reconciliation, computing projections internally and returning only the runtime skills and session
@@ -787,9 +797,43 @@ mod tests {
 
         // Touching a matching file activates it.
         let touched = cwd.join("src").join("main.rs");
-        assert!(mgr.activate_conditional_skills_for_paths(&[touched.as_path()]));
+        assert!(!mgr.activate_conditional_skills_for_paths(&[touched.as_path()]).is_empty());
         let r = mgr.take_pending_reconciliation().unwrap();
         assert!(r.runtime_skills.iter().any(|s| s.name == "gated"));
+    }
+
+    /// Mid-session discovery with XML templates must render `role=` the same
+    /// way as the startup budgeted XML (F1). Verbatim stays role-free.
+    #[test]
+    fn mid_session_xml_discovery_renders_role() {
+        let mut mgr = SkillManager::new();
+        mgr.set_xml_format(true);
+        assert!(mgr.add_discovered(vec![SkillInfo {
+            role: Some("router".to_owned()),
+            ..make_skill("re", "/skills/re/SKILL.md")
+        }])
+        .len()
+            == 1);
+        let text = mgr
+            .take_pending()
+            .and_then(|(_, effects)| effects.system_reminder)
+            .expect("discovery must emit a listing");
+        assert!(
+            text.contains("role=\"router\""),
+            "mid-session budgeted XML must carry role=: {text}"
+        );
+
+        let mut plain = SkillManager::new();
+        plain.set_xml_format(true);
+        assert!(plain
+            .add_discovered(vec![make_skill("plain", "/skills/plain/SKILL.md")])
+            .len()
+            == 1);
+        let text = plain
+            .take_pending()
+            .and_then(|(_, effects)| effects.system_reminder)
+            .expect("discovery must emit a listing");
+        assert!(!text.contains("role="), "no role attr without role: {text}");
     }
 
     #[test]
@@ -812,7 +856,7 @@ mod tests {
         assert!(mgr.discovered_skills().is_empty());
 
         let touched = cwd.join("src").join("main.rs");
-        assert!(mgr.activate_conditional_skills_for_paths(&[touched.as_path()]));
+        assert!(!mgr.activate_conditional_skills_for_paths(&[touched.as_path()]).is_empty());
         assert_eq!(mgr.discovered_skills().len(), 1);
     }
 
@@ -833,7 +877,7 @@ mod tests {
 
         // The held skill survives and still activates on a matching touch.
         let touched = cwd.join("src").join("main.rs");
-        assert!(mgr.activate_conditional_skills_for_paths(&[touched.as_path()]));
+        assert!(!mgr.activate_conditional_skills_for_paths(&[touched.as_path()]).is_empty());
         assert!(mgr.discovered_skills().iter().any(|s| s.name == "gated"));
     }
 
@@ -853,7 +897,7 @@ mod tests {
         let _ = mgr.take_pending_reconciliation();
 
         let touched = cwd.join("docs").join("readme.md");
-        assert!(!mgr.activate_conditional_skills_for_paths(&[touched.as_path()]));
+        assert!(mgr.activate_conditional_skills_for_paths(&[touched.as_path()]).is_empty());
         assert!(mgr.take_pending_reconciliation().is_none());
     }
 
@@ -872,7 +916,7 @@ mod tests {
         );
         let _ = mgr.take_pending_reconciliation();
         let touched = cwd.join("src").join("lib.rs");
-        assert!(mgr.activate_conditional_skills_for_paths(&[touched.as_path()]));
+        assert!(!mgr.activate_conditional_skills_for_paths(&[touched.as_path()]).is_empty());
         let _ = mgr.take_pending_reconciliation();
 
         // Re-seed (e.g. plugin reload): the activated skill stays visible.
@@ -904,7 +948,7 @@ mod tests {
         let mut manager = SkillManager::new();
         manager.cwd = Some(cwd.path().into());
         manager.add_discovered(vec![plugin.clone()]);
-        assert!(manager.activate_conditional_skills_for_paths(&[&cwd.path().join("src/a")]));
+        assert!(!manager.activate_conditional_skills_for_paths(&[&cwd.path().join("src/a")]).is_empty());
         manager.update_startup_baseline(vec![plugin.clone()]);
         let mut updated = plugin;
         updated.description = "updated".to_owned();
@@ -929,7 +973,7 @@ mod tests {
         let mut manager = SkillManager::new();
         manager.cwd = Some(cwd.path().into());
         manager.update_plugin_skills(vec![plugin_a.clone()]);
-        assert!(manager.activate_conditional_skills_for_paths(&[&cwd.path().join("src/a")]));
+        assert!(!manager.activate_conditional_skills_for_paths(&[&cwd.path().join("src/a")]).is_empty());
         let _ = manager.take_pending();
         manager.update_startup_baseline(vec![plugin_a.clone(), make_skill("queued", "/queued")]);
         manager.add_discovered(vec![make_skill("native", "/dynamic")]);
@@ -992,7 +1036,7 @@ mod tests {
 
         // Activate, then reload (promotes the activated skill into the baseline).
         let touched = cwd.join("src").join("main.rs");
-        assert!(mgr.activate_conditional_skills_for_paths(&[touched.as_path()]));
+        assert!(!mgr.activate_conditional_skills_for_paths(&[touched.as_path()]).is_empty());
         let _ = mgr.take_pending_reconciliation();
         mgr.update_startup_baseline(vec![make_conditional_skill(
             "gated",
