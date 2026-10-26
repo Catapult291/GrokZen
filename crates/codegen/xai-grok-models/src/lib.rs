@@ -32,13 +32,16 @@ static DEFAULTS: LazyLock<DefaultModels> = LazyLock::new(|| {
     let defaults: DefaultModels = serde_json::from_str(DEFAULT_MODELS_JSON)
         .expect("default_models.json: invalid JSON or missing 'default' field");
 
-    // Baked-in JSON: a mismatch here is a developer error
+    // Baked-in JSON: a mismatch here is a developer error.
+    // An empty catalog is valid for GrokZen (no built-in x.ai models).
     let model_ids: Vec<&str> = defaults.models.iter().map(|m| m.model.as_str()).collect();
-    assert!(
-        model_ids.contains(&defaults.default.as_str()),
-        "default_models.json: 'default' is '{}' but 'models' array only has {model_ids:?}",
-        defaults.default,
-    );
+    if !defaults.default.is_empty() {
+        assert!(
+            model_ids.contains(&defaults.default.as_str()),
+            "default_models.json: 'default' is '{}' but 'models' array only has {model_ids:?}",
+            defaults.default,
+        );
+    }
 
     defaults
 });

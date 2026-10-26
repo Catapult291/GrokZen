@@ -66,6 +66,9 @@ pub struct AuthMethodsBuildInputs<'a> {
     pub login_label: Option<&'a str>,
     /// True if `grok_com_config.auth_provider_command` is configured (sets `meta.external_provider = true` on the `grok.com` method).
     pub has_auth_provider_command: bool,
+    /// Whether this build may advertise an interactive account-login method.
+    /// GrokZen passes `false` (`Distribution::current()` withholds `AccountLogin`).
+    pub allow_account_login: bool,
     /// Config pin (`[auth] preferred_method`).
     /// `None` keeps multi-method fallthrough; `Some` is fail-closed (only that method family).
     pub preferred_method: Option<PreferredAuthMethod>,
@@ -93,6 +96,7 @@ pub fn build_auth_methods(inputs: AuthMethodsBuildInputs<'_>) -> BuiltAuthMethod
         enterprise_oidc_issuer,
         login_label,
         has_auth_provider_command,
+        allow_account_login,
         preferred_method,
     } = inputs;
 
@@ -104,6 +108,7 @@ pub fn build_auth_methods(inputs: AuthMethodsBuildInputs<'_>) -> BuiltAuthMethod
             enterprise_oidc_issuer,
             login_label,
             has_auth_provider_command,
+            allow_account_login,
         ),
         None => build_unpinned(
             has_external_api_key,
@@ -112,6 +117,7 @@ pub fn build_auth_methods(inputs: AuthMethodsBuildInputs<'_>) -> BuiltAuthMethod
             enterprise_oidc_issuer,
             login_label,
             has_auth_provider_command,
+            allow_account_login,
         ),
     }
 }
@@ -140,6 +146,7 @@ fn build_pinned_oidc(
     enterprise_oidc_issuer: Option<&str>,
     login_label: Option<&str>,
     has_auth_provider_command: bool,
+    allow_account_login: bool,
 ) -> BuiltAuthMethods {
     let mut methods: Vec<acp::AuthMethod> = Vec::new();
     let mut default_auth_method_id: Option<acp::AuthMethodId> = None;
@@ -155,6 +162,7 @@ fn build_pinned_oidc(
         enterprise_oidc_issuer,
         login_label,
         has_auth_provider_command,
+        allow_account_login,
     );
 
     BuiltAuthMethods {
@@ -170,6 +178,7 @@ fn build_unpinned(
     enterprise_oidc_issuer: Option<&str>,
     login_label: Option<&str>,
     has_auth_provider_command: bool,
+    allow_account_login: bool,
 ) -> BuiltAuthMethods {
     let mut methods: Vec<acp::AuthMethod> = Vec::new();
     let mut default_auth_method_id: Option<acp::AuthMethodId> = None;
@@ -202,6 +211,7 @@ fn build_unpinned(
         enterprise_oidc_issuer,
         login_label,
         has_auth_provider_command,
+        allow_account_login,
     );
 
     BuiltAuthMethods {
@@ -216,7 +226,12 @@ fn push_interactive_login(
     enterprise_oidc_issuer: Option<&str>,
     login_label: Option<&str>,
     has_auth_provider_command: bool,
+    allow_account_login: bool,
 ) {
+    // GrokZen: no account-login channel — never advertise grok.com / IdP sign-in.
+    if !allow_account_login {
+        return;
+    }
     if has_enterprise_oidc {
         // Caller invariant: `enterprise_oidc_issuer` MUST be `Some(...)` when `has_enterprise_oidc` is true
         // Production callers derive both from the same `cfg.grok_com_config.oidc` Option
@@ -468,6 +483,8 @@ mod tests {
             enterprise_oidc_issuer: None,
             login_label: None,
             has_auth_provider_command: false,
+            // Unit tests exercise the STOCK advertise path unless they opt out.
+            allow_account_login: true,
             preferred_method: None,
         }
     }
@@ -489,6 +506,25 @@ mod tests {
 
     // build_auth_methods regression: pin production call-site ordering.
     // Reordering so `xai.api_key` is after login methods must fail the tests below.
+
+    #[test]
+    fn account_login_withheld_never_advertises_interactive_login() {
+        let built = build_auth_methods(AuthMethodsBuildInputs {
+            has_external_api_key: false,
+            has_cached_token: false,
+            has_enterprise_oidc: true,
+            enterprise_oidc_issuer: Some("https://idp.example.com"),
+            login_label: Some("Acme"),
+            has_auth_provider_command: false,
+            allow_account_login: false,
+            preferred_method: None,
+        });
+        assert!(
+            built.methods.is_empty(),
+            "allow_account_login=false must not advertise grok.com or enterprise OIDC"
+        );
+        assert_eq!(built.default_auth_method_id, None);
+    }
 
     /// BYOK with only per-model `env_key` must list `xai.api_key` first.
     #[test]
@@ -866,16 +902,13 @@ mod tests {
         assert_eq!(read_xai_api_key_env().unwrap(), "new-key");
     }
 
-    // -- grok login --legacy regression coverage ------------------------ `grok login --legacy` produces a GrokAuth with `auth_mode: WebLogin`, `oidc_issuer: None`, and no `expires_at` (30-day hardcoded TTL)
-    // When this token is in the `GROK_AUTH` env var (or the legacy scope fallback in auth.json), `AuthManager::new` returns it from `current()`
-    // That feeds `has_cached_token = true` into `build_auth_methods`, which puts `cached_token` first `startup_auth_metadata()` then returns `needs_login = false`: legacy users get frictionless auth, no login screen This test pins the env-var path (highest priority in AuthManager) end-to-end
+    // -- legacy token without AccountLogin ------------------------------ GrokZen withholds AccountLogin, so `GROK_AUTH` / auth.json session tokens are ignored.
 
-    /// END-TO-END REGRESSION TEST for a legacy auth token (WebLogin, no expires_at) in the `GROK_AUTH` env var with no other auth available.
-    /// `AuthManager` MUST load it and `build_auth_methods` must advertise `cached_token` first.
-    /// The pager therefore skips the login screen (frictionless legacy auth).
+    /// GrokZen withholds AccountLogin: a legacy token in `GROK_AUTH` is ignored.
+    /// Startup uses only API-key / BYOK credentials; no session login path remains.
     #[test]
     #[serial]
-    fn grok_login_legacy_token_does_not_require_login() {
+    fn grok_login_legacy_token_is_ignored_without_account_login() {
         use xai_grok_login::{AuthManager, AuthMode, GrokAuth, GrokComConfig};
 
         // Ensure clean slate for "no other auth available".
@@ -902,54 +935,33 @@ mod tests {
         let legacy_json = serde_json::to_string(&legacy_token).expect("serialize legacy token");
         let _g = EnvGuard::set("GROK_AUTH", &legacy_json);
 
-        // AuthManager picks it up from the env var directly (no file needed).
+        // AccountLogin is withheld in this build: AuthManager must not load the session token.
         let dir = tempfile::tempdir().unwrap();
         let cfg = GrokComConfig::default();
         let mgr = AuthManager::new(dir.path(), cfg);
         let current = mgr.current();
         assert!(
-            current.is_some(),
-            "legacy token in GROK_AUTH env MUST be loaded directly -- if this fails, \
-             users with legacy auth in env would be sent to the login screen",
-        );
-        assert_eq!(
-            current.as_ref().unwrap().key,
-            "legacy-relay-token",
-            "loaded token must match the one injected via env",
+            current.is_none(),
+            "AccountLogin withheld: GROK_AUTH session tokens must be ignored",
         );
 
         // Derive has_cached_token exactly as initialize() does
         let has_cached_token = mgr.current().is_some();
-        assert!(has_cached_token);
+        assert!(!has_cached_token);
 
-        // With only this legacy token (no xai api key), the first method must be cached_token so the pager skips the login screen
+        // No API key and no session: methods must be empty (no interactive grok.com either).
         let built = build_auth_methods(AuthMethodsBuildInputs {
             has_external_api_key: false,
             has_cached_token,
+            allow_account_login: false,
             ..default_inputs()
         });
 
-        assert_eq!(
-            first_kind(&built.methods),
-            Some(AuthMethodKind::CachedToken),
-            "legacy token in env: cached_token MUST be auth_methods.first() \
-             (pager startup_auth_metadata returns needs_login=false)",
-        );
         assert!(
-            built
-                .methods
-                .first()
-                .is_some_and(|m| !AuthMethodKind::from_id(m.id()).needs_interactive_login()),
-            "auth_methods.first() MUST NOT need interactive login when legacy token \
-             is in env -- prevents login screen regression",
+            built.methods.is_empty(),
+            "without AccountLogin and without credentials, no auth methods are advertised",
         );
-        assert_eq!(
-            built
-                .default_auth_method_id
-                .as_ref()
-                .map(|id| id.0.as_ref()),
-            Some(CACHED_TOKEN_AUTH_METHOD_ID),
-        );
+        assert_eq!(built.default_auth_method_id, None);
     }
 
     /// Negative case for the legacy flow: when auth.json does NOT contain a legacy-scope entry, AuthManager::current() is None.

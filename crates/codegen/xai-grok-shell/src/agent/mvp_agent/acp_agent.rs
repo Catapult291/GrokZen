@@ -471,6 +471,8 @@ impl acp::Agent for MvpAgent {
                 enterprise_oidc_issuer: enterprise_oidc_issuer.as_deref(),
                 login_label: login_label.as_deref(),
                 has_auth_provider_command: has_auth_provider,
+                allow_account_login: xai_grok_config::Distribution::current()
+                    .allows(xai_grok_config::Capability::AccountLogin),
                 preferred_method,
             })
         };

@@ -9,10 +9,15 @@ fn dynamic_official_model_provenance_is_recomputed_for_new_ids_and_cleared_for_c
     cfg.endpoints.xai_api_base_url = XAI_API_BASE_URL_DEFAULT.into();
     cfg.endpoints.models_base_url = None;
     cfg.endpoints.models_list_url = None;
-    let mut model = default_model_entries(&cfg.endpoints)["grok-4.6"].clone();
-    model.info.base_url = CLI_CHAT_PROXY_BASE_URL_DEFAULT.into();
+    // GrokZen has no bundled catalog; start from a synthetic first-party-shaped entry.
+    let mut model = test_model_entry(
+        "grok-future",
+        CLI_CHAT_PROXY_BASE_URL_DEFAULT,
+        None,
+        None,
+        None,
+    );
     model.info.id = Some("grok-future".into());
-    model.info.model = "grok-future".into();
     model.info.description = Some("Future official copy".into());
     let serialized = serde_json::to_string(&model).unwrap();
     assert!(!serialized.contains("official_catalog_entry"));
@@ -39,20 +44,22 @@ fn bundled_model_provenance_survives_acp_but_config_override_clears_it() {
     cfg.endpoints.models_base_url = None;
     cfg.endpoints.models_list_url = None;
 
+    // GrokZen ships an empty bundled catalog: default endpoints inject nothing.
     let defaults = default_model_entries(&cfg.endpoints);
-    let bundled = defaults.get("grok-4.6").expect("bundled grok-4.6");
-    assert!(bundled.bundled_catalog_entry);
-    let bundled_acp = to_acp_model_info(&defaults);
-    let bundled_meta = bundled_acp[&acp::ModelId::new(Arc::from("grok-4.6"))]
-        .meta
-        .as_ref()
-        .expect("bundled model meta");
-    assert_eq!(bundled_meta[BUNDLED_MODEL_META_KEY], true);
-    assert_eq!(bundled_meta[OFFICIAL_MODEL_META_KEY], true);
+    assert!(
+        defaults.is_empty(),
+        "bundled catalog must stay empty (no built-in grok models)"
+    );
+    let empty_resolved = resolve_model_list(&cfg, None);
+    assert!(empty_resolved.is_empty());
 
+    // User-owned models never get presentation provenance.
     let raw_config: toml::Value = toml::from_str(
         r#"
         [model."grok-4.6"]
+        model = "grok-4.6"
+        base_url = "https://inference.example.com/v1"
+        context_window = 200000
         description = "SpaceXAI's latest frontier model"
         "#,
     )
@@ -62,7 +69,7 @@ fn bundled_model_provenance_survives_acp_but_config_override_clears_it() {
     let overridden = resolve_model_list(&override_cfg, None);
     assert!(
         !overridden["grok-4.6"].bundled_catalog_entry,
-        "a user-owned override must not inherit bundled presentation provenance"
+        "a user-owned model must not carry bundled presentation provenance"
     );
     let overridden_acp = to_acp_model_info(&overridden);
     let overridden_meta = overridden_acp[&acp::ModelId::new(Arc::from("grok-4.6"))]
@@ -72,9 +79,15 @@ fn bundled_model_provenance_survives_acp_but_config_override_clears_it() {
     assert!(overridden_meta.get(BUNDLED_MODEL_META_KEY).is_none());
     assert!(overridden_meta.get(OFFICIAL_MODEL_META_KEY).is_none());
 
-    let mut official_cached = bundled.clone();
+    // Exact first-party cache shape still recomputes official_catalog_entry (no bundled donor needed).
+    let mut official_cached = test_model_entry(
+        "grok-4.6",
+        CLI_CHAT_PROXY_BASE_URL_DEFAULT,
+        None,
+        None,
+        None,
+    );
     official_cached.bundled_catalog_entry = false;
-    official_cached.info.base_url = CLI_CHAT_PROXY_BASE_URL_DEFAULT.to_string();
     official_cached.api_base_url = None;
     let official_resolved = resolve_model_list(
         &cfg,
@@ -84,31 +97,15 @@ fn bundled_model_provenance_survives_acp_but_config_override_clears_it() {
         )])),
     );
     assert!(
-        official_resolved["grok-4.6"].bundled_catalog_entry,
-        "an exact first-party remote/cache match should regain client-owned presentation provenance"
-    );
-    let official_acp = to_acp_model_info(&official_resolved);
-    let official_meta = official_acp[&acp::ModelId::new(Arc::from("grok-4.6"))]
-        .meta
-        .as_ref()
-        .expect("official model meta");
-    assert_eq!(official_meta[BUNDLED_MODEL_META_KEY], true);
-    assert_eq!(official_meta[OFFICIAL_MODEL_META_KEY], true);
-
-    let mut official_api_cached = official_cached.clone();
-    official_api_cached.api_base_url = Some(XAI_API_BASE_URL_DEFAULT.to_string());
-    let official_api_resolved = resolve_model_list(
-        &cfg,
-        Some(IndexMap::from([(
-            "grok-4.6".to_string(),
-            official_api_cached,
-        )])),
+        official_resolved["grok-4.6"].official_catalog_entry,
+        "an exact first-party remote/cache match should recompute official_catalog_entry"
     );
     assert!(
-        official_api_resolved["grok-4.6"].bundled_catalog_entry,
-        "the public API-key catalog route should also retain client-owned presentation provenance"
+        !official_resolved["grok-4.6"].bundled_catalog_entry,
+        "no bundled donor exists, so presentation stays dynamic"
     );
 
+    // Custom endpoints clear official provenance even for a spoofed first-party route.
     let mut custom_cfg = cfg.clone();
     custom_cfg.endpoints.models_list_url = Some("https://custom.example/v1/models".to_string());
     let mut spoofed_custom = official_cached.clone();
@@ -123,70 +120,14 @@ fn bundled_model_provenance_survives_acp_but_config_override_clears_it() {
         "a custom endpoint must clear even a cached/spoofed provenance marker"
     );
 
-    let mut custom_proxy_cfg = cfg.clone();
-    custom_proxy_cfg.endpoints.cli_chat_proxy_base_url =
-        Some("https://proxy.example/v1".to_string());
-    let mut custom_proxy_remote = official_cached.clone();
-    custom_proxy_remote.bundled_catalog_entry = true;
-    custom_proxy_remote.info.base_url = "https://proxy.example/v1".to_string();
-    custom_proxy_remote.api_base_url = Some(XAI_API_BASE_URL_DEFAULT.to_string());
-    let custom_proxy_resolved = resolve_model_list(
-        &custom_proxy_cfg,
-        Some(IndexMap::from([(
-            "grok-4.6".to_string(),
-            custom_proxy_remote,
-        )])),
-    );
-    assert!(
-        !custom_proxy_resolved["grok-4.6"].bundled_catalog_entry,
-        "a custom session proxy must keep model presentation dynamic"
-    );
-    assert!(
-        !resolve_model_list(&custom_proxy_cfg, None)["grok-4.6"].bundled_catalog_entry,
-        "a custom session proxy must also clear bundled fallback presentation"
-    );
-
-    let mut custom_api_cfg = cfg.clone();
-    custom_api_cfg.endpoints.xai_api_base_url = "https://api.example/v1".to_string();
-    let mut custom_api_remote = official_cached.clone();
-    custom_api_remote.bundled_catalog_entry = true;
-    custom_api_remote.api_base_url = Some("https://api.example/v1".to_string());
-    let custom_api_resolved = resolve_model_list(
-        &custom_api_cfg,
-        Some(IndexMap::from([(
-            "grok-4.6".to_string(),
-            custom_api_remote,
-        )])),
-    );
-    assert!(
-        !custom_api_resolved["grok-4.6"].bundled_catalog_entry,
-        "a custom public-API base must keep model presentation dynamic"
-    );
-    assert!(
-        !resolve_model_list(&custom_api_cfg, None)["grok-4.6"].bundled_catalog_entry,
-        "a custom public-API base must also clear bundled fallback presentation"
-    );
-
-    let mut mismatched_remote = official_cached;
-    mismatched_remote.bundled_catalog_entry = true;
-    mismatched_remote.info.description = Some("Custom description".to_string());
-    let remote_resolved = resolve_model_list(
+    // Credentials on a first-party-shaped entry clear official presentation.
+    let mut keyed = official_cached;
+    keyed.api_key = Some("user-owned-key".into());
+    let keyed_resolved = resolve_model_list(
         &cfg,
-        Some(IndexMap::from([(
-            "grok-4.6".to_string(),
-            mismatched_remote,
-        )])),
+        Some(IndexMap::from([("grok-4.6".to_string(), keyed)])),
     );
-    assert!(
-        !remote_resolved["grok-4.6"].bundled_catalog_entry,
-        "a remote same-id model with custom presentation must remain dynamic"
-    );
-    let remote_acp = to_acp_model_info(&remote_resolved);
-    let remote_meta = remote_acp[&acp::ModelId::new(Arc::from("grok-4.6"))]
-        .meta
-        .as_ref()
-        .expect("standard remote model meta");
-    assert!(remote_meta.get(BUNDLED_MODEL_META_KEY).is_none());
+    assert!(!keyed_resolved["grok-4.6"].official_catalog_entry);
 }
 
 #[test]
@@ -3621,30 +3562,48 @@ fn config_models_default_custom_model_is_in_resolved_model_list() {
 }
 #[test]
 fn e2e_default_model_with_session_routes_to_proxy() {
-    let (_, models) = resolve_models_from_toml("", None);
+    // GrokZen has no built-in models: pin a user model so session-token routing can be checked.
+    let (_, models) = resolve_models_from_toml(
+        r#"
+            [model.local]
+            model = "local"
+            base_url = "https://api.example.com/v1"
+            context_window = 200000
+            "#,
+        None,
+    );
     let model = models
-        .get(crate::models::default_model())
-        .expect("default model should exist");
+        .get("local")
+        .expect("user-defined model should exist");
     let sampling = resolve_sampling(model, Some("session-token-123"));
     assert_eq!(sampling.api_key.as_deref(), Some("session-token-123"));
     assert_eq!(
-        sampling.base_url, "https://cli-chat-proxy.grok.com/v1",
-        "session auth should route to cli-chat-proxy, not api.x.ai"
+        sampling.base_url, "https://api.example.com/v1",
+        "session auth should keep the user model base_url"
     );
 }
 #[test]
 #[serial]
 fn e2e_default_model_with_external_api_key_routes_to_api_xai() {
-    let (_, models) = resolve_models_from_toml("", None);
+    let (_, models) = resolve_models_from_toml(
+        r#"
+            [model.local]
+            model = "local"
+            base_url = "https://api.example.com/v1"
+            api_base_url = "https://api.x.ai/v1"
+            context_window = 200000
+            "#,
+        None,
+    );
     let model = models
-        .get(crate::models::default_model())
-        .expect("default model should exist");
+        .get("local")
+        .expect("user-defined model should exist");
     unsafe { std::env::set_var("XAI_API_KEY", "xai-external-key") };
     let sampling = resolve_sampling(model, None);
     assert_eq!(sampling.api_key.as_deref(), Some("xai-external-key"));
     assert_eq!(
         sampling.base_url, "https://api.x.ai/v1",
-        "external API key should route to api.x.ai via api_base_url"
+        "external API key should route to api_base_url when set"
     );
     unsafe { std::env::remove_var("XAI_API_KEY") };
 }
@@ -3738,25 +3697,30 @@ fn e2e_credential_priority_model_key_beats_session_beats_env() {
 }
 #[test]
 fn e2e_duplicate_model_field_both_entries_survive() {
-    let dm = crate::models::default_model();
     let (_, models) = resolve_models_from_toml(
-        &format!(
-            r#"
+        r#"
+            [model.bundled-key]
+            model = "shared-slug"
+            base_url = "https://proxy.example.com/v1"
+            context_window = 200000
+
             [model.acme-grok]
-            model = "{dm}"
+            model = "shared-slug"
             base_url = "https://inference.example.com/v1"
             context_window = 200000
             api_key = "enterprise-key"
             "#,
-        ),
         None,
     );
-    assert!(models.contains_key(dm), "default entry should still exist");
+    assert!(
+        models.contains_key("bundled-key"),
+        "first entry should still exist"
+    );
     assert!(
         models.contains_key("acme-grok"),
         "user entry with different key should also exist"
     );
-    let default = models.get(dm).unwrap();
+    let default = models.get("bundled-key").unwrap();
     let user = models.get("acme-grok").unwrap();
     assert_eq!(default.info.model, user.info.model, "same model field");
     assert_ne!(
@@ -3768,7 +3732,7 @@ fn e2e_duplicate_model_field_both_entries_survive() {
     assert_eq!(sampling.base_url, "https://inference.example.com/v1");
     let sampling = resolve_sampling(default, Some("session-key"));
     assert_eq!(sampling.api_key.as_deref(), Some("session-key"));
-    assert_eq!(sampling.base_url, "https://cli-chat-proxy.grok.com/v1",);
+    assert_eq!(sampling.base_url, "https://proxy.example.com/v1");
 }
 #[test]
 fn e2e_enterprise_custom_endpoint_skips_xai_defaults() {
@@ -3801,8 +3765,8 @@ fn e2e_default_endpoint_still_injects_defaults() {
     let cfg = Config::default();
     let resolved = resolve_model_list(&cfg, None);
     assert!(
-        resolved.contains_key(crate::models::default_model()),
-        "default model should be present when using default endpoint"
+        resolved.is_empty(),
+        "GrokZen ships an empty bundled catalog — default endpoint must not inject grok models"
     );
 }
 #[test]
@@ -3845,21 +3809,21 @@ fn e2e_acp_model_info_no_dedup_on_model_field() {
 }
 #[test]
 fn e2e_enterprise_endpoints_plus_partial_model_override() {
-    let dm = crate::models::default_model();
     let (_, models) = resolve_models_from_toml(
-        &format!(
-            r#"
+        r#"
             [endpoints]
             cli_chat_proxy_base_url = "https://enterprise-proxy.acme.com/v1"
             xai_api_base_url = "https://enterprise-api.acme.com/v1"
 
-            [model."{dm}"]
+            [model.acme]
+            model = "acme"
+            context_window = 200000
             api_key = "acme-api-key"
+            api_base_url = "https://enterprise-api.acme.com/v1"
             "#,
-        ),
         None,
     );
-    let model = models.get(dm).expect("model should exist");
+    let model = models.get("acme").expect("model should exist");
     assert_eq!(
         model.info.base_url, "https://enterprise-proxy.acme.com/v1",
         "base_url must inherit from [endpoints], not stale default"
@@ -3887,20 +3851,23 @@ fn e2e_enterprise_endpoints_only_no_model_override() {
             [endpoints]
             cli_chat_proxy_base_url = "https://enterprise-proxy.acme.com/v1"
             xai_api_base_url = "https://enterprise-api.acme.com/v1"
+
+            [model.acme]
+            model = "acme"
+            context_window = 200000
+            api_base_url = "https://enterprise-api.acme.com/v1"
             "#,
         None,
     );
-    let model = models
-        .get(crate::models::default_model())
-        .expect("model should exist");
+    let model = models.get("acme").expect("model should exist");
     assert_eq!(
         model.info.base_url, "https://enterprise-proxy.acme.com/v1",
-        "default model should use enterprise cli_chat_proxy_base_url"
+        "model without base_url should use enterprise cli_chat_proxy_base_url"
     );
     assert_eq!(
         model.api_base_url.as_deref(),
         Some("https://enterprise-api.acme.com/v1"),
-        "default model should use enterprise xai_api_base_url"
+        "model api_base_url honors the enterprise xai_api_base_url"
     );
 }
 /// Unset every env var that `EndpointsConfig::default()` reads for endpoints.
@@ -7767,15 +7734,19 @@ fn prefetch_model_entry(slug: &str, context_window: u64, api_backend: ApiBackend
 }
 #[test]
 fn global_extra_headers_apply_to_model_without_override() {
-    let dm = crate::models::default_model();
     let (_, models) = resolve_models_from_toml(
         r#"
             [models]
             extra_headers = { "X-Request-Tags" = "team=example,env=prod" }
+
+            [model.acme]
+            model = "acme"
+            base_url = "https://inference.example.com/v1"
+            context_window = 200000
             "#,
         None,
     );
-    let model = models.get(dm).expect("default model should exist");
+    let model = models.get("acme").expect("model should exist");
     assert_eq!(
         model
             .info
@@ -8240,18 +8211,19 @@ fn capabilities_menu_without_default_resolves_to_no_reasoning_effort() {
 }
 #[test]
 fn resolve_model_list_inherits_context_window_from_default_when_prefetched_has_fallback() {
+    // GrokZen: empty bundled catalog → a prefetched fallback context window stays as-is.
     let cfg = Config::default();
-    let dm = crate::models::default_model();
+    let dm = "prefetched-model";
     let default_cw = DEFAULT_CONTEXT_WINDOW;
     let entry = prefetch_model_entry(dm, default_cw, ApiBackend::default());
     let mut prefetched = IndexMap::new();
     prefetched.insert(dm.to_owned(), entry);
     let resolved = resolve_model_list(&cfg, Some(prefetched));
     let entry = resolved.get(dm).expect("model must exist");
-    assert_ne!(
+    assert_eq!(
         entry.info.context_window.get(),
         default_cw,
-        "context_window should have been inherited from hardcoded default, not left at DEFAULT_CONTEXT_WINDOW"
+        "without bundled defaults the prefetched fallback context_window must be kept"
     );
 }
 #[test]
@@ -8364,27 +8336,26 @@ fn hub_config_is_enabled_only_for_nonempty_url() {
 }
 #[test]
 fn resolve_model_list_prunes_bundled_entries_not_in_prefetch() {
+    // GrokZen: bundled catalog is empty; prefetched models still surface, and
+    // without a prefetch the catalog stays empty (nothing bundled to keep).
     let cfg = Config::default();
-    let dm = crate::models::default_model();
-    let mut defs = default_model_entries(&EndpointsConfig::default());
-    let mut p = IndexMap::new();
-    if let Some(e) = defs.shift_remove(dm) {
-        p.insert(dm.to_string(), e);
-    }
+    let dm = "prunable-model";
+    let e = prefetch_model_entry(dm, 200_000, ApiBackend::default());
+    let p = IndexMap::from([(dm.to_string(), e)]);
     let resolved = resolve_model_list(&cfg, Some(p));
     assert!(resolved.contains_key(dm));
     let no_p = resolve_model_list(&cfg, None);
-    assert!(no_p.contains_key(dm));
+    assert!(
+        no_p.is_empty(),
+        "empty bundled catalog must not invent entries without a prefetch"
+    );
 }
 #[test]
 fn resolve_model_list_prefetch_visibility_matches_auth_and_server_list() {
     let cfg = Config::default();
-    let dm = crate::models::default_model();
-    let mut defs = default_model_entries(&EndpointsConfig::default());
-    let mut p = IndexMap::new();
-    if let Some(e) = defs.shift_remove(dm) {
-        p.insert(dm.to_string(), e);
-    }
+    let dm = "prefetched-visibility";
+    let e = prefetch_model_entry(dm, 200_000, ApiBackend::default());
+    let p = IndexMap::from([(dm.to_string(), e)]);
     let resolved = resolve_model_list(&cfg, Some(p));
     let sess: Vec<_> = resolved
         .values()
@@ -8457,30 +8428,27 @@ fn byok_config_overlay_visible_to_api_key_users() {
 /// Only BYOK triggers that override.
 #[test]
 fn plain_config_overlay_preserves_bundled_visibility() {
-    let dm = crate::models::default_model();
-    let bundled = default_model_entries(&EndpointsConfig::default())
-        .get(dm)
-        .expect("bundled default must exist")
-        .clone();
-    let raw: toml::Value = toml::from_str(&format!(
+    // GrokZen has no bundled catalog: pin a user model and check overlay keeps visibility flags.
+    let raw: toml::Value = toml::from_str(
         r#"
-            [model."{dm}"]
-            context_window = 300000
-            "#
-    ))
+            [model.acme]
+            model = "acme"
+            base_url = "https://inference.example.com/v1"
+            context_window = 200000
+            supported_in_api = true
+            "#,
+    )
     .unwrap();
     let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
     let resolved = resolve_model_list(&cfg, None);
-    let entry = resolved.get(dm).expect("bundled default must exist");
-    assert_eq!(
-        entry.visible_for_auth(false),
-        bundled.visible_for_auth(false),
-        "non-BYOK config overlay must preserve bundled supported_in_api"
-    );
-    assert_eq!(
+    let entry = resolved.get("acme").expect("user model must exist");
+    assert!(
         entry.visible_for_auth(true),
-        bundled.visible_for_auth(true),
-        "non-BYOK config overlay must preserve bundled OAuth visibility"
+        "supported_in_api model stays visible for session auth"
+    );
+    assert!(
+        entry.visible_for_auth(false),
+        "supported_in_api model stays visible for API-key auth"
     );
 }
 #[test]

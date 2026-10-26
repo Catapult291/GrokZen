@@ -56,7 +56,7 @@ pub fn auth_json_path(grok_home: &Path) -> PathBuf {
 }
 
 pub fn read_auth_json(auth_file: &Path) -> std::io::Result<AuthStore> {
-    read_auth_json_as(Distribution::current(), auth_file)
+    read_auth_json_as(crate::config::effective_distribution(), auth_file)
 }
 
 /// A distribution without account logins has no login store, whatever `GROK_HOME` or
@@ -192,7 +192,7 @@ pub fn read_auth_json_or_empty_recovering_corrupt(auth_file: &Path) -> std::io::
 /// The old file and the full temp copy coexist until the rename. When that happens we retry with an in-place truncate-and-rewrite, which only needs the blocks the old file freed.
 /// The in-place path is non-atomic, with two accepted trade-offs: A failed in-place write restores the prior bytes best-effort, so on-disk state ends up no worse than before the attempt.
 pub(super) fn write_auth_json(auth_file: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
-    write_auth_json_as(Distribution::current(), auth_file, auth_store)
+    write_auth_json_as(crate::config::effective_distribution(), auth_file, auth_store)
 }
 
 fn write_auth_json_as(
