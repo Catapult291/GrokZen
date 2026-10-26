@@ -2060,13 +2060,13 @@ mod tests {
             (
                 "explore",
                 crate::config::AgentDefinition::explore(),
-                &["read_file", "list_dir", "grep"],
+                &["read_file", "list_dir", "search_code"],
                 &["write", "enter_plan_mode", "exit_plan_mode"],
             ),
             (
                 "plan",
                 crate::config::AgentDefinition::plan(),
-                &["read_file", "list_dir", "grep", "todo_write"],
+                &["read_file", "list_dir", "search_code", "todo_write"],
                 &["write", "enter_plan_mode", "exit_plan_mode"],
             ),
             (
@@ -2407,12 +2407,16 @@ mod tests {
     #[tokio::test]
     async fn session_clamp_intersects_own_allowlist() {
         let has = |v: &[String], t: &str| v.iter().any(|n| n == t);
-        let names = session_clamp_tool_names(vec![], vec!["read_file".into(), "grep".into()]).await;
-        assert!(has(&names, "read_file") && has(&names, "grep"), "{names:?}");
+        let names =
+            session_clamp_tool_names(vec![], vec!["read_file".into(), "search_code".into()]).await;
+        assert!(
+            has(&names, "read_file") && has(&names, "search_code"),
+            "{names:?}"
+        );
         assert!(!has(&names, "run_terminal_cmd"), "{names:?}");
         let names = session_clamp_tool_names(
             vec!["read_file".into(), "search_replace".into()],
-            vec!["read_file".into(), "grep".into()],
+            vec!["read_file".into(), "search_code".into()],
         )
         .await;
         assert!(has(&names, "read_file"), "{names:?}");
@@ -2420,10 +2424,13 @@ mod tests {
             !has(&names, "search_replace"),
             "session denies it: {names:?}"
         );
-        assert!(!has(&names, "grep"), "own allowlist denies it: {names:?}");
+        assert!(
+            !has(&names, "search_code"),
+            "own allowlist denies it: {names:?}"
+        );
         let names = session_clamp_tool_names(
             vec!["search_replace".into()],
-            vec!["read_file".into(), "grep".into()],
+            vec!["read_file".into(), "search_code".into()],
         )
         .await;
         assert!(
@@ -2877,8 +2884,8 @@ mod tests {
             "Bash→run_terminal_command; got: {names:?}"
         );
         assert!(
-            names.contains(&"grep".to_string()),
-            "Grep→grep; got: {names:?}"
+            names.contains(&"search_code".to_string()),
+            "Grep→search_code; got: {names:?}"
         );
         assert!(
             !names.contains(&"search_replace".to_string()),
@@ -2964,8 +2971,8 @@ mod tests {
             "Bash→run_terminal_command; got: {names:?}"
         );
         assert!(
-            names.contains(&"grep".to_string()),
-            "Grep→grep; got: {names:?}"
+            names.contains(&"search_code".to_string()),
+            "Grep→search_code; got: {names:?}"
         );
         assert!(
             !names.contains(&"search_replace".to_string()),
@@ -2998,7 +3005,7 @@ mod tests {
     async fn registered_but_absent_web_tools_do_not_fall_back() {
         let tools = vec![
             "read_file".into(),
-            "grep".into(),
+            "search_code".into(),
             "list_dir".into(),
             "web_search".into(),
             "web_fetch".into(),
@@ -3013,7 +3020,7 @@ mod tests {
         for absent in ["web_search", "web_fetch"] {
             assert!(!names.contains(&absent.to_string()), "got: {names:?}");
         }
-        for kept in ["read_file", "grep", "list_dir"] {
+        for kept in ["read_file", "search_code", "list_dir"] {
             assert!(names.contains(&kept.to_string()), "got: {names:?}");
         }
         for excluded in ["run_terminal_command", "search_replace"] {
@@ -3029,7 +3036,7 @@ mod tests {
         let mut definition = crate::config::AgentDefinition::default_grok_build();
         definition.tools = vec![
             "read_file".into(),
-            "grep".into(),
+            "search_code".into(),
             "list_dir".into(),
             "web_search".into(),
             "web_fetch".into(),
@@ -3061,7 +3068,7 @@ mod tests {
             .iter()
             .map(|d| d.function.name.clone())
             .collect();
-        for kept in ["read_file", "grep", "list_dir", "web_search", "web_fetch"] {
+        for kept in ["read_file", "search_code", "list_dir", "web_search", "web_fetch"] {
             assert!(names.contains(&kept.to_string()), "got: {names:?}");
         }
         for excluded in ["run_terminal_command", "search_replace"] {

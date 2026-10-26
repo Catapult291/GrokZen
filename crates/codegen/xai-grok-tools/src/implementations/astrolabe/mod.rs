@@ -31,7 +31,7 @@ use crate::types::resources::{
 use crate::types::tool::{ToolKind, ToolNamespace};
 use crate::types::tool_metadata::{ToolMetadata, resolve_cwd, shared_resources};
 
-pub const SEARCH_CODE_DESC: &str = r#"Exhaustive literal/regex search over the indexed workspace. Hits include the enclosing function or type body, so you often need no read_file. Limit paths/file types with glob. Wide results summarize per file, or count with aggregate; page with offset. Respects .gitignore and the workspace read policy. Use grep outside the workspace or for multiline. Code-map/which-files: resolve_context first."#;
+pub const SEARCH_CODE_DESC: &str = r#"Exhaustive literal/regex search over the indexed workspace. Hits include the enclosing function or type body, so you often need no read_file. Limit paths/file types with glob. Wide results summarize per file, or count with aggregate; page with offset. Respects .gitignore and the workspace read policy. Patterns with newlines are unsupported; read files outside the workspace with read_file. Code-map/which-files: resolve_context first."#;
 
 pub const FIND_SYMBOL_DESC: &str = r#"Locate a symbol by name, prefix, `Class/method` path, or file outline; returns its signature and path:line."#;
 
@@ -136,9 +136,9 @@ pub fn listing_enabled_for(mode: xai_grok_astrolabe::AstrolabeMode, registry_id:
     (!index_tool || mode.index_tools()) && (!is_precise_tool(registry_id) || mode.precise_tools())
 }
 
-/// `[toolset.astrolabe].replace_grep = false`: `grep` owns the Search slot, so
-/// `search_code` moves behind the last `grep` entry. `by_kind` is first-come,
-/// and the system prompt follows it.
+/// `[toolset.astrolabe].replace_grep = false`: historically moved `search_code`
+/// behind the last `grep` entry. `grep` is no longer listed in any Grok Build
+/// toolset, so this is a no-op; kept so the config flag stays harmless.
 pub fn demote_search_code(tools: &mut Vec<crate::registry::types::ToolConfig>) {
     let Some(from) = tools
         .iter()
