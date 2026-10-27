@@ -348,6 +348,7 @@ pub fn grok_build_hashline_toolset(
         (&grok_build::MonitorTool).into(),
         (&search_tool::SearchTool).into(),
         (&use_tool::UseTool).into(),
+        (&codemode::Codemode).into(),
         (&grok_build::UpdateGoalTool).into(),
         (&grok_build::WorkflowTool).into(),
     ]);
@@ -369,6 +370,7 @@ fn codex_toolset() -> ToolServerConfig {
             task_output_tool_config(),
             (&search_tool::SearchTool).into(),
             (&use_tool::UseTool).into(),
+            (&codemode::Codemode).into(),
         ],
         behavior_preset: None,
     }
@@ -388,7 +390,7 @@ fn explore_toolset() -> ToolServerConfig {
             (&astrolabe::FindReferencesTool).into(),
             (&astrolabe::GotoDefinitionTool).into(),
             (&astrolabe::GetDiagnosticsTool).into(),
-            ],
+        ],
         behavior_preset: None,
     }
 }
@@ -470,6 +472,7 @@ fn orchestrator_toolset() -> ToolServerConfig {
             // Skills and MCP
             (&search_tool::SearchTool).into(),
             (&use_tool::UseTool).into(),
+            (&codemode::Codemode).into(),
             // Planning and user interaction
             (&grok_build::TodoWriteTool).into(),
             (&grok_build::EnterPlanModeTool).into(),
@@ -2081,6 +2084,7 @@ mod tests {
         for (label, cfg) in [
             ("grok-build", named("grok-build")),
             ("grok-build-plan", named("grok-build-plan")),
+            ("codex", named("codex")),
             ("grok-build core", default_grok_build_toolset()),
             ("grok-build plan", grok_build_plan_toolset()),
             (
@@ -2089,6 +2093,8 @@ mod tests {
             ),
             ("grok-build ask-user", grok_build_ask_user_toolset()),
             ("workspace grok-build", workspace_grok_build_toolset()),
+            ("hashline", grok_build_hashline_toolset(Vec::new())),
+            ("orchestrator", orchestrator_toolset()),
         ] {
             assert!(has(&cfg), "{label} must ship `{codemode_id}`");
         }

@@ -257,6 +257,35 @@ async fn bare_throw_is_runtime_error() {
 }
 
 #[tokio::test]
+async fn user_error_with_oom_substring_is_runtime() {
+    // Substring keyword classification is only for QuickJS `InternalError`;
+    // a user Error whose message merely mentions "stack overflow" stays Runtime.
+    let err = execute(
+        r#"throw new Error("boom: stack overflow");"#,
+        Arc::new(MockHost::new()),
+        &fast_limits(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.kind, CodemodeErrorKind::Runtime, "got: {err:?}");
+    assert_eq!(err.code, "codemode_error");
+    assert!(err.message.contains("boom"), "got: {}", err.message);
+}
+
+#[tokio::test]
+async fn user_error_with_timeout_substring_is_runtime() {
+    let err = execute(
+        r#"throw new Error("task interrupted by user");"#,
+        Arc::new(MockHost::new()),
+        &fast_limits(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.kind, CodemodeErrorKind::Runtime, "got: {err:?}");
+    assert_eq!(err.code, "codemode_error");
+}
+
+#[tokio::test]
 async fn unserializable_return_degrades_to_text() {
     let out = execute(
         "return { fn: function () {}, n: 1 };",

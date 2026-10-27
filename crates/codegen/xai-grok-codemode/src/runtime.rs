@@ -93,7 +93,11 @@ fn wrap_script(code: &str) -> String {
       return {{ ok: false, callLimit: msg.slice("{CALL_LIMIT_PREFIX}".length) }};
     }}
     const stack = (e && e.stack) ? String(e.stack) : "";
-    return {{ ok: false, message: msg, stack: stack }};
+    // QuickJS self-raised fatal errors (OOM / stack overflow / interrupt) are
+    // `InternalError`; user `throw new Error(...)` keeps `name === "Error"`.
+    // Only the former may be re-classified by keyword on the Rust side.
+    const internal = (e && e.name === "InternalError");
+    return {{ ok: false, message: msg, stack: stack, internal: internal }};
   }}
 }})()"#
     )
@@ -507,7 +511,18 @@ pub async fn execute(
             } else {
                 format!("{message}\n{stack}")
             };
-            return Err(classify_fatal_text(&full));
+            // Keyword classification only applies to QuickJS-internal failures
+            // (`InternalError`). User-thrown Errors always map to Runtime so
+            // `throw new Error("stack overflow")` is not reported as OOM.
+            let is_internal = envelope
+                .get("internal")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            return Err(if is_internal {
+                classify_fatal_text(&full)
+            } else {
+                CodemodeError::new(CodemodeErrorKind::Runtime, full)
+            });
         }
         _ => {
             return Err(CodemodeError::new(

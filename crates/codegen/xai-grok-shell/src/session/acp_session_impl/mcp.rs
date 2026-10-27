@@ -15,6 +15,10 @@ pub(super) fn attach_elicitation_tx(
         client.set_elicitation_tx(Some(tx));
     }
 }
+/// MCP tool-usage hint appended to every injected reminder. The codemode sentence is
+/// conditionally rendered so toolsets without codemode never emit "prefer ``".
+pub(super) const MCP_HINT_TEMPLATE: &str = "\nTo use MCP tools, you MUST call `${{ tools.by_kind.search_tool }}` first to retrieve the tool's input schema before calling `${{ tools.by_kind.use_tool }}`. NEVER guess parameter names — always use the exact schema returned by `${{ tools.by_kind.search_tool }}`.\n${% if tools.by_kind.codemode %}For multi-step MCP work (discover + N calls + post-process), prefer `${{ tools.by_kind.codemode }}`: write a short JS script that runs the whole sequence in one sandboxed call, and only the final returned JSON re-enters context.${% endif %}";
+
 impl SessionActor {
     /// Waits until init is complete, starting it if nothing owns it. An abandoned pass is re-owned once.
     pub(super) async fn wait_for_mcp_initialized(&self) {
@@ -1505,7 +1509,7 @@ impl SessionActor {
                     xai_grok_tools::implementations::use_tool::UseToolParams,
                 >>()
                 .is_some_and(|params| params.0.supports_file_input());
-        let hint_template = "\nTo use MCP tools, you MUST call `${{ tools.by_kind.search_tool }}` first to retrieve the tool's input schema before calling `${{ tools.by_kind.use_tool }}`. NEVER guess parameter names — always use the exact schema returned by `${{ tools.by_kind.search_tool }}`.\nFor multi-step MCP work (discover + N calls + post-process), prefer `${{ tools.by_kind.codemode }}`: write a short JS script that runs the whole sequence in one sandboxed call, and only the final returned JSON re-enters context.";
+        let hint_template = MCP_HINT_TEMPLATE;
         let hint_template = if file_supported {
             format!(
                 "{hint_template}\nFor large MCP arguments, prepare one complete UTF-8 JSON file and call `${{{{ tools.by_kind.use_tool }}}}` with {{\"${{{{ params.use_tool.file }}}}\":\"/tmp/mcp-call.json\"}}; the document contains canonical tool_name and object tool_input. Alternatively supply the target plus `${{{{ params.use_tool.tool_input_file }}}}` for an arguments-only object. File reads require Read permission before MCP approval."
@@ -1572,4 +1576,46 @@ pub(super) fn format_mcp_connecting_reminder(
         ));
     }
     text
+}
+
+#[cfg(test)]
+mod hint_template_tests {
+    use super::MCP_HINT_TEMPLATE;
+    use std::collections::HashMap;
+    use xai_grok_tools::types::template_renderer::TemplateRenderer;
+    use xai_grok_tools::types::tool::ToolKind;
+
+    fn tools(with_codemode: bool) -> HashMap<ToolKind, String> {
+        let mut m = HashMap::new();
+        m.insert(ToolKind::SearchTool, "search_tool".into());
+        m.insert(ToolKind::UseTool, "use_tool".into());
+        if with_codemode {
+            m.insert(ToolKind::Codemode, "codemode".into());
+        }
+        m
+    }
+
+    #[test]
+    fn hint_renders_codemode_sentence_only_when_registered() {
+        let with = TemplateRenderer::new(tools(true), HashMap::new())
+            .render(MCP_HINT_TEMPLATE)
+            .expect("render with codemode");
+        assert!(with.contains("prefer `codemode`"), "got: {with}");
+
+        let without = TemplateRenderer::new(tools(false), HashMap::new())
+            .render(MCP_HINT_TEMPLATE)
+            .expect("render without codemode");
+        assert!(
+            !without.contains("prefer ``"),
+            "missing codemode must not leave prefer-backtick residue: {without}"
+        );
+        assert!(
+            !without.contains("For multi-step MCP work"),
+            "codemode sentence must be omitted entirely: {without}"
+        );
+        assert!(
+            without.contains("NEVER guess parameter names"),
+            "search/use guidance must remain: {without}"
+        );
+    }
 }
