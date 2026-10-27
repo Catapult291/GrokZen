@@ -341,11 +341,7 @@ mod tests {
         extract_builtin_files(home);
         std::fs::write(home.join(LEDGER_FILE_NAME), "custom ledger").unwrap();
         std::fs::write(home.join(SPEC_FILE_NAME), "custom spec").unwrap();
-        std::fs::write(
-            home.join(COMMUNITY_METADATA_MARKER),
-            "0.0.0-stale",
-        )
-        .unwrap();
+        std::fs::write(home.join(COMMUNITY_METADATA_MARKER), "0.0.0-stale").unwrap();
 
         extract_builtin_files(home);
 

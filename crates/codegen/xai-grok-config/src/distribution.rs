@@ -72,9 +72,9 @@ impl Distribution {
             return None;
         }
         match capability {
-            Capability::AccountLogin => Some(
-                "此版本没有账号登录通道：只使用你配置的 API Key 或 BYOK 模型。",
-            ),
+            Capability::AccountLogin => {
+                Some("此版本没有账号登录通道：只使用你配置的 API Key 或 BYOK 模型。")
+            }
             Capability::RemoteControl => Some("Remote Control is off in this build."),
             Capability::Voice => Some("Voice dictation is off in this build."),
             Capability::Telemetry | Capability::ErrorReporting | Capability::RemoteFetch => None,

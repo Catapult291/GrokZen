@@ -149,8 +149,7 @@ impl RootSession {
     /// store. Called at every cold build and apply: a host that pinned
     /// `persist_enabled = false` never creates `<root>/.astrolabe/`.
     pub(crate) fn persist_enabled(&self) -> bool {
-        self.knobs.persist_enabled
-            && crate::reindex::refresh_leader(&self.indexer_lock, &self.root)
+        self.knobs.persist_enabled && crate::reindex::refresh_leader(&self.indexer_lock, &self.root)
     }
 
     pub(crate) fn new(root: PathBuf, knobs: McpKnobs, cache_budget_bytes: u64) -> Arc<Self> {

@@ -530,7 +530,10 @@ pub async fn execute(
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("host call failed")
                     .to_string();
-                return Err(attach_console_tail(CodemodeError::host(code, message), &tail));
+                return Err(attach_console_tail(
+                    CodemodeError::host(code, message),
+                    &tail,
+                ));
             }
             if let Some(arg_msg) = envelope.get("argError").and_then(serde_json::Value::as_str) {
                 // The JS side JSON-parses `{code, message}`; surface as a
@@ -547,7 +550,10 @@ pub async fn execute(
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("invalid host-call argument")
                         .to_string();
-                    return Err(attach_console_tail(CodemodeError::host(code, message), &tail));
+                    return Err(attach_console_tail(
+                        CodemodeError::host(code, message),
+                        &tail,
+                    ));
                 }
                 return Err(attach_console_tail(
                     CodemodeError::new(CodemodeErrorKind::InvalidArgument, arg_msg),

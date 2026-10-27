@@ -515,7 +515,12 @@ pub(crate) fn build_cancellable(
     extra_excludes: &[String],
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Option<RepoIndex> {
-    let opts = mcp_index_options(persist, parse_cache_bytes, respect_gitignore, extra_excludes);
+    let opts = mcp_index_options(
+        persist,
+        parse_cache_bytes,
+        respect_gitignore,
+        extra_excludes,
+    );
     let incremental = IncrementalIndex::build_cancellable(root, &opts, cancel)?;
     Some(RepoIndex::from_incremental(root.to_path_buf(), incremental))
 }
