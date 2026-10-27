@@ -129,9 +129,11 @@ impl<'a> SkillEntry<'a> {
         }
     }
 
-    /// Render name only (no description or path).
+    /// Render name only (no description or path). Keeps the optional role tag
+    /// (`re [router]`) so router entries stay distinguishable under extreme
+    /// budget (F5).
     fn name_only(&self) -> String {
-        format!("- {}", self.name)
+        format!("- {}", self.name_label())
     }
 
     /// Byte length of the fixed overhead (name, role tag, path, Use when label) excluding content.
@@ -186,11 +188,18 @@ impl<'a> SkillEntry<'a> {
         }
     }
 
-    /// Render as a XML row with name only (no description).
+    /// Render as a XML row with name only (no description). Keeps the optional
+    /// `role="…"` attribute so router entries stay distinguishable under
+    /// extreme budget (F5).
     fn name_only_xml(&self) -> String {
+        let role_attr = self
+            .role
+            .map(|r| format!(" role=\"{}\"", xml_attr_escape(r)))
+            .unwrap_or_default();
         format!(
-            "<agent_skill fullPath=\"{}\">{}</agent_skill>\n",
+            "<agent_skill fullPath=\"{}\"{}>{}</agent_skill>\n",
             xml_attr_escape(&self.display_path),
+            role_attr,
             xml_text_escape(self.name),
         )
     }
@@ -1186,6 +1195,48 @@ mod tests {
         assert!(!text.contains("YYY"), "description should be absent");
     }
 
+    /// F5: names-only XML keeps `role="…"` when present.
+    #[test]
+    fn xml_budgeted_tier3_names_only_keeps_role() {
+        let skills = vec![
+            SkillInfo {
+                role: Some("router".into()),
+                ..skill("re", &"Y".repeat(300))
+            },
+            skill("plain", &"Y".repeat(300)),
+        ];
+        let mut announced = HashSet::new();
+        let text = format_announcement_xml(
+            &skills,
+            &mut announced,
+            None,
+            None,
+            XmlRenderMode::Budgeted {
+                // Tight enough that even shortened descriptions exceed budget
+                // (tier 3), while both name-only rows still fit.
+                budget_chars: Some(150),
+                overflow_indicator: false,
+            },
+        )
+        .unwrap();
+        assert!(
+            text.contains("role=\"router\""),
+            "names-only XML must keep role: {text}"
+        );
+        assert!(
+            text.contains(">re<"),
+            "name body still rendered: {text}"
+        );
+        assert!(
+            !text.contains("role=\"\""),
+            "no-role skill must not get empty role attr: {text}"
+        );
+        assert!(
+            !text.contains("plain\" role="),
+            "plain skill must not get a role attr: {text}"
+        );
+    }
+
     #[test]
     fn single_skill_within_budget() {
         let skills = [skill("commit", "Commit staged changes with a message.")];
@@ -1329,6 +1380,30 @@ mod tests {
         assert!(!text.contains("... and"));
         assert!(text.contains("- a"));
         assert!(text.contains("- b"));
+    }
+
+    /// F5: names-only text keeps `name [role]` when role is set.
+    #[test]
+    fn tier3_names_only_keeps_role() {
+        let skills = vec![
+            SkillInfo {
+                role: Some("router".into()),
+                ..skill("re", &"Y".repeat(300))
+            },
+            skill("plain", &"Y".repeat(300)),
+        ];
+        // Budget forces tier 3 (names-only) while still fitting both lines.
+        let text = announce(&skills, 150).unwrap();
+        assert!(
+            text.contains("- re [router]"),
+            "names-only text must keep role tag: {text}"
+        );
+        assert!(text.contains("- plain"), "plain name still listed: {text}");
+        assert!(
+            !text.contains("- plain ["),
+            "no-role skill must not get a role tag: {text}"
+        );
+        assert!(!text.contains("Absolute path:"), "tier 3 drops paths");
     }
 
     // ── Custom tool name ─────────────────────────────────────────
