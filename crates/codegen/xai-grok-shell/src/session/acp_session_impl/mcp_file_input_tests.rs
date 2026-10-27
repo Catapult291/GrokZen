@@ -880,6 +880,7 @@ async fn approval_preview_preserves_arguments_and_obeys_remaining_budget() {
                         &acp::ToolCallId::new("preview"),
                         "use_tool",
                         &mut input,
+                        None,
                     )
                     .await;
                 if remaining.is_zero() {

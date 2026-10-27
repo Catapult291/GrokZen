@@ -253,6 +253,7 @@ impl McpFilePreparation {
         id: &acp::ToolCallId,
         wire_name: &str,
         input: &mut ToolInput,
+        raw_arguments: Option<&str>,
     ) -> Result<(String, acp::ToolKind, Value), acp::Error> {
         let preview = match (self, &mut *input) {
             (
@@ -286,7 +287,9 @@ impl McpFilePreparation {
             }
             (_, input) => input.clone(),
         };
-        let (mut title, kind, preview) = actor.send_tool_call_start(id, wire_name, preview).await?;
+        let (mut title, kind, preview) = actor
+            .send_tool_call_start(id, wire_name, preview, raw_arguments)
+            .await?;
         if let McpFilePreparation::Resolved { source, .. } = self {
             title = format!("{title} — source file: {}", source.path.display());
             actor

@@ -1223,10 +1223,7 @@ mod tests {
             text.contains("role=\"router\""),
             "names-only XML must keep role: {text}"
         );
-        assert!(
-            text.contains(">re<"),
-            "name body still rendered: {text}"
-        );
+        assert!(text.contains(">re<"), "name body still rendered: {text}");
         assert!(
             !text.contains("role=\"\""),
             "no-role skill must not get empty role attr: {text}"

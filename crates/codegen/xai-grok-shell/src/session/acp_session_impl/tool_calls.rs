@@ -2,6 +2,9 @@
 use super::hooks::RewriteProblem;
 use super::mcp_argument_coercion;
 use super::*;
+use crate::session::helpers::tool_input_parsing::{
+    ArgsOrigin, RAW_ARGUMENTS_META_KEY, classify_args_origin,
+};
 use futures::StreamExt;
 use tracing::Instrument;
 use xai_grok_hooks::result::HookDecision;
@@ -1456,6 +1459,7 @@ impl SessionActor {
             call.function.name,
             call.id,
         );
+        let mut args_origin = classify_args_origin(&call.function.arguments);
         let wrapper_parse = (self.tool_bridge_handle().tool_kind(&call.function.name)
             == Some(xai_grok_tools::types::tool::ToolKind::UseTool))
         .then(|| {
@@ -1480,6 +1484,12 @@ impl SessionActor {
                 meta.get_or_insert_with(serde_json::Map::new).insert(
                     "subagentBackground".to_string(),
                     serde_json::Value::Bool(bg),
+                );
+            }
+            if args_origin.is_recovered() {
+                meta.get_or_insert_with(serde_json::Map::new).insert(
+                    RAW_ARGUMENTS_META_KEY.to_owned(),
+                    serde_json::Value::String(call.function.arguments.clone()),
                 );
             }
             self.send_update(
@@ -1610,19 +1620,24 @@ impl SessionActor {
                     &call.function.arguments,
                 ) {
                 if salvaged != raw_input {
-                    if let Ok(input) = bridge
+                    args_origin = ArgsOrigin::Salvaged;
+                    match bridge
                         .try_parse(&call.function.name, salvaged.clone())
                         .await
                     {
-                        tracing::warn!(
-                            tool_name = %call.function.name,
-                            call_id = %call.id,
-                            original = %call.function.arguments,
-                            salvaged = %salvaged,
-                            "Salvaged EOF-truncated tool arguments by keeping the partial string value"
-                        );
-                        raw_input = salvaged;
-                        parsed = Ok(input);
+                        Ok(input) => {
+                            tracing::warn!(
+                                tool_name = %call.function.name,
+                                call_id = %call.id,
+                                original = %call.function.arguments,
+                                salvaged = %salvaged,
+                                "Salvaged EOF-truncated tool arguments by keeping the partial string value"
+                            );
+                            raw_input = salvaged;
+                            parsed = Ok(input);
+                        }
+                        // Keep the most complete repair for the parse-error report.
+                        Err(_) => raw_input = salvaged,
                     }
                 }
             }
@@ -1637,6 +1652,8 @@ impl SessionActor {
                     err,
                     &call.function.arguments,
                     model_id_str,
+                    args_origin,
+                    Some(&raw_input),
                 )
                 .await?;
                 return Ok(Err(ToolLoop::ToolParsingError));
@@ -1765,8 +1782,17 @@ impl SessionActor {
                 .await?;
             return Ok(Err(ToolLoop::Continue));
         }
+        let raw_arguments_for_update = args_origin
+            .is_recovered()
+            .then_some(call.function.arguments.as_str());
         let tool_call_display = mcp_preparation
-            .approval(self, &tool_call_id, &call.function.name, &mut tool_input)
+            .approval(
+                self,
+                &tool_call_id,
+                &call.function.name,
+                &mut tool_input,
+                raw_arguments_for_update,
+            )
             .await;
         if mcp_preparation.requires_resolved_permission()
             && let Err(error) = &tool_call_display
@@ -2361,6 +2387,7 @@ impl SessionActor {
         tool_call_id: &acp::ToolCallId,
         wire_name: &str,
         tool_call_input: ToolInput,
+        raw_arguments: Option<&str>,
     ) -> Result<(String, acp::ToolKind, serde_json::Value), acp::Error> {
         #[allow(unused_mut)]
         let mut raw_input = match &tool_call_input {
@@ -2368,6 +2395,12 @@ impl SessionActor {
             _ => serde_json::to_value(&tool_call_input)?,
         };
         let mut canonical_meta = self.stamp_tool_meta(None, wire_name, Some(&tool_call_input));
+        if let Some(raw_arguments) = raw_arguments {
+            canonical_meta.get_or_insert_with(Default::default).insert(
+                RAW_ARGUMENTS_META_KEY.to_owned(),
+                serde_json::Value::String(raw_arguments.to_owned()),
+            );
+        }
         let (title, kind, locations, content) = match tool_call_input {
             ToolInput::ListDir(list_dir) => (
                 format!("List `{}`", list_dir.target_directory),
@@ -2912,6 +2945,8 @@ impl SessionActor {
         err: xai_tool_runtime::ToolError,
         raw_arguments: &str,
         model_id: &str,
+        args_origin: ArgsOrigin,
+        repaired_value: Option<&serde_json::Value>,
     ) -> Result<(), acp::Error> {
         tracing::error!(
             session_id = %self.session_info.id.0,
@@ -2919,10 +2954,17 @@ impl SessionActor {
             model_id = model_id,
             error_kind = "parse_failure",
             error_message = %err,
+            args_origin = ?args_origin,
             "tool_error: parse_failure"
         );
         self.signals_handle().record_tool_failure(function_name);
-        let message = build_tool_parse_error_message(function_name, &err, raw_arguments);
+        let message = build_tool_parse_error_message(
+            function_name,
+            &err,
+            raw_arguments,
+            args_origin,
+            repaired_value,
+        );
         let title = (err.kind == xai_tool_runtime::ToolErrorKind::NotFound)
             .then(|| format!("Agent tried calling a tool that doesn't exist: {function_name}"));
         self.send_update(

@@ -38,6 +38,59 @@ pub fn normalize_empty_arguments(arguments: &str) -> &str {
     }
 }
 
+/// How the harness obtained the arguments for a tool call.
+///
+/// [`ArgsOrigin::Parsed`] is the normal path where `serde_json` accepted the model's
+/// string. Every other variant means the harness recovered the call from a string the
+/// upstream sent invalid, so consumers must not present the recovered value as the
+/// model's original arguments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArgsOrigin {
+    /// The normalized argument string parsed as JSON.
+    Parsed,
+    /// Extracted from concatenated JSON objects in one argument string.
+    Concatenated,
+    /// EOF-truncated JSON repaired by dropping the incomplete trailing member.
+    Repaired,
+    /// EOF-truncated JSON whose trailing string value was kept.
+    Salvaged,
+    /// Nothing salvageable; the string was wrapped as `{"raw": ...}`.
+    RawFallback,
+}
+
+impl ArgsOrigin {
+    /// True when the harness had to recover the arguments from an invalid string.
+    pub fn is_recovered(self) -> bool {
+        !matches!(self, Self::Parsed)
+    }
+}
+
+/// ACP `_meta` key carrying the model's original argument string when the harness
+/// recovered the call. Storage prefers it over the repaired `rawInput`.
+pub const RAW_ARGUMENTS_META_KEY: &str = "x.ai/tool/raw_arguments";
+
+/// True when `arguments` is valid JSON after empty-argument normalization.
+pub fn arguments_are_valid_json(arguments: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(normalize_empty_arguments(arguments)).is_ok()
+}
+
+/// Classify `arguments` the same way `prepare_tool_call` recovers them.
+pub fn classify_args_origin(arguments: &str) -> ArgsOrigin {
+    if arguments_are_valid_json(arguments) {
+        return ArgsOrigin::Parsed;
+    }
+    if try_extract_concatenated_json_objects(arguments).is_some() {
+        return ArgsOrigin::Concatenated;
+    }
+    if try_repair_truncated_json(arguments).is_some() {
+        return ArgsOrigin::Repaired;
+    }
+    if try_repair_truncated_json_keep_partial_strings(arguments).is_some() {
+        return ArgsOrigin::Salvaged;
+    }
+    ArgsOrigin::RawFallback
+}
+
 /// Conservatively repair EOF-truncated tool-argument JSON (observed with cline-pass / mimo:
 /// emission stops mid-call, e.g. `{"command": "ls", "timeout": `).
 ///
@@ -542,5 +595,71 @@ mod tests {
     #[test]
     fn salvage_none_for_valid_json() {
         assert!(try_repair_truncated_json_keep_partial_strings(r#"{"a": 1}"#).is_none());
+    }
+
+    // ── classify_args_origin ──────────────────────────────────────────
+
+    #[test]
+    fn classify_valid_arguments_as_parsed() {
+        assert_eq!(
+            classify_args_origin(r#"{"query": "x"}"#),
+            ArgsOrigin::Parsed
+        );
+        assert_eq!(classify_args_origin(""), ArgsOrigin::Parsed);
+        assert_eq!(classify_args_origin("   "), ArgsOrigin::Parsed);
+    }
+
+    #[test]
+    fn classify_live_truncation_signatures_as_repaired() {
+        // Live cline-pass signatures: the emission stops inside the value.
+        for arguments in [
+            r#"{"context_lines": {"#,
+            r#"{"context_lines": "#,
+            r#"{"path": "#,
+        ] {
+            let repaired = try_repair_truncated_json(arguments).expect("repair");
+            assert!(repaired.is_object(), "{arguments}");
+            assert_eq!(
+                classify_args_origin(arguments),
+                ArgsOrigin::Repaired,
+                "{arguments}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_truncated_partial_string_as_repaired() {
+        // The conservative pass already returns an object (dropping the incomplete
+        // member); `prepare_tool_call` only upgrades to `Salvaged` when that object
+        // fails the schema and the salvage pass supplies a different value.
+        let arguments = r#"{"a": 1, "pattern": "createToolCall"#;
+        assert_eq!(classify_args_origin(arguments), ArgsOrigin::Repaired);
+        assert_eq!(
+            try_repair_truncated_json_keep_partial_strings(arguments).unwrap()["pattern"],
+            "createToolCall"
+        );
+    }
+
+    #[test]
+    fn classify_concatenated_objects_and_raw_fallback() {
+        assert_eq!(
+            classify_args_origin(r#"{"a": 1} {"b": 2}"#),
+            ArgsOrigin::Concatenated
+        );
+        assert_eq!(classify_args_origin("not json"), ArgsOrigin::RawFallback);
+        assert_eq!(classify_args_origin("[1, 2"), ArgsOrigin::RawFallback);
+    }
+
+    #[test]
+    fn recovered_origins_exclude_parsed() {
+        for origin in [
+            ArgsOrigin::Parsed,
+            ArgsOrigin::Concatenated,
+            ArgsOrigin::Repaired,
+            ArgsOrigin::Salvaged,
+            ArgsOrigin::RawFallback,
+        ] {
+            assert_eq!(origin.is_recovered(), origin != ArgsOrigin::Parsed);
+        }
     }
 }
