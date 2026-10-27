@@ -422,7 +422,8 @@ impl FileToolset {
             Self::Standard => Ok(vec![
                 ToolConfig::for_tool::<grok_build::ReadFileTool>(),
                 ToolConfig::for_tool::<grok_build::SearchReplaceTool>(),
-                ToolConfig::for_tool::<xai_grok_tools::implementations::astrolabe::SearchCodeTool>(),
+                ToolConfig::for_tool::<xai_grok_tools::implementations::astrolabe::SearchCodeTool>(
+                ),
             ]),
             Self::Hashline => {
                 hashline_config.validate()?;

@@ -641,7 +641,17 @@ mod tests {
         let excludes = deny.engine_excludes();
         // Same variants the query-time GlobSet matches with, so build-time
         // exclusion and query-time filtering admit/keep the same set.
-        assert_eq!(excludes, vec!["**/.env", "**/.env/**", "**/secrets", "**/secrets/**", ".env", "secrets"]);
+        assert_eq!(
+            excludes,
+            vec![
+                "**/.env",
+                "**/.env/**",
+                "**/secrets",
+                "**/secrets/**",
+                ".env",
+                "secrets"
+            ]
+        );
         // Equal policies in a different input order share one engine key.
         let other = DenyPolicy::new(&["./secrets/".to_string(), ".env".to_string()]);
         assert_eq!(excludes, other.engine_excludes());
@@ -653,8 +663,10 @@ mod tests {
         // exclude list — and the engine key — stays empty.
         let tmp = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        let policy =
-            DenyPolicy::for_root(tmp.path(), &[outside.path().join("shadow").display().to_string()]);
+        let policy = DenyPolicy::for_root(
+            tmp.path(),
+            &[outside.path().join("shadow").display().to_string()],
+        );
         assert!(policy.engine_excludes().is_empty());
     }
 

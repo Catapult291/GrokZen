@@ -3068,7 +3068,13 @@ mod tests {
             .iter()
             .map(|d| d.function.name.clone())
             .collect();
-        for kept in ["read_file", "search_code", "list_dir", "web_search", "web_fetch"] {
+        for kept in [
+            "read_file",
+            "search_code",
+            "list_dir",
+            "web_search",
+            "web_fetch",
+        ] {
             assert!(names.contains(&kept.to_string()), "got: {names:?}");
         }
         for excluded in ["run_terminal_command", "search_replace"] {

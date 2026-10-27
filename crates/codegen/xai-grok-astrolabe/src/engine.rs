@@ -128,12 +128,7 @@ pub fn note_edited_on_disk(paths: &[PathBuf]) {
 /// canonical (see [`root_for_cwd`]). No read-deny policy: see
 /// [`engine_for_session`].
 pub fn engine_for(root: &Path, cfg: &AstrolabeConfig) -> Result<Arc<AstrolabeEngine>, EngineError> {
-    engine_for_session(
-        root,
-        cfg,
-        cfg.respect_gitignore,
-        &DenyPolicy::default(),
-    )
+    engine_for_session(root, cfg, cfg.respect_gitignore, &DenyPolicy::default())
 }
 
 /// [`engine_for`] with the session's `.gitignore` policy and `DenyReadGlobs`.

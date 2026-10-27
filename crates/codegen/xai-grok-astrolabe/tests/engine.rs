@@ -309,12 +309,10 @@ fn deny_globs_are_excluded_at_index_time() {
     let root = root_for_cwd(&fixture.root, &cfg);
     let map = fixture.map(&fixture.root);
 
-    let plain =
-        xai_grok_astrolabe::engine_for_session(&root, &cfg, true, &DenyPolicy::default())
-            .expect("plain");
+    let plain = xai_grok_astrolabe::engine_for_session(&root, &cfg, true, &DenyPolicy::default())
+        .expect("plain");
     let deny = DenyPolicy::new(&[".env".to_string(), "src/classified.rs".to_string()]);
-    let strict = xai_grok_astrolabe::engine_for_session(&root, &cfg, true, &deny)
-        .expect("strict");
+    let strict = xai_grok_astrolabe::engine_for_session(&root, &cfg, true, &deny).expect("strict");
 
     // Warm both indexes, then compare what got admitted.
     let plain_text = search(&plain, &map, "grep_timeout_secs");
@@ -392,14 +390,12 @@ fn permissive_index_is_not_blinded_by_a_prior_denied_index() {
     let map = fixture.map(&fixture.root);
 
     let deny = DenyPolicy::new(&[".env".to_string()]);
-    let strict = xai_grok_astrolabe::engine_for_session(&root, &cfg, true, &deny)
-        .expect("strict");
+    let strict = xai_grok_astrolabe::engine_for_session(&root, &cfg, true, &deny).expect("strict");
     let text = search(&strict, &map, "SECRET_TOKEN");
     assert!(!text.contains("do-not-leak"), "{text}");
 
-    let plain =
-        xai_grok_astrolabe::engine_for_session(&root, &cfg, true, &DenyPolicy::default())
-            .expect("plain");
+    let plain = xai_grok_astrolabe::engine_for_session(&root, &cfg, true, &DenyPolicy::default())
+        .expect("plain");
     let text = search(&plain, &map, "SECRET_TOKEN");
     assert!(text.contains("do-not-leak"), "{text}");
 }
@@ -585,8 +581,7 @@ fn count_files_on_a_50k_tree_is_fast() {
     // in a default-excluded directory would be counted, but the early-stop
     // at the cap keeps the walk bounded either way.
     let start = std::time::Instant::now();
-    let err =
-        engine_for_session(&root, &cfg, false, &DenyPolicy::default()).unwrap_err();
+    let err = engine_for_session(&root, &cfg, false, &DenyPolicy::default()).unwrap_err();
     let elapsed = start.elapsed();
     assert!(
         matches!(err, EngineError::TooManyFiles { limit: 20_000, .. }),
