@@ -968,8 +968,7 @@ impl ToolRegistryBuilder {
             return errors;
         }
         {
-            let standard_file_ids: &[&str] =
-                &["GrokBuild:read_file", "GrokBuild:search_replace"];
+            let standard_file_ids: &[&str] = &["GrokBuild:read_file", "GrokBuild:search_replace"];
             let hashline_file_ids: &[&str] = &[
                 "GrokBuildHashline:hashline_read",
                 "GrokBuildHashline:hashline_edit",
@@ -2986,7 +2985,12 @@ mod tests {
             .iter()
             .map(|definition| definition.function.name.as_str())
             .collect();
-        for index_tool in ["search_code", "find_symbol", "resolve_context", "get_languages"] {
+        for index_tool in [
+            "search_code",
+            "find_symbol",
+            "resolve_context",
+            "get_languages",
+        ] {
             assert!(
                 !names.contains(&index_tool),
                 "{index_tool} must not be finalized for a remote workspace: {names:?}"

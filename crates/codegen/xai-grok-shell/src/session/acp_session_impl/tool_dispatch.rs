@@ -2,6 +2,7 @@
 //! Covers `dispatch_tool` and its lock and display helpers, direct bash-mode execution, and tool argument parse-error formatting.
 
 use super::*;
+use crate::session::helpers::tool_input_parsing::ArgsOrigin;
 
 /// Number of output lines to show in final bash mode output summary
 const BASH_MODE_FINAL_OUTPUT_LINES: usize = 10;
@@ -369,8 +370,25 @@ pub(super) fn build_tool_parse_error_message(
     function_name: &str,
     err: &xai_tool_runtime::ToolError,
     raw_arguments: &str,
+    args_origin: ArgsOrigin,
+    repaired_value: Option<&serde_json::Value>,
 ) -> String {
-    let mut msg = format!("Failed to parse arguments for tool `{function_name}`: {err}");
+    let mut msg = if matches!(args_origin, ArgsOrigin::Repaired | ArgsOrigin::Salvaged) {
+        // The upstream string was truncated; the schema error alone reads as a type
+        // mistake, so state what happened and what the harness reconstructed.
+        let repaired = repaired_value
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "{}".to_owned());
+        format!(
+            "Failed to parse arguments for tool `{function_name}`: the arguments were \
+             truncated or invalid upstream and the harness repaired them to {repaired}, \
+             which still fails schema validation: {err}.\n\n\
+             The tool was not executed. Re-emit with the required field(s) as plain \
+             values; do not nest them under another key."
+        )
+    } else {
+        format!("Failed to parse arguments for tool `{function_name}`: {err}")
+    };
 
     if raw_arguments.is_empty() {
         return msg;

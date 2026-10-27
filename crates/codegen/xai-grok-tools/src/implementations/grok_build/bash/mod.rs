@@ -1004,7 +1004,10 @@ mod shell_grep_tests {
         assert_eq!(find_shell_grep_invocation("git grep foo"), None);
         assert_eq!(find_shell_grep_invocation("echo grep"), None);
         assert_eq!(find_shell_grep_invocation("type grep"), None);
-        assert_eq!(find_shell_grep_invocation(r#"printf "see grep docs""#), None);
+        assert_eq!(
+            find_shell_grep_invocation(r#"printf "see grep docs""#),
+            None
+        );
         assert_eq!(
             find_shell_grep_invocation("echo \"foo | grep\""),
             None,

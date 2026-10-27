@@ -2068,6 +2068,9 @@ mod tool_definitions_artifact_tests;
 #[path = "acp_session_tests/tool_layer_images_bridge_tests.rs"]
 mod tool_layer_images_bridge_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/tool_parse_error_meta_tests.rs"]
+mod tool_parse_error_meta_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/turn/transient_retry_loop_tests.rs"]
 mod transient_retry_loop_tests;
 /// Turn-level retry on transient sampler failures.

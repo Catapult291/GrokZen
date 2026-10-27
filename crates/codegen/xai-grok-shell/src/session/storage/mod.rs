@@ -517,12 +517,20 @@ pub(crate) mod chat_rebuild {
             out
         }
 
+        fn raw_arguments_from_meta(meta: Option<&acp::Meta>) -> Option<String> {
+            meta.and_then(|meta| {
+                meta.get(crate::session::helpers::tool_input_parsing::RAW_ARGUMENTS_META_KEY)
+            })
+            .and_then(|raw| raw.as_str())
+            .map(str::to_owned)
+        }
+
         fn on_tool_call(&mut self, tc: &acp::ToolCall) -> Vec<ConversationItem> {
             let id = tc.tool_call_id.0.to_string();
-            let args = tc
-                .raw_input
-                .as_ref()
-                .map(|v| v.to_string())
+            // Recovered arguments arrive as the model's original string in `_meta`;
+            // `raw_input` holds the harness-repaired object and must not become history.
+            let args = Self::raw_arguments_from_meta(tc.meta.as_ref())
+                .or_else(|| tc.raw_input.as_ref().map(ToString::to_string))
                 .unwrap_or_default();
 
             self.tool_args.insert(id.clone(), args.clone());
@@ -537,7 +545,7 @@ pub(crate) mod chat_rebuild {
 
         fn on_tool_call_update(&mut self, tc: &acp::ToolCallUpdate) -> Vec<ConversationItem> {
             let id = tc.tool_call_id.0.to_string();
-            self.maybe_backfill_args(&id, &tc.fields);
+            self.maybe_backfill_args(&id, &tc.fields, tc.meta.as_ref());
 
             if Self::is_completed(&tc.fields) && self.emitted_tool_results.insert(id.clone()) {
                 return self.emit_tool_result(&id, &tc.fields);
@@ -545,14 +553,23 @@ pub(crate) mod chat_rebuild {
             Vec::new()
         }
 
-        fn maybe_backfill_args(&mut self, id: &str, fields: &acp::ToolCallUpdateFields) {
-            let Some(raw) = &fields.raw_input else { return };
+        fn maybe_backfill_args(
+            &mut self,
+            id: &str,
+            fields: &acp::ToolCallUpdateFields,
+            meta: Option<&acp::Meta>,
+        ) {
             let needs_backfill = self.tool_args.get(id).is_none_or(String::is_empty);
             if !needs_backfill {
                 return;
             }
 
-            let args = raw.to_string();
+            // Prefer the model's original string over the harness-repaired `rawInput`.
+            let Some(args) = Self::raw_arguments_from_meta(meta)
+                .or_else(|| fields.raw_input.as_ref().map(ToString::to_string))
+            else {
+                return;
+            };
             self.tool_args.insert(id.to_string(), args.clone());
 
             if let Some(call) = self
@@ -3741,6 +3758,105 @@ mod tests {
                 );
             }
             SessionUpdate::Acp(_) => panic!("expected Xai variant"),
+        }
+    }
+
+    /// Recovered arguments must reach chat history as the model's original string,
+    /// never as the harness-repaired object.
+    mod recovered_arguments {
+        use super::*;
+        use crate::session::helpers::tool_input_parsing::RAW_ARGUMENTS_META_KEY;
+        use std::sync::Arc;
+
+        const RAW: &str = r#"{"target_file": "src/main.rs", "limit": {"#;
+
+        fn rebuild(updates: Vec<acp::SessionUpdate>) -> Vec<ConversationItem> {
+            let sid = acp::SessionId::new(Arc::from("s"));
+            let dir = tempfile::tempdir().unwrap();
+            let envelopes: Vec<SessionUpdateEnvelope> = updates
+                .into_iter()
+                .map(|update| {
+                    SessionUpdate::Acp(Box::new(acp::SessionNotification::new(sid.clone(), update)))
+                })
+                .map(|u| SessionUpdateEnvelope::from_update(&u).unwrap())
+                .collect();
+            write_jsonl_atomic(&dir.path().join(UPDATES_FILE), &envelopes).unwrap();
+            chat_rebuild::rebuild_chat_history(dir.path()).unwrap();
+            std::fs::read_to_string(dir.path().join(CHAT_HISTORY_FILE))
+                .unwrap()
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect()
+        }
+
+        fn user(text: &str) -> acp::SessionUpdate {
+            acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                acp::TextContent::new(text),
+            )))
+        }
+
+        fn assistant_arguments(items: &[ConversationItem]) -> String {
+            items
+                .iter()
+                .find_map(|item| match item {
+                    ConversationItem::Assistant(assistant) => Some(
+                        assistant
+                            .tool_calls
+                            .first()
+                            .expect("assistant tool call")
+                            .arguments
+                            .to_string(),
+                    ),
+                    _ => None,
+                })
+                .expect("assistant item")
+        }
+
+        #[test]
+        fn meta_raw_arguments_win_over_the_repaired_raw_input() {
+            let mut meta = serde_json::Map::new();
+            meta.insert(RAW_ARGUMENTS_META_KEY.to_owned(), serde_json::json!(RAW));
+
+            let items = rebuild(vec![
+                user("read it"),
+                acp::SessionUpdate::ToolCall(
+                    acp::ToolCall::new(acp::ToolCallId::new("c1"), "read_file").meta(Some(meta)),
+                ),
+                acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                    acp::ToolCallId::new("c1"),
+                    acp::ToolCallUpdateFields::new()
+                        .title(Some("Read `src/main.rs`".to_owned()))
+                        .raw_input(Some(
+                            serde_json::json!({"target_file": "src/main.rs", "limit": {}}),
+                        ))
+                        .status(Some(acp::ToolCallStatus::Failed)),
+                )),
+            ]);
+
+            assert_eq!(assistant_arguments(&items), RAW);
+        }
+
+        #[test]
+        fn without_meta_the_refined_raw_input_still_backfills() {
+            let items = rebuild(vec![
+                user("read it"),
+                acp::SessionUpdate::ToolCall(acp::ToolCall::new(
+                    acp::ToolCallId::new("c1"),
+                    "read_file",
+                )),
+                acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                    acp::ToolCallId::new("c1"),
+                    acp::ToolCallUpdateFields::new()
+                        .raw_input(Some(serde_json::json!({"target_file": "src/main.rs"})))
+                        .status(Some(acp::ToolCallStatus::Failed)),
+                )),
+            ]);
+
+            assert_eq!(
+                assistant_arguments(&items),
+                r#"{"target_file":"src/main.rs"}"#
+            );
         }
     }
 }

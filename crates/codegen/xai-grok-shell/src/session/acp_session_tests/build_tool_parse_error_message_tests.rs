@@ -1,4 +1,5 @@
 use super::*;
+use crate::session::helpers::tool_input_parsing::ArgsOrigin;
 
 /// Regression test: exact incident that caused kimi-k2.5 / OpenRouter sessions to fail with 400 errors on every retry.
 /// The model produced malformed JSON (missing `"` before `new_string`).
@@ -11,7 +12,13 @@ fn test_malformed_json_includes_original_args_and_position() {
         .unwrap_err()
         .into();
 
-    let msg = build_tool_parse_error_message("search_replace", &err, bad_args);
+    let msg = build_tool_parse_error_message(
+        "search_replace",
+        &err,
+        bad_args,
+        ArgsOrigin::RawFallback,
+        None,
+    );
 
     assert!(
         msg.contains(bad_args),
@@ -40,7 +47,8 @@ fn test_valid_json_no_invalid_json_note() {
     let err =
         xai_tool_runtime::ToolError::invalid_arguments("missing field `old_string`".to_string());
 
-    let msg = build_tool_parse_error_message("search_replace", &err, good_args);
+    let msg =
+        build_tool_parse_error_message("search_replace", &err, good_args, ArgsOrigin::Parsed, None);
 
     assert!(
         msg.contains(good_args),
@@ -57,7 +65,7 @@ fn test_valid_json_no_invalid_json_note() {
 fn test_empty_arguments_no_extra_content() {
     let err =
         xai_tool_runtime::ToolError::invalid_arguments("missing field `file_path`".to_string());
-    let msg = build_tool_parse_error_message("search_replace", &err, "");
+    let msg = build_tool_parse_error_message("search_replace", &err, "", ArgsOrigin::Parsed, None);
 
     assert!(msg.contains("Failed to parse arguments for tool `search_replace`"));
     assert!(!msg.contains("Your original arguments"));
@@ -74,7 +82,13 @@ fn test_long_arguments_are_truncated() {
 
     let err =
         xai_tool_runtime::ToolError::invalid_arguments("missing field `file_path`".to_string());
-    let msg = build_tool_parse_error_message("search_replace", &err, &long_args);
+    let msg = build_tool_parse_error_message(
+        "search_replace",
+        &err,
+        &long_args,
+        ArgsOrigin::Parsed,
+        None,
+    );
 
     // The message must be capped: the full args must NOT appear verbatim
     assert!(
@@ -117,6 +131,57 @@ fn test_truncate_bytes_non_ascii() {
     assert_eq!(truncate_bytes(s, 0), "");
 }
 
+/// A truncated argument string that the harness repaired into a schema-invalid object
+/// must be reported as an upstream truncation, not as a plain type mistake.
+#[test]
+fn test_repaired_arguments_report_truncation() {
+    let raw = r#"{"context_lines": {"#;
+    let err = xai_tool_runtime::ToolError::invalid_arguments(
+        "invalid type: map, expected usize".to_string(),
+    );
+    let repaired = serde_json::json!({ "context_lines": {} });
+
+    let msg = build_tool_parse_error_message(
+        "search_code",
+        &err,
+        raw,
+        ArgsOrigin::Repaired,
+        Some(&repaired),
+    );
+
+    assert!(msg.contains("truncated or invalid upstream"), "got:\n{msg}");
+    assert!(msg.contains("context_lines"), "got:\n{msg}");
+    assert!(msg.contains("The tool was not executed"), "got:\n{msg}");
+    assert!(msg.contains(raw), "original arguments must still be echoed");
+    assert!(
+        msg.contains("invalid JSON"),
+        "the original string is still invalid JSON; got:\n{msg}"
+    );
+}
+
+/// Valid JSON that merely fails the schema keeps the plain parse-error text.
+#[test]
+fn test_parsed_arguments_do_not_claim_truncation() {
+    let raw = r#"{"context_lines": {}}"#;
+    let err = xai_tool_runtime::ToolError::invalid_arguments(
+        "invalid type: map, expected usize".to_string(),
+    );
+
+    let msg = build_tool_parse_error_message(
+        "search_code",
+        &err,
+        raw,
+        ArgsOrigin::Parsed,
+        Some(&serde_json::json!({ "context_lines": {} })),
+    );
+
+    assert!(
+        !msg.contains("truncated or invalid upstream"),
+        "valid JSON must not be reported as truncated; got:\n{msg}"
+    );
+    assert!(msg.contains("invalid type: map, expected usize"));
+}
+
 /// build_tool_parse_error_message must not panic when raw_arguments contains non-ASCII characters and the byte limit falls mid-char.
 #[test]
 fn test_non_ascii_arguments_truncated_safely() {
@@ -128,7 +193,13 @@ fn test_non_ascii_arguments_truncated_safely() {
 
     let err = xai_tool_runtime::ToolError::invalid_arguments("missing field".to_string());
     // Must not panic.
-    let msg = build_tool_parse_error_message("search_replace", &err, &long_args);
+    let msg = build_tool_parse_error_message(
+        "search_replace",
+        &err,
+        &long_args,
+        ArgsOrigin::Parsed,
+        None,
+    );
     assert!(msg.contains("(truncated)"));
     // The prefix in the message must be valid UTF-8 (implicit: String is always UTF-8)
     assert!(!msg.is_empty());

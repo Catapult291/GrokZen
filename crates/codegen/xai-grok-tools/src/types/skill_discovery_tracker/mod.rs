@@ -797,7 +797,10 @@ mod tests {
 
         // Touching a matching file activates it.
         let touched = cwd.join("src").join("main.rs");
-        assert!(!mgr.activate_conditional_skills_for_paths(&[touched.as_path()]).is_empty());
+        assert!(
+            !mgr.activate_conditional_skills_for_paths(&[touched.as_path()])
+                .is_empty()
+        );
         let r = mgr.take_pending_reconciliation().unwrap();
         assert!(r.runtime_skills.iter().any(|s| s.name == "gated"));
     }
@@ -808,12 +811,14 @@ mod tests {
     fn mid_session_xml_discovery_renders_role() {
         let mut mgr = SkillManager::new();
         mgr.set_xml_format(true);
-        assert!(mgr.add_discovered(vec![SkillInfo {
-            role: Some("router".to_owned()),
-            ..make_skill("re", "/skills/re/SKILL.md")
-        }])
-        .len()
-            == 1);
+        assert!(
+            mgr.add_discovered(vec![SkillInfo {
+                role: Some("router".to_owned()),
+                ..make_skill("re", "/skills/re/SKILL.md")
+            }])
+            .len()
+                == 1
+        );
         let text = mgr
             .take_pending()
             .and_then(|(_, effects)| effects.system_reminder)
@@ -825,10 +830,12 @@ mod tests {
 
         let mut plain = SkillManager::new();
         plain.set_xml_format(true);
-        assert!(plain
-            .add_discovered(vec![make_skill("plain", "/skills/plain/SKILL.md")])
-            .len()
-            == 1);
+        assert!(
+            plain
+                .add_discovered(vec![make_skill("plain", "/skills/plain/SKILL.md")])
+                .len()
+                == 1
+        );
         let text = plain
             .take_pending()
             .and_then(|(_, effects)| effects.system_reminder)
@@ -856,7 +863,10 @@ mod tests {
         assert!(mgr.discovered_skills().is_empty());
 
         let touched = cwd.join("src").join("main.rs");
-        assert!(!mgr.activate_conditional_skills_for_paths(&[touched.as_path()]).is_empty());
+        assert!(
+            !mgr.activate_conditional_skills_for_paths(&[touched.as_path()])
+                .is_empty()
+        );
         assert_eq!(mgr.discovered_skills().len(), 1);
     }
 
@@ -877,7 +887,10 @@ mod tests {
 
         // The held skill survives and still activates on a matching touch.
         let touched = cwd.join("src").join("main.rs");
-        assert!(!mgr.activate_conditional_skills_for_paths(&[touched.as_path()]).is_empty());
+        assert!(
+            !mgr.activate_conditional_skills_for_paths(&[touched.as_path()])
+                .is_empty()
+        );
         assert!(mgr.discovered_skills().iter().any(|s| s.name == "gated"));
     }
 
@@ -897,7 +910,10 @@ mod tests {
         let _ = mgr.take_pending_reconciliation();
 
         let touched = cwd.join("docs").join("readme.md");
-        assert!(mgr.activate_conditional_skills_for_paths(&[touched.as_path()]).is_empty());
+        assert!(
+            mgr.activate_conditional_skills_for_paths(&[touched.as_path()])
+                .is_empty()
+        );
         assert!(mgr.take_pending_reconciliation().is_none());
     }
 
@@ -916,7 +932,10 @@ mod tests {
         );
         let _ = mgr.take_pending_reconciliation();
         let touched = cwd.join("src").join("lib.rs");
-        assert!(!mgr.activate_conditional_skills_for_paths(&[touched.as_path()]).is_empty());
+        assert!(
+            !mgr.activate_conditional_skills_for_paths(&[touched.as_path()])
+                .is_empty()
+        );
         let _ = mgr.take_pending_reconciliation();
 
         // Re-seed (e.g. plugin reload): the activated skill stays visible.
@@ -948,7 +967,11 @@ mod tests {
         let mut manager = SkillManager::new();
         manager.cwd = Some(cwd.path().into());
         manager.add_discovered(vec![plugin.clone()]);
-        assert!(!manager.activate_conditional_skills_for_paths(&[&cwd.path().join("src/a")]).is_empty());
+        assert!(
+            !manager
+                .activate_conditional_skills_for_paths(&[&cwd.path().join("src/a")])
+                .is_empty()
+        );
         manager.update_startup_baseline(vec![plugin.clone()]);
         let mut updated = plugin;
         updated.description = "updated".to_owned();
@@ -973,7 +996,11 @@ mod tests {
         let mut manager = SkillManager::new();
         manager.cwd = Some(cwd.path().into());
         manager.update_plugin_skills(vec![plugin_a.clone()]);
-        assert!(!manager.activate_conditional_skills_for_paths(&[&cwd.path().join("src/a")]).is_empty());
+        assert!(
+            !manager
+                .activate_conditional_skills_for_paths(&[&cwd.path().join("src/a")])
+                .is_empty()
+        );
         let _ = manager.take_pending();
         manager.update_startup_baseline(vec![plugin_a.clone(), make_skill("queued", "/queued")]);
         manager.add_discovered(vec![make_skill("native", "/dynamic")]);
@@ -1036,7 +1063,10 @@ mod tests {
 
         // Activate, then reload (promotes the activated skill into the baseline).
         let touched = cwd.join("src").join("main.rs");
-        assert!(!mgr.activate_conditional_skills_for_paths(&[touched.as_path()]).is_empty());
+        assert!(
+            !mgr.activate_conditional_skills_for_paths(&[touched.as_path()])
+                .is_empty()
+        );
         let _ = mgr.take_pending_reconciliation();
         mgr.update_startup_baseline(vec![make_conditional_skill(
             "gated",
@@ -1060,8 +1090,16 @@ mod tests {
         let path = skill_dir.join("SKILL.md").to_str().unwrap().to_string();
 
         let mut tracker = SkillManager::new();
-        assert!(!tracker.add_discovered(vec![make_skill("alpha", &path)]).is_empty());
-        assert!(tracker.add_discovered(vec![make_skill("alpha", &path)]).is_empty());
+        assert!(
+            !tracker
+                .add_discovered(vec![make_skill("alpha", &path)])
+                .is_empty()
+        );
+        assert!(
+            tracker
+                .add_discovered(vec![make_skill("alpha", &path)])
+                .is_empty()
+        );
         assert_eq!(tracker.discovered_skills().len(), 1);
     }
 
@@ -1074,7 +1112,10 @@ mod tests {
         tracker.seed(
             None,
             None,
-            vec![make_skill("stage-recap", "/.grok/skills/stage-recap/SKILL.md")],
+            vec![make_skill(
+                "stage-recap",
+                "/.grok/skills/stage-recap/SKILL.md",
+            )],
             None,
             None,
             None,
@@ -1262,7 +1303,10 @@ mod tests {
 
         // Re-discover the same skill (same canonical path)
         let entered = tracker.add_discovered(vec![make_skill("dyn", "/d/SKILL.md")]);
-        assert!(entered.is_empty(), "same canonical path must not be treated as new");
+        assert!(
+            entered.is_empty(),
+            "same canonical path must not be treated as new"
+        );
         assert_eq!(
             tracker.discovered_skills().len(),
             1,
