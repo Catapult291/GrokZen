@@ -55,7 +55,9 @@ pub struct ExecOutcome {
     /// Number of async host calls the script performed (`searchTool` +
     /// `useTool`).
     pub host_calls: u32,
-    /// Captured `console.*` lines (capped); debug-only, not model-facing.
+    /// Captured `console.*` lines (capped). On success they stay in
+    /// [`ExecOutcome::console`] (debug-only, not model-facing); on failure the
+    /// last [`CONSOLE_ERROR_TAIL_LINES`] are appended to the error message.
     pub console: Vec<String>,
     /// Wall-clock milliseconds spent in the sandbox.
     pub wall_ms: u64,
@@ -65,6 +67,11 @@ pub struct ExecOutcome {
 const HOST_REJECT_PREFIX: &str = "__cm_host__";
 const CALL_LIMIT_PREFIX: &str = "__cm_call_limit__";
 const ARG_REJECT_PREFIX: &str = "__cm_arg__";
+
+/// How many trailing `console.*` lines are appended to a failure message so
+/// the model can see recent script diagnostics (handoff 缺口6 candidate A).
+/// Lines are already capped at 512 B by [`push_console_line`].
+const CONSOLE_ERROR_TAIL_LINES: usize = 10;
 
 /// User code is wrapped in an async IIFE. The envelope is always JSON-safe
 /// and the outer promise resolves (not rejects) for ordinary failures; the
@@ -197,6 +204,23 @@ fn push_console_line(console: &Mutex<Vec<String>>, max_lines: usize, line: Strin
     guard.push(line);
 }
 
+/// Last [`CONSOLE_ERROR_TAIL_LINES`] captured console lines (empty when none).
+fn console_error_tail(console: &Mutex<Vec<String>>) -> Vec<String> {
+    let lines = console.lock().map(|g| g.clone()).unwrap_or_default();
+    let start = lines.len().saturating_sub(CONSOLE_ERROR_TAIL_LINES);
+    lines[start..].to_vec()
+}
+
+/// Append a console tail to a failure message. No-op when the tail is empty
+/// so existing host/syntax/timeout messages stay byte-identical without logs.
+fn attach_console_tail(mut err: CodemodeError, tail: &[String]) -> CodemodeError {
+    if tail.is_empty() {
+        return err;
+    }
+    err.message = format!("{}\n\n[console]\n{}", err.message, tail.join("\n"));
+    err
+}
+
 fn stringify_host_error(err: &HostCallError) -> String {
     let payload = serde_json::json!({ "code": err.code, "message": err.message });
     match serde_json::to_string(&payload) {
@@ -289,7 +313,8 @@ fn bind_globals(
 ) -> Result<(), rquickjs::Error> {
     let globals = ctx.globals();
 
-    // console.* — collected for debug, capped, never model-facing by default.
+    // console.* — capped; success keeps them out of the model envelope, failure
+    // appends the last few lines to the error message (缺口6).
     let max_console_lines = limits.max_console_lines;
     let console_obj = Object::new(ctx.clone())?;
     for name in ["log", "warn", "error", "info"] {
@@ -462,11 +487,14 @@ pub async fn execute(
 
     let envelope: serde_json::Value = match tokio::time::timeout(limits.timeout, run).await {
         Ok(Ok(envelope)) => envelope,
-        Ok(Err(e)) => return Err(e),
+        Ok(Err(e)) => return Err(attach_console_tail(e, &console_error_tail(&console))),
         Err(_) => {
-            return Err(CodemodeError::new(
-                CodemodeErrorKind::Timeout,
-                format!("script exceeded {:?}", limits.timeout),
+            return Err(attach_console_tail(
+                CodemodeError::new(
+                    CodemodeErrorKind::Timeout,
+                    format!("script exceeded {:?}", limits.timeout),
+                ),
+                &console_error_tail(&console),
             ));
         }
     };
@@ -490,6 +518,7 @@ pub async fn execute(
             fit_return(raw, limits.max_return_bytes)
         }
         Some(false) => {
+            let tail = console_error_tail(&console);
             if let Some(host_err) = envelope.get("host") {
                 let code = host_err
                     .get("code")
@@ -501,7 +530,7 @@ pub async fn execute(
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("host call failed")
                     .to_string();
-                return Err(CodemodeError::host(code, message));
+                return Err(attach_console_tail(CodemodeError::host(code, message), &tail));
             }
             if let Some(arg_msg) = envelope.get("argError").and_then(serde_json::Value::as_str) {
                 // The JS side JSON-parses `{code, message}`; surface as a
@@ -518,18 +547,21 @@ pub async fn execute(
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("invalid host-call argument")
                         .to_string();
-                    return Err(CodemodeError::host(code, message));
+                    return Err(attach_console_tail(CodemodeError::host(code, message), &tail));
                 }
-                return Err(CodemodeError::new(
-                    CodemodeErrorKind::InvalidArgument,
-                    arg_msg,
+                return Err(attach_console_tail(
+                    CodemodeError::new(CodemodeErrorKind::InvalidArgument, arg_msg),
+                    &tail,
                 ));
             }
             if let Some(msg) = envelope
                 .get("callLimit")
                 .and_then(serde_json::Value::as_str)
             {
-                return Err(CodemodeError::new(CodemodeErrorKind::CallLimit, msg));
+                return Err(attach_console_tail(
+                    CodemodeError::new(CodemodeErrorKind::CallLimit, msg),
+                    &tail,
+                ));
             }
             let message = envelope
                 .get("message")
@@ -552,16 +584,22 @@ pub async fn execute(
                 .get("internal")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
-            return Err(if is_internal {
-                classify_fatal_text(&full)
-            } else {
-                CodemodeError::new(CodemodeErrorKind::Runtime, full)
-            });
+            return Err(attach_console_tail(
+                if is_internal {
+                    classify_fatal_text(&full)
+                } else {
+                    CodemodeError::new(CodemodeErrorKind::Runtime, full)
+                },
+                &tail,
+            ));
         }
         _ => {
-            return Err(CodemodeError::new(
-                CodemodeErrorKind::Runtime,
-                format!("sandbox returned an unrecognised envelope: {envelope}"),
+            return Err(attach_console_tail(
+                CodemodeError::new(
+                    CodemodeErrorKind::Runtime,
+                    format!("sandbox returned an unrecognised envelope: {envelope}"),
+                ),
+                &console_error_tail(&console),
             ));
         }
     };

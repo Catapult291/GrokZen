@@ -62,14 +62,22 @@ impl CodemodeParams {
 
 crate::register_resource!("grok_build", "Codemode", CodemodeParams);
 
+/// One `useTool` dispatch the script performed (audit trail entry).
+#[derive(Debug, Clone)]
+struct ToolCallEntry {
+    name: String,
+    /// Serialized size of the tool input (zero-leak summary; no args echoed).
+    input_bytes: usize,
+}
+
 /// Host binding backed by the session's tool index and `use_tool` dispatch
 /// (local MCP via `InnerDispatch`, managed gateway via catalog fallback).
 struct CodemodeHost {
     ctx: ToolCallContext,
     index: Option<ToolIndex>,
-    /// Every `useTool` target the script dispatched (audit trail; surfaced as
-    /// `toolsCalled` in the tool result).
-    tools_called: Mutex<Vec<String>>,
+    /// Every `useTool` target the script dispatched with input size
+    /// (audit trail; surfaced as `toolsCalled` in the tool result).
+    tools_called: Mutex<Vec<ToolCallEntry>>,
 }
 
 fn host_error_from_tool(err: xai_tool_runtime::ToolError) -> HostCallError {
@@ -149,7 +157,11 @@ impl HostTools for CodemodeHost {
             });
         }
         if let Ok(mut called) = self.tools_called.lock() {
-            called.push(tool_name.clone());
+            let input_bytes = serde_json::to_string(&input).map(|s| s.len()).unwrap_or(0);
+            called.push(ToolCallEntry {
+                name: tool_name.clone(),
+                input_bytes,
+            });
         }
         let ctx = self.ctx.clone();
         Box::pin(async move {
@@ -191,6 +203,7 @@ impl crate::types::tool_metadata::ToolMetadata for Codemode {
          Use this for multi-step work that would otherwise take many rounds of \
          `use_tool` calls (discover + N MCP calls + post-process). \
          Do NOT use codemode for a single simple call — a direct `use_tool` call is cheaper.\n\n\
+         Approving this call authorizes every tool call the script performs; the result returns `toolsCalled` for audit.\n\n\
          Sandbox globals:\n\
          - `await host.servers()` — connected MCP servers: `[{ name, description, toolCount }]`\n\
          - `await tools.searchTool({ query, limit })` — discover tools + input schemas \
@@ -273,7 +286,11 @@ impl xai_tool_runtime::Tool for Codemode {
             host_call_count = outcome.host_calls,
             wall_ms = outcome.wall_ms,
             return_bytes = serde_json::to_string(&outcome.value).map(|s| s.len()).unwrap_or(0),
-            tools_called = %tools_called.join(","),
+            tools_called = %tools_called
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
             truncated = outcome.truncated,
             "codemode.execute"
         );
@@ -285,9 +302,18 @@ impl xai_tool_runtime::Tool for Codemode {
             );
         }
 
+        let tools_called_json: Vec<serde_json::Value> = tools_called
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "name": e.name,
+                    "inputBytes": e.input_bytes,
+                })
+            })
+            .collect();
         let envelope = serde_json::json!({
             "result": outcome.value,
-            "toolsCalled": tools_called,
+            "toolsCalled": tools_called_json,
             "truncated": outcome.truncated,
         });
         Ok(ToolOutput::Text(TextOutput {
