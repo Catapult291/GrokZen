@@ -156,6 +156,36 @@ async fn nested_codemode_use_tool_rejected() {
     );
 }
 
+/// 缺口6: when the script fails, the model-visible error detail must include
+/// the recent `console.*` tail so failures are diagnosable without a second run.
+#[tokio::test]
+async fn failure_detail_includes_console_tail() {
+    let resources = crate::types::resources::Resources::default().into_shared();
+    let mut ctx = xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+    ctx.extensions.insert(resources);
+
+    let err = super::Codemode
+        .run(
+            ctx,
+            super::CodemodeInput {
+                code: r#"
+console.log("looking up orgs");
+throw new Error("no orgs found");
+"#
+                .into(),
+            },
+        )
+        .await
+        .expect_err("throw must fail");
+    assert!(err.detail.contains("no orgs found"), "got: {}", err.detail);
+    assert!(err.detail.contains("[console]"), "got: {}", err.detail);
+    assert!(
+        err.detail.contains("looking up orgs"),
+        "console tail missing from error detail: {}",
+        err.detail
+    );
+}
+
 #[tokio::test]
 async fn syntax_error_maps_to_codemode_syntax() {
     let resources = crate::types::resources::Resources::default().into_shared();
@@ -280,10 +310,19 @@ return { a: a.text, b: b.text };
         envelope.pointer("/result/a"),
         Some(&serde_json::json!("echo:mock__echo"))
     );
-    assert_eq!(
-        envelope.get("toolsCalled"),
-        Some(&serde_json::json!(["mock__echo", "mock__echo"]))
-    );
+    let tools_called = envelope
+        .get("toolsCalled")
+        .and_then(serde_json::Value::as_array)
+        .expect("toolsCalled must be an array");
+    assert_eq!(tools_called.len(), 2, "two useTool calls must be audited");
+    assert_eq!(tools_called[0]["name"], "mock__echo");
+    assert_eq!(tools_called[1]["name"], "mock__echo");
+    // input `{ "x": 1 }` / `{ "x": 2 }` serialize to the same byte length.
+    let input_bytes = tools_called[0]["inputBytes"]
+        .as_u64()
+        .expect("inputBytes must be a number");
+    assert!(input_bytes > 0, "inputBytes must report the serialized size");
+    assert_eq!(tools_called[1]["inputBytes"], serde_json::json!(input_bytes));
 }
 
 /// §6-2: the default budget is 64 host calls; the 65th is refused.
@@ -503,4 +542,20 @@ fn description_template_renders_without_search_use_tool() {
         .expect("codemode description must not require search_tool/use_tool in the toolset");
     assert!(rendered.contains("use_tool"));
     assert!(rendered.contains("searchTool"));
+}
+
+/// 缺口1: the description must warn that approving the outer call batch-authorizes
+/// every tool call the script performs, and that the result returns `toolsCalled`
+/// for audit.
+#[test]
+fn description_warns_about_batch_authorization() {
+    let desc = super::Codemode.description_template();
+    assert!(
+        desc.contains("authorizes every tool call the script performs"),
+        "description must state that approval batch-authorizes all script tool calls: {desc}"
+    );
+    assert!(
+        desc.contains("toolsCalled"),
+        "description must mention the toolsCalled audit field: {desc}"
+    );
 }

@@ -256,6 +256,71 @@ async fn bare_throw_is_runtime_error() {
     assert!(err.message.contains("boom"), "got: {}", err.message);
 }
 
+/// 缺口6: a failed script appends the last console lines to the error message
+/// so the model can see recent diagnostics; success keeps console out of value.
+#[tokio::test]
+async fn failure_appends_console_tail() {
+    let err = execute(
+        r#"
+console.log("step1: start");
+console.log("step2: about to fail");
+throw new Error("boom");
+"#,
+        Arc::new(MockHost::new()),
+        &fast_limits(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.kind, CodemodeErrorKind::Runtime, "got: {err:?}");
+    assert!(err.message.contains("boom"), "got: {}", err.message);
+    assert!(err.message.contains("[console]"), "got: {}", err.message);
+    assert!(
+        err.message.contains("step1: start") && err.message.contains("step2: about to fail"),
+        "got: {}",
+        err.message
+    );
+}
+
+/// 缺口6: only the last CONSOLE_ERROR_TAIL_LINES lines are attached.
+#[tokio::test]
+async fn failure_console_tail_is_capped() {
+    let err = execute(
+        r#"
+for (let i = 0; i < 20; i++) console.log("line", i);
+throw new Error("after logs");
+"#,
+        Arc::new(MockHost::new()),
+        &fast_limits(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.message.contains("line 19"), "got: {}", err.message);
+    assert!(err.message.contains("line 10"), "got: {}", err.message);
+    assert!(
+        !err.message.contains("line 9\n") && !err.message.contains("line 9 "),
+        "only last 10 lines expected, got: {}",
+        err.message
+    );
+}
+
+/// 缺口6: success still keeps console out of the returned value (debug-only
+/// on the happy path); the lines remain available on ExecOutcome.console.
+#[tokio::test]
+async fn success_keeps_console_out_of_value() {
+    let out = execute(
+        r#"
+console.log("debug only");
+return { ok: 1 };
+"#,
+        Arc::new(MockHost::new()),
+        &fast_limits(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.value, json!({ "ok": 1 }));
+    assert_eq!(out.console, vec!["debug only".to_string()]);
+}
+
 #[tokio::test]
 async fn user_error_with_oom_substring_is_runtime() {
     // Substring keyword classification is only for QuickJS `InternalError`;
