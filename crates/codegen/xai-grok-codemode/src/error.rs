@@ -18,6 +18,8 @@ pub enum CodemodeErrorKind {
     Syntax,
     /// Host call budget exhausted.
     CallLimit,
+    /// `JSON.stringify` of a host-call argument failed (circular, BigInt, function).
+    InvalidArgument,
     /// Any other in-script failure (e.g. a bare `throw`).
     Runtime,
 }
@@ -30,6 +32,7 @@ impl CodemodeErrorKind {
             Self::Host => "codemode_host_error",
             Self::Syntax => "codemode_syntax",
             Self::CallLimit => "codemode_call_limit",
+            Self::InvalidArgument => "codemode_invalid_argument",
             Self::Runtime => "codemode_error",
         }
     }
