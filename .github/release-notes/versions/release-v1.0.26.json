@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "tag": "release-v1.0.26",
+  "prerelease": false,
+  "previous_tag": "release-v1.0.25",
+  "community": [
+    {
+      "text": "集成 Astrolabe 原生内容搜索：新增 search_code、find_symbol、resolve_context 等 7 个代码检索工具，支持进程内索引、gitignore 尊重与 LSP 语言信息。",
+      "commits": [
+        "f2b3ac5e8ace414da99e901b2143e9eb78821732",
+        "1ad130628ed672a5f63eb1e8129a2fb0c3d7bc1a",
+        "721d237a7a6899cfaf3b8e3402a16753912c72ee",
+        "eaa980e5370c59574eecc0adf78be301a962cdc0",
+        "c1058def17fea5066c9b0ca0c7f815d6b3c1e7ba",
+        "7a99909b10b3155cf35870aa9c2ca916edaf65f0",
+        "cb0c615bbfff98e6bddccb15d5fe57610fe4d8df",
+        "74281f8b6da059cf497929926c9d88363225beb0"
+      ]
+    },
+    {
+      "text": "移除内置 grep 与 shell grep：内容搜索统一走 search_code；run_terminal_command 在执行前拒绝 grep/rg 等命令位并给出替代提示。",
+      "commits": [
+        "137486bc955cba1b40e1f73b318e46c1a3abe2ce"
+      ]
+    },
+    {
+      "text": "与 x.ai 脱钩：停用账号登录通道与内置 Grok 模型，启动不再强制跳转 auth.x.ai / accounts.x.ai，模型改由 config.toml 自行声明。",
+      "commits": [
+        "ddd6464f924c07ef5eba242093dccbcf0646a2a7"
+      ]
+    },
+    {
+      "text": "完善技能路由 harness：listing 分层保留 role、条件激活输出吸收提示，并修复中文吸收提示与启动列表误触发问题。",
+      "commits": [
+        "1f42f5e8686ff10879130c059ffdd4982fe937c5",
+        "44d274629838b653a1a5ea0b344d3fcc4303aefb",
+        "2a209d074293244a5e97718cb56776d4936675e2",
+        "07178d86188a153c6685b8d05747591c04230024",
+        "2a41f75eb1698113564b8277ceddff5886ee78f5"
+      ]
+    },
+    {
+      "text": "修复 codemode 批量授权、序列化边界与嵌套调用 guard；mimo/cline 工具调用截断参数区分修复值与模型原始串，错误提示给出换形建议。",
+      "commits": [
+        "57a3308406102ee24e9af5eae1cf9abd3fb670d6",
+        "7eedefab0a665b83de6476fd76a61378169cabaa",
+        "cd715d38627d90d9f5492b74cc508ad8d3bbffd4",
+        "1991997e46c13e5e0753a32e24d1c10dd803db1f",
+        "14e931fc2b497bde6d3da1d8e0d96176d08927bf"
+      ]
+    }
+  ],
+  "upstream": [],
+  "notices": [
+    "本版起完全停用 x.ai 账号登录与内置 Grok 模型；请在 ~/.grok/config.toml 中配置自己的 [model.*] 与 API Key。"
+  ]
+}

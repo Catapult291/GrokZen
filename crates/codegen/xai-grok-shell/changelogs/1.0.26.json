@@ -1,57 +1,27 @@
 [
   {
-    "category": "fixes",
-    "description": "**`/btw` side questions** now include attached images from the composer.",
+    "category": "features",
+    "description": "**Astrolabe native content search** — seven new code-retrieval tools (`search_code` / `find_symbol` / `resolve_context` and friends) with in-process indexing, gitignore respect, and LSP language info.",
     "breaking_change": false
   },
   {
     "category": "features",
-    "description": "**Interject messages** to subagents now interrupt long-running background waits so the message arrives immediately.",
-    "breaking_change": false
-  },
-  {
-    "category": "features",
-    "description": "**Subagent message rows** in scrollback now indicate whether a message was sent as interject, queued, or steer.",
-    "breaking_change": false
-  },
-  {
-    "category": "features",
-    "description": "**Feedback form** is now available directly in minimal mode without switching to fullscreen.",
+    "description": "**Skill routing harness** — names-only listing keeps `role`, conditional activation emits absorption hints; fixed Chinese absorption hint text and false triggers on startup listings.",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "**Background task reminders** no longer echo the original shell command.",
+    "description": "**Content search convergence** — built-in grep and shell grep are removed; `run_terminal_command` rejects grep/rg command positions before spawn and points at search_code.",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "**Failed background tasks** no longer produce duplicate reminders after the model reads their output.",
-    "breaking_change": false
+    "description": "**Detach from x.ai** — account login and built-in Grok models are disabled; startup no longer force-redirects to auth.x.ai / accounts.x.ai. Declare models in `config.toml`.",
+    "breaking_change": true
   },
   {
     "category": "fixes",
-    "description": "**TPM rate-limit errors** during compaction are now retried instead of treated as context overflow.",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**Ctrl+C** early in a turn now correctly rewinds the prompt without races.",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**Dashboard arrow keys** now navigate the actions row from an empty input box.",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**MCP tool calls** on legacy servers now correctly advertise elicitation support.",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**Memory v2** now recovers from init failures and avoids stalled capture after repeated errors.",
+    "description": "**Codemode and tool calls** — fixed batch authorization, serialization boundaries, and nested-call guards; mimo/cline truncated arguments now distinguish repaired values from the model's raw string, with reshape hints in parse errors.",
     "breaking_change": false
   }
 ]
