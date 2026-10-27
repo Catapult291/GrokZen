@@ -210,7 +210,10 @@ impl crate::types::tool_metadata::ToolMetadata for Codemode {
          (same shape as `search_tool`)\n\
          - `await tools.useTool(name, input)` — call a discovered tool (`{ text, isError }`)\n\
          Also available: `Promise.all`, `console.log` (debug only), JSON/Math/Array. \
-         No network, no filesystem, 30s timeout, 64 host-call budget.\n\n\
+         No network, no filesystem, 30s timeout, 64 host-call budget. \
+         On timeout the whole run is dropped: any in-flight host tool call is \
+         cancelled mid-flight and its side effects may already have partially \
+         happened — split long chains across multiple codemode calls.\n\n\
          Example:\n\
          ```js\n\
          const found = await tools.searchTool({ query: \"sentry issues\", limit: 5 });\n\

@@ -321,8 +321,14 @@ return { a: a.text, b: b.text };
     let input_bytes = tools_called[0]["inputBytes"]
         .as_u64()
         .expect("inputBytes must be a number");
-    assert!(input_bytes > 0, "inputBytes must report the serialized size");
-    assert_eq!(tools_called[1]["inputBytes"], serde_json::json!(input_bytes));
+    assert!(
+        input_bytes > 0,
+        "inputBytes must report the serialized size"
+    );
+    assert_eq!(
+        tools_called[1]["inputBytes"],
+        serde_json::json!(input_bytes)
+    );
 }
 
 /// §6-2: the default budget is 64 host calls; the 65th is refused.
@@ -377,6 +383,120 @@ return out.length;
     assert_eq!(
         details.get("code").and_then(serde_json::Value::as_str),
         Some("codemode_call_limit")
+    );
+}
+
+/// 缺口8: mock MCP closed loop through the real `CodemodeHost` —
+/// `searchTool` discovers a tool from the session `ToolIndex`, then
+/// `useTool` dispatches it via `InnerDispatch` returning MCP-shaped output.
+/// This is the same search → use path a live MCP server exercises, without
+/// spawning a process (CI-filterable; complements the live multi-model A/B).
+#[tokio::test]
+async fn search_then_use_closed_loop_through_host() {
+    use std::sync::Mutex;
+    use xai_tool_runtime::{ToolDispatch, ToolStream, TypedToolOutput};
+
+    /// InnerDispatch that answers with MCP-shaped text, echoing the tool name.
+    struct McpShapedDispatch {
+        calls: Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolDispatch for McpShapedDispatch {
+        async fn call(
+            &self,
+            tool_id: xai_tool_protocol::ToolId,
+            args: serde_json::Value,
+            _ctx: xai_tool_runtime::ToolCallContext,
+        ) -> ToolStream<TypedToolOutput> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((tool_id.as_str().to_string(), args.clone()));
+            // Shape matches what `dispatch_local_mcp` decodes into `ToolOutput::MCP`.
+            let out = serde_json::json!({
+                "type": "MCP",
+                "tool_name": tool_id.as_str(),
+                "server_name": "sentry",
+                "output": { "OkayOutput": format!("orgs-for:{}", tool_id.as_str()) },
+                "is_error": false,
+            });
+            xai_tool_runtime::terminal_only(Ok(TypedToolOutput::from_value(tool_id, out)))
+        }
+    }
+
+    let dispatch = Arc::new(McpShapedDispatch {
+        calls: Mutex::new(Vec::new()),
+    });
+    let resources = crate::types::resources::Resources::default().into_shared();
+    resources
+        .lock()
+        .await
+        .insert(ToolIndex(Arc::new(StaticToolIndex {
+            snapshot: one_tool_snapshot(),
+        })));
+    let mut ctx = xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+    ctx.extensions
+        .insert(crate::types::resources::InnerDispatch(dispatch.clone()));
+    ctx.extensions.insert(resources);
+
+    let output = super::Codemode
+        .run(
+            ctx,
+            super::CodemodeInput {
+                code: r#"
+const found = await tools.searchTool({ query: "sentry", limit: 5 });
+const name = found.results[0].tools[0].tool_name;
+const used = await tools.useTool(name, { organization: "acme" });
+return { found: name, used: used.text, isError: used.isError };
+"#
+                .into(),
+            },
+        )
+        .await
+        .expect("closed-loop search→use must succeed");
+
+    let calls = dispatch.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "exactly one useTool dispatch after search");
+    assert_eq!(calls[0].0, "sentry__find_organizations");
+    assert_eq!(
+        calls[0].1,
+        serde_json::json!({ "organization": "acme" }),
+        "useTool input must reach the dispatcher"
+    );
+
+    let ToolOutput::Text(text) = output else {
+        panic!("expected text output");
+    };
+    let envelope: serde_json::Value = serde_json::from_str(&text.text).expect("json envelope");
+    assert_eq!(
+        envelope.pointer("/result/found"),
+        Some(&serde_json::json!("sentry__find_organizations"))
+    );
+    assert_eq!(
+        envelope.pointer("/result/isError"),
+        Some(&serde_json::json!(false))
+    );
+    // MCP text content surfaces in the envelope result.
+    let used = envelope
+        .pointer("/result/used")
+        .and_then(serde_json::Value::as_str)
+        .expect("used text");
+    assert!(
+        used.contains("orgs-for:sentry__find_organizations"),
+        "MCP tool text must flow back through useTool: {used}"
+    );
+    let tools_called = envelope
+        .get("toolsCalled")
+        .and_then(serde_json::Value::as_array)
+        .expect("toolsCalled array");
+    assert_eq!(tools_called.len(), 1);
+    assert_eq!(tools_called[0]["name"], "sentry__find_organizations");
+    assert!(
+        tools_called[0]["inputBytes"]
+            .as_u64()
+            .is_some_and(|n| n > 0),
+        "audit entry must carry inputBytes"
     );
 }
 
@@ -557,5 +677,18 @@ fn description_warns_about_batch_authorization() {
     assert!(
         desc.contains("toolsCalled"),
         "description must mention the toolsCalled audit field: {desc}"
+    );
+}
+
+/// 缺口4: timeout drops the whole run, cancelling any in-flight host tool
+/// call mid-flight. Documented as a known limitation (preferred over
+/// grace-drain / cooperative cancel — handoff 缺口4); the model must see it
+/// so long chains get split across multiple codemode calls.
+#[test]
+fn description_warns_timeout_interrupts_in_flight_calls() {
+    let desc = super::Codemode.description_template();
+    assert!(
+        desc.contains("in-flight host tool call is cancelled"),
+        "description must warn that timeout cancels in-flight host tool calls: {desc}"
     );
 }
