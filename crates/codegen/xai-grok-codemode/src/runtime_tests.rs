@@ -286,16 +286,64 @@ async fn user_error_with_timeout_substring_is_runtime() {
 }
 
 #[tokio::test]
-async fn unserializable_return_degrades_to_text() {
+async fn circular_arg_rejects_with_codemode_invalid_argument() {
+    let err = execute(
+        r#"
+const a = {};
+a.self = a;
+return await tools.useTool("mock__t", a);
+"#,
+        Arc::new(MockHost::new()),
+        &fast_limits(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.kind, CodemodeErrorKind::Host, "got: {err:?}");
+    assert_eq!(err.code, "codemode_invalid_argument");
+    assert!(
+        err.message.contains("circular") || err.message.contains("Converting"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn unserializable_return_degrades_with_flag() {
+    // A pure function property is un-serializable and String() becomes
+    // the function source text; the degraded flag tells the model data was lost.
     let out = execute(
-        "return { fn: function () {}, n: 1 };",
+        "return function () {};",
         Arc::new(MockHost::new()),
         &fast_limits(),
     )
     .await
     .unwrap();
-    // JSON.stringify drops the function; the plain field survives.
-    assert_eq!(out.value, json!({ "n": 1 }));
+    assert_eq!(out.value.get("degraded"), Some(&json!(true)));
+    let text = out
+        .value
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    assert!(text.contains("function"), "got: {}", text);
+}
+
+#[tokio::test]
+async fn circular_return_degrades_with_text_preview() {
+    // Circular structures cannot be stringified; wrap_script falls back to
+    // String(__ret) and marks degraded:true so the model knows data was lost.
+    let out = execute(
+        r#"
+const a = { n: 1 };
+a.self = a;
+return a;
+"#,
+        Arc::new(MockHost::new()),
+        &fast_limits(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.value.get("degraded"), Some(&json!(true)));
+    assert_eq!(out.value.get("text"), Some(&json!("[object Object]")));
 }
 
 #[tokio::test]

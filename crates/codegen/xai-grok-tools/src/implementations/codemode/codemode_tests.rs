@@ -130,6 +130,32 @@ async fn host_error_surfaces_original_code() {
     );
 }
 
+/// 缺口7: `useTool("codemode", ...)` must be refused at the host entry with
+/// `codemode_nested` — Codemode-in-Codemode is a non-goal (handoff §3.2).
+/// The rejection happens before InnerDispatch, so no dispatch fixture is
+/// needed and `tools_called` stays free of the nested attempt.
+#[tokio::test]
+async fn nested_codemode_use_tool_rejected() {
+    let resources = crate::types::resources::Resources::default().into_shared();
+    let mut ctx = xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+    ctx.extensions.insert(resources);
+
+    let err = super::Codemode
+        .run(
+            ctx,
+            super::CodemodeInput {
+                code: r#"return await tools.useTool("codemode", { code: "return 1;" });"#.into(),
+            },
+        )
+        .await
+        .expect_err("nested codemode must be refused");
+    let details = err.details.expect("custom details");
+    assert_eq!(
+        details.get("code").and_then(serde_json::Value::as_str),
+        Some("codemode_nested")
+    );
+}
+
 #[tokio::test]
 async fn syntax_error_maps_to_codemode_syntax() {
     let resources = crate::types::resources::Resources::default().into_shared();

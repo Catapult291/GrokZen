@@ -137,6 +137,17 @@ impl HostTools for CodemodeHost {
         tool_name: String,
         input: serde_json::Value,
     ) -> HostFuture<Result<serde_json::Value, HostCallError>> {
+        // Handoff §3.2: Codemode-in-Codemode is a non-goal. Rejecting here
+        // (before tools_called / dispatch) keeps the audit trail free of
+        // nested attempts and never consumes an InnerDispatch slot.
+        if tool_name == CODEMODE_NAME {
+            return Box::pin(async {
+                Err(HostCallError::new(
+                    "codemode_nested",
+                    "nested codemode calls are not supported; orchestrate tools directly with useTool",
+                ))
+            });
+        }
         if let Ok(mut called) = self.tools_called.lock() {
             called.push(tool_name.clone());
         }

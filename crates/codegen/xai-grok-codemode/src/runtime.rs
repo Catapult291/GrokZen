@@ -64,6 +64,7 @@ pub struct ExecOutcome {
 /// Prefix used by host bindings to signal a host-call failure.
 const HOST_REJECT_PREFIX: &str = "__cm_host__";
 const CALL_LIMIT_PREFIX: &str = "__cm_call_limit__";
+const ARG_REJECT_PREFIX: &str = "__cm_arg__";
 
 /// User code is wrapped in an async IIFE. The envelope is always JSON-safe
 /// and the outer promise resolves (not rejects) for ordinary failures; the
@@ -79,7 +80,7 @@ fn wrap_script(code: &str) -> String {
     try {{
       return {{ ok: true, value: JSON.parse(JSON.stringify(__ret === undefined ? null : __ret)) }};
     }} catch (e) {{
-      return {{ ok: true, text: String(__ret) }};
+      return {{ ok: true, value: {{ text: String(__ret), degraded: true }} }};
     }}
   }} catch (e) {{
     const msg = (e && e.message) ? String(e.message) : String(e);
@@ -91,6 +92,9 @@ fn wrap_script(code: &str) -> String {
     }}
     if (msg.indexOf("{CALL_LIMIT_PREFIX}") === 0) {{
       return {{ ok: false, callLimit: msg.slice("{CALL_LIMIT_PREFIX}".length) }};
+    }}
+    if (msg.indexOf("{ARG_REJECT_PREFIX}") === 0) {{
+      return {{ ok: false, argError: msg.slice("{ARG_REJECT_PREFIX}".length) }};
     }}
     const stack = (e && e.stack) ? String(e.stack) : "";
     // QuickJS self-raised fatal errors (OOM / stack overflow / interrupt) are
@@ -111,15 +115,23 @@ globalThis.__cm_unwrap = function (s) {
   if (typeof s === "string" && s.indexOf("__cm_") === 0) throw new Error(s);
   return JSON.parse(s);
 };
+globalThis.__cm_arg_reject = function (e) {
+  var msg = (e && e.message) ? String(e.message) : String(e);
+  throw new Error("__cm_arg__" + JSON.stringify({ code: "codemode_invalid_argument", message: msg }));
+};
 globalThis.host = {
   servers: function () { return __cm_unwrap(__cm_servers()); }
 };
 globalThis.tools = {
   searchTool: async function (arg) {
-    return __cm_unwrap(await __cm_search(JSON.stringify(arg || {})));
+    var s;
+    try { s = JSON.stringify(arg || {}); } catch (e) { __cm_arg_reject(e); }
+    return __cm_unwrap(await __cm_search(s));
   },
   useTool: async function (name, input) {
-    return __cm_unwrap(await __cm_use(name, JSON.stringify(input === undefined ? {} : input)));
+    var s;
+    try { s = JSON.stringify(input === undefined ? {} : input); } catch (e) { __cm_arg_reject(e); }
+    return __cm_unwrap(await __cm_use(name, s));
   }
 };
 "#;
@@ -490,6 +502,28 @@ pub async fn execute(
                     .unwrap_or("host call failed")
                     .to_string();
                 return Err(CodemodeError::host(code, message));
+            }
+            if let Some(arg_msg) = envelope.get("argError").and_then(serde_json::Value::as_str) {
+                // The JS side JSON-parses `{code, message}`; surface as a
+                // typed invalid-argument failure the script could have
+                // caught with try/catch.
+                if let Ok(p) = serde_json::from_str::<serde_json::Value>(arg_msg) {
+                    let code = p
+                        .get("code")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("codemode_invalid_argument")
+                        .to_string();
+                    let message = p
+                        .get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("invalid host-call argument")
+                        .to_string();
+                    return Err(CodemodeError::host(code, message));
+                }
+                return Err(CodemodeError::new(
+                    CodemodeErrorKind::InvalidArgument,
+                    arg_msg,
+                ));
             }
             if let Some(msg) = envelope
                 .get("callLimit")
