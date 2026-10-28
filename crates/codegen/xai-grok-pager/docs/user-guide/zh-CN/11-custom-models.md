@@ -125,7 +125,7 @@ Grok 按以下顺序解析 API 密钥：
 <a id="context-window"></a>
 ### 上下文窗口
 
-`context_window` 值告诉 Grok 何时触发自动压缩。覆盖已知模型时，Grok 会继承该模型的上下文窗口。定义新模型并省略 `context_window` 时，Grok 默认使用 200,000 个 token，因此应显式设置为与你的提供商匹配的值。
+`context_window` 值决定 `/context` 与压缩预算使用的上下文窗口。覆盖已知模型时，Grok 会继承该模型的上下文窗口。定义新模型并省略 `context_window` 时，Grok 默认使用 200,000 个 token，因此应显式设置为与你的提供商匹配的值。
 
 <a id="global-default-headers"></a>
 ### 全局默认标头
@@ -155,7 +155,7 @@ subagent_rate_limit_max_attempts = 8
 stream_tool_calls           = true
 ```
 
-这是固定的一小组环境级旋钮。用于标识特定模型的设置（`model`、`base_url`、`api_key`、`context_window` ……）不能用这种方式提供默认值；具有专门配置位置的设置也保留原位置——自动压缩（`[session]`）、系统提示标签（`[agent]`）以及推理力度（`[models].default_reasoning_effort`）。
+这是固定的一小组环境级旋钮。用于标识特定模型的设置（`model`、`base_url`、`api_key`、`context_window` ……）不能用这种方式提供默认值；具有专门配置位置的设置也保留原位置——压缩模式（`[session]`）、系统提示标签（`[agent]`）以及推理力度（`[models].default_reasoning_effort`）。
 
 > **关于 `stream_tool_calls` 的说明：** 此设置会影响请求*形状*，不只是采样。一些端点（包括部分 BYOK 提供商）要求不设置它；如果全局 `stream_tool_calls = true` 导致此类模型出现问题，可以在该模型的 `[model.<id>]` 区段中使用 `stream_tool_calls = false` 将其停用。
 

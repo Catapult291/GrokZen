@@ -39,9 +39,6 @@ impl TurnParkState {
 
 /// Recovery decision returned by `SessionActor::handle_sampling_failure` for the sampler-based turn loop.
 pub(crate) enum SamplerFailureRecovery {
-    /// Compaction ran.
-    /// The turn loop should rebuild the request from the compacted conversation and resubmit.
-    CompactAndResubmit,
     /// Resubmit through the auth-retry schedule: recovery succeeded, or the parked
     /// credential-less case. `credential` is the rejected request's wire provenance;
     /// credential-less sends are never charged against the per-incident budget.
@@ -63,14 +60,12 @@ pub(crate) enum SamplerFailureRecovery {
 }
 
 /// Outcome of a single turn attempt via the sampler-based path.
-/// `CompactAndResubmit` short-circuits the outer turn loop with `continue` (the turn driver re-builds the request from the latest chat state).
 pub(crate) enum SamplerTurnOutcome {
     /// Model responded, with per-call latency stats for `shell.turn.inference_done`.
     Response(
         Box<ConversationResponse>,
         Box<xai_grok_sampler::InferenceLatencyStats>,
     ),
-    CompactAndResubmit,
     /// Retry through the auth-retry schedule. Mirrors
     /// [`SamplerFailureRecovery::RefreshAuthAndResubmit`].
     RefreshAuthAndResubmit {

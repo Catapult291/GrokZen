@@ -163,8 +163,6 @@ pub struct StatusLineContextWindow {
     pub used_percentage: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remaining_percentage: Option<u8>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auto_compact_threshold_percent: Option<u8>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

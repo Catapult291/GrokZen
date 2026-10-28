@@ -78,36 +78,6 @@ pub(crate) enum InitialContextSource {
     /// System prompt and prompt context are freshly rendered from the current agent definition.
     Resumed,
 }
-/// Captured parent-side tier inputs for resolving `auto_compact_threshold_percent` once the subagent's actual model id is known.
-/// Stored on [`SubagentSpawnContext`] so the resolver can run at spawn time and the per-model lookup honors the SUBAGENT's model, not the parent's.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct AutoCompactThresholdTiers {
-    /// `cfg.session.auto_compact_threshold_percent` (user global TOML).
-    pub user_session: Option<u8>,
-    /// Subset of `cfg.config_models` whose `auto_compact_threshold_percent` is set, keyed by the model entry's id (the table key in `[model.<id>]`).
-    pub user_per_model: std::collections::HashMap<String, u8>,
-    /// `cfg.remote_settings.auto_compact_threshold_percent` (GB global).
-    pub remote_global: Option<u8>,
-}
-impl AutoCompactThresholdTiers {
-    /// Slice the parent's `Config` into the four tier inputs we'll resolve against later.
-    /// Only fields relevant to the auto-compact threshold are captured; the parent's `Config` is not held by reference.
-    pub(crate) fn capture(cfg: &crate::agent::config::Config) -> Self {
-        let user_per_model = cfg
-            .config_models
-            .iter()
-            .filter_map(|(k, v)| v.auto_compact_threshold_percent.map(|t| (k.clone(), t)))
-            .collect();
-        Self {
-            user_session: cfg.session.auto_compact_threshold_percent,
-            user_per_model,
-            remote_global: cfg
-                .remote_settings
-                .as_ref()
-                .and_then(|r| r.auto_compact_threshold_percent),
-        }
-    }
-}
 /// Live-gateway target for a nested child's pre-reparent spawner session.
 /// Address only: never `XaiSessionNotification` / spawn bookkeeping on this session.
 #[derive(Clone)]
@@ -218,9 +188,6 @@ pub(crate) struct SubagentSpawnContext {
     /// Inference idle timeout (secs), resolved from the parent's model config at spawn-context creation time.
     pub inference_idle_timeout_secs: u64,
     pub parent_compaction: crate::session::CompactionPins,
-    /// Lazy because the subagent may be assigned a different model from the parent (via `[subagents.models]` or `AgentDefinition.model`).
-    /// Call [`Self::resolve_auto_compact_threshold_percent`] once the subagent's `effective_sampling_config.model` is known.
-    pub auto_compact_threshold_tiers: AutoCompactThresholdTiers,
     pub hunk_tracker_handle: HunkTrackerHandle,
     /// Parent's hunk-tracking gate.
     /// Inherited so a disabled parent's subagent also skips the per-event forward instead of paying it into a noop handle.
@@ -394,23 +361,6 @@ impl SubagentSpawnContext {
     fn would_strip_fallback_key(&self, resolved_api_key: Option<&str>) -> bool {
         self.auth.is_none() && resolved_api_key.is_some()
     }
-    /// Resolve `auto_compact_threshold_percent` for the subagent's actual model id, picked by `resolve_subagent_sampling_config`, not the parent's.
-    /// Walks the same precedence as the main session's resolver: env > user [model.<id>] > user [session] > GB per-model > GB global > 85.
-    /// The GB per-model tier is read from `available_models` (the same catalog used to pick the subagent's `SamplerConfig`). User TOML and GB global tiers are sourced from the parent's snapshot captured at spawn-context build time.
-    pub(crate) fn resolve_auto_compact_threshold_percent(&self, subagent_model_id: &str) -> u8 {
-        let gb_per_model =
-            crate::agent::config::find_model_by_id(&self.available_models, subagent_model_id)
-                .and_then(|e| e.info.auto_compact_threshold_percent);
-        crate::util::config::resolve_auto_compact_threshold_percent_from_tiers(
-            self.auto_compact_threshold_tiers
-                .user_per_model
-                .get(subagent_model_id)
-                .copied(),
-            self.auto_compact_threshold_tiers.user_session,
-            gb_per_model,
-            self.auto_compact_threshold_tiers.remote_global,
-        )
-    }
     /// Resolve the 429 wait-attempt budget against the subagent's own model id.
     pub(crate) fn resolve_subagent_rate_limit_max_attempts(&self, subagent_model_id: &str) -> u32 {
         let per_model =
@@ -481,7 +431,6 @@ impl SubagentSpawnContext {
     }
     pub(crate) fn snapshot_parent_compaction_pins(
         resolved_mode: xai_chat_state::CompactionMode,
-        resolved_two_pass: bool,
         parent_agent_name: Option<&str>,
         parent_model_agent_type: Option<&str>,
         parent_cwd: &Path,
@@ -498,7 +447,6 @@ impl SubagentSpawnContext {
         .unwrap_or(current);
         crate::session::cursor_compaction_pins(
             resolved_mode,
-            resolved_two_pass,
             crate::session::is_cursor_user_template(&template),
         )
     }
@@ -508,7 +456,6 @@ impl SubagentSpawnContext {
     ) -> crate::session::CompactionPins {
         crate::session::cursor_compaction_pins(
             self.parent_compaction.mode,
-            self.parent_compaction.two_pass,
             crate::session::is_cursor_user_template(child_template),
         )
     }
@@ -976,7 +923,6 @@ struct InitialContext {
     copy_error: Option<String>,
     prefix_len: Option<usize>,
     conversation: Vec<xai_grok_sampling_types::conversation::ConversationItem>,
-    force_compact: bool,
     /// True only for a verbatim mirror-fork (parent items copied byte-for-byte).
     /// Gates sending the parent tool snapshot so the child's full request prefix matches the parent.
     /// A summarized-fork fallback leaves this false.
@@ -985,14 +931,12 @@ struct InitialContext {
 /// Resume bootstrap: preserve only the System head (see `resume_inherited_prefix_len`).
 fn resume_initial_context(
     conversation: Vec<xai_grok_sampling_types::conversation::ConversationItem>,
-    force_compact: bool,
 ) -> InitialContext {
     InitialContext {
         source: InitialContextSource::Resumed,
         copy_error: None,
         prefix_len: Some(resume_window::resume_inherited_prefix_len(&conversation)),
         conversation,
-        force_compact,
         verbatim_fork: false,
     }
 }
@@ -1007,7 +951,6 @@ fn forked_initial_context(
             copy_error: Some("empty parent conversation".to_string()),
             prefix_len: None,
             conversation: vec![],
-            force_compact: false,
             verbatim_fork: false,
         };
     }
@@ -1019,7 +962,6 @@ fn forked_initial_context(
             copy_error: Some("no inheritable parent content".to_string()),
             prefix_len: None,
             conversation: vec![],
-            force_compact: false,
             verbatim_fork: false,
         };
     }
@@ -1028,7 +970,6 @@ fn forked_initial_context(
         copy_error: None,
         prefix_len: Some(prefix_len),
         conversation,
-        force_compact: false,
         verbatim_fork: false,
     }
 }
@@ -1059,7 +1000,6 @@ fn verbatim_or_normalize_fork(
             copy_error: Some("forked parent conversation has no inheritable content".to_string()),
             prefix_len: None,
             conversation: vec![],
-            force_compact: false,
             verbatim_fork: false,
         };
     }
@@ -1073,7 +1013,6 @@ fn verbatim_or_normalize_fork(
             copy_error: None,
             prefix_len: Some(prefix_len),
             conversation: items,
-            force_compact: false,
             verbatim_fork: true,
         };
     }
@@ -1088,7 +1027,6 @@ fn verbatim_or_normalize_fork(
             copy_error: Some("no inheritable parent content after filtering".to_string()),
             prefix_len: None,
             conversation: vec![],
-            force_compact: false,
             verbatim_fork: false,
         };
     }
@@ -1099,7 +1037,6 @@ fn verbatim_or_normalize_fork(
         copy_error: None,
         prefix_len: Some(prefix_len),
         conversation,
-        force_compact: false,
         verbatim_fork: false,
     }
 }
@@ -1240,25 +1177,6 @@ async fn bootstrap_initial_context(
                 source.subagent_id,
             ));
         }
-        let threshold_percent = window.auto_compact_threshold_percent;
-        let force_compact = match window.plan_force_compact(
-            estimated_tokens,
-            request.runtime_overrides.output_token_budget.is_some(),
-        ) {
-            resume_window::ResumeForceCompact::AbortBudgeted => {
-                return BootstrapInitialContext::ResumeAbort(format!(
-                    "Cannot resume from subagent '{}': source transcript \
-                     (~{estimated_tokens} tokens) is over the auto-compact \
-                     threshold ({threshold_percent}% of {context_window}), but \
-                     this child has an output token budget and cannot compact \
-                     a fat transcript. Compact the source first, or resume \
-                     without a budget.",
-                    source.subagent_id,
-                ));
-            }
-            resume_window::ResumeForceCompact::Arm => true,
-            resume_window::ResumeForceCompact::NotNeeded => false,
-        };
         let (chat_messages, tool_state) = copy_result.as_ref().map_or(
             (
                 conversation.len(),
@@ -1274,7 +1192,7 @@ async fn bootstrap_initial_context(
             estimated_tokens,
             "Loaded source child session data for resume"
         );
-        return BootstrapInitialContext::Ready(resume_initial_context(conversation, force_compact));
+        return BootstrapInitialContext::Ready(resume_initial_context(conversation));
     }
     if !request.fork_context {
         return BootstrapInitialContext::Ready(InitialContext {
@@ -1282,7 +1200,6 @@ async fn bootstrap_initial_context(
             copy_error: None,
             prefix_len: None,
             conversation: vec![],
-            force_compact: false,
             verbatim_fork: false,
         });
     }
@@ -1375,7 +1292,6 @@ async fn bootstrap_initial_context(
                     copy_error: Some(err_msg),
                     prefix_len: None,
                     conversation: vec![],
-                    force_compact: false,
                     verbatim_fork: false,
                 })
             }
@@ -1391,7 +1307,6 @@ async fn bootstrap_initial_context(
         copy_error: Some("parent conversation unavailable".to_string()),
         prefix_len: None,
         conversation: vec![],
-        force_compact: false,
         verbatim_fork: false,
     })
 }

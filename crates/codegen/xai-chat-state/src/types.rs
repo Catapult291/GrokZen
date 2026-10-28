@@ -1,7 +1,6 @@
 //! Shared domain types for the chat state actor.
 
 use std::collections::BTreeSet;
-use std::num::NonZeroU64;
 
 use serde::{Deserialize, Serialize};
 use xai_grok_sampling_types::{ConversationItem, SamplingConfig};
@@ -145,19 +144,10 @@ pub struct ConversationCounts {
     pub tool_result: usize,
 }
 
-/// Info returned when auto-compact threshold is exceeded.
-#[derive(Debug, Clone)]
-pub struct AutoCompactTrigger {
-    /// Current total token count.
-    pub total_tokens: u64,
-    /// Model's context window size.
-    pub context_window: NonZeroU64,
-    /// Current utilization as a percentage (0–100).
-    pub utilization_percent: u8,
-}
-
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
+
     use super::*;
 
     #[test]

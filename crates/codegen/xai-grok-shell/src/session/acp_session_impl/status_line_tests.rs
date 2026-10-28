@@ -23,7 +23,7 @@ fn session_usage_splits_fresh_input_from_the_cache_buckets() {
         model_calls: 1,
         ..Default::default()
     };
-    let window = build_context_window(100_000, Some(42_000), Some(&totals), 80);
+    let window = build_context_window(100_000, Some(42_000), Some(&totals));
 
     // The wire's 30k `input_tokens` already contains both cache buckets, so 17k is what was fresh and the three fields must not overlap
     let usage = window.session_usage.unwrap();
@@ -54,18 +54,18 @@ fn a_turn_is_on_the_wire_only_while_one_is_running() {
 
 #[test]
 fn percentages_are_whole_numbers_inside_zero_to_one_hundred() {
-    let window = build_context_window(300_000, Some(100_000), None, 80);
+    let window = build_context_window(300_000, Some(100_000), None);
     assert_eq!(window.used_percentage, Some(33));
     assert_eq!(window.remaining_percentage, Some(67));
 
-    let over = build_context_window(1_000, Some(4_000), None, 80);
+    let over = build_context_window(1_000, Some(4_000), None);
     assert_eq!(over.used_percentage, Some(100));
     assert_eq!(over.remaining_percentage, Some(0));
 }
 
 #[test]
 fn session_usage_is_null_until_a_call_bills() {
-    let window = build_context_window(100_000, Some(0), Some(&PromptUsageModel::default()), 80);
+    let window = build_context_window(100_000, Some(0), Some(&PromptUsageModel::default()));
     assert!(window.session_usage.is_none());
 }
 

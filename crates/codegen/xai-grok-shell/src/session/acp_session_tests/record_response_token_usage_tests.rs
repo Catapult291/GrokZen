@@ -130,11 +130,6 @@ async fn response_reasoning_does_not_inflate_model_reported_context() {
                 Some(440_000),
                 "the pager reads this metadata as its displayed context",
             );
-
-            assert!(
-                actor.check_auto_compact_needed().await.is_none(),
-                "440K is below a 95% threshold for a 500K context window",
-            );
         })
         .await;
 }

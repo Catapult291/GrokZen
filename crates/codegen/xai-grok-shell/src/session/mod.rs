@@ -14,7 +14,6 @@ pub mod notifications;
 pub mod pending_interaction;
 pub mod prompt_queue;
 pub(crate) mod resume_status;
-pub mod two_pass;
 pub mod user_echo;
 pub mod visibility;
 pub use self::acp_session::*;
@@ -45,22 +44,18 @@ pub(crate) fn is_cursor_user_template(
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct CompactionPins {
     pub mode: xai_chat_state::CompactionMode,
-    pub two_pass: bool,
 }
 pub(crate) fn cursor_compaction_pins(
     resolved_mode: xai_chat_state::CompactionMode,
-    resolved_two_pass: bool,
     is_cursor: bool,
 ) -> CompactionPins {
     if is_cursor {
         CompactionPins {
             mode: xai_chat_state::CompactionMode::Summary,
-            two_pass: false,
         }
     } else {
         CompactionPins {
             mode: resolved_mode,
-            two_pass: resolved_two_pass,
         }
     }
 }

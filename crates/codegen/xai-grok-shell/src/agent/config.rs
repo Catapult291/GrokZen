@@ -1103,11 +1103,6 @@ pub struct AgentSelectionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct SessionConfig {
-    /// Context window usage percentage (0-100) at which auto-compact is triggered. `None` means the user didn't set it.
-    /// The resolver in `crate::util::config::resolve_auto_compact_threshold_percent` falls through to remote tiers and then the hardcoded default 85.
-    /// Read this field via the resolver, not directly, to honor the full precedence chain (env, per-model, remote, default).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_compact_threshold_percent: Option<u8>,
     /// When enabled, the session will parse .envrc in the workspace directory and inject the environment variables into bash commands.
     /// Defaults to `true` when unset.
     /// `Option<bool>` so `None` round-trips as absent on disk (managed config wins over default).
@@ -1876,9 +1871,6 @@ impl Config {
     }
     pub(crate) fn is_voice_mode_enabled(&self) -> bool {
         self.is_feature_enabled(Feature::VoiceMode)
-    }
-    pub(crate) fn is_two_pass_compaction_enabled(&self) -> bool {
-        self.is_feature_enabled(Feature::TwoPassCompaction)
     }
     /// Resolve effective product telemetry mode (privacy build: always Disabled).
     pub fn resolve_telemetry_mode(&self) -> Resolved<TelemetryMode> {
@@ -3357,8 +3349,6 @@ struct DefaultModelJson {
     #[serde(default)]
     show_model_fingerprint: bool,
     #[serde(default)]
-    auto_compact_threshold_percent: Option<u8>,
-    #[serde(default)]
     system_prompt_label: Option<String>,
     notice: Option<ModelNotice>,
 }
@@ -3406,7 +3396,6 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 context_window,
                 context_windows,
                 max_request_bytes: None,
-                auto_compact_threshold_percent: m.auto_compact_threshold_percent,
                 system_prompt_label: m.system_prompt_label,
                 temperature: m.temperature,
                 top_p: m.top_p,
@@ -3503,7 +3492,7 @@ pub struct ModelEntryConfig {
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub extra_headers: IndexMap<String, String>,
     /// The total context window size in tokens for this model.
-    /// Used for auto-compact threshold calculations.
+    /// Used for context-usage accounting and the status bar.
     /// Required: BYOK users must explicitly set this in config.toml.
     pub context_window: NonZeroU64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3511,10 +3500,6 @@ pub struct ModelEntryConfig {
     /// Provider request-body cap in bytes; unset resolves to the `api_backend` default (30 MB for `messages`, else 50 MiB).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_request_bytes: Option<NonZeroU64>,
-    /// Per-model auto-compact threshold (0-100). When the session's token usage exceeds this percentage of `context_window`, the conversation is summarized.
-    /// Resolver precedence: requirements > env > user (per-model > global) > managed (per-model > global). Below those: remote per-model (this field) > remote global > 85.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_compact_threshold_percent: Option<u8>,
     /// Per-model system-prompt identity label (not UI `name`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt_label: Option<String>,
@@ -3603,7 +3588,6 @@ impl Default for ModelEntryConfig {
             context_window: NonZeroU64::MIN,
             context_windows: Vec::new(),
             max_request_bytes: None,
-            auto_compact_threshold_percent: None,
             system_prompt_label: None,
             api_base_url: None,
             use_concise: false,
@@ -3667,10 +3651,6 @@ pub struct ConfigModelOverride {
     pub context_window: Option<u64>,
     pub context_windows: Option<Vec<NonZeroU64>>,
     pub max_request_bytes: Option<NonZeroU64>,
-    /// Per-model auto-compact threshold override (0-100) from `[model.<id>]`.
-    /// Read directly by `resolve_auto_compact_threshold_percent`.
-    /// Intentionally NOT merged into `ModelInfo.auto_compact_threshold_percent` so the resolver can keep user-per-model distinct from GB-per-model.
-    pub auto_compact_threshold_percent: Option<u8>,
     /// Per-model system-prompt identity; not merged into `ModelInfo` (tiered resolve).
     pub system_prompt_label: Option<String>,
     pub use_concise: Option<bool>,
@@ -3881,9 +3861,6 @@ pub struct ModelInfo {
     /// Explicit request-body cap only; `sampling_config_for_model` applies the `api_backend` default so the catalog never persists it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_request_bytes: Option<NonZeroU64>,
-    /// Per-model auto-compact threshold (0-100).
-    /// `None` defers to the global / default tiers in `resolve_auto_compact_threshold_percent`.
-    pub auto_compact_threshold_percent: Option<u8>,
     /// Per-model system-prompt identity (not UI picker `name`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt_label: Option<String>,
@@ -3968,7 +3945,6 @@ impl ModelInfo {
             context_window: NonZeroU64::new(200_000).unwrap(),
             context_windows: Vec::new(),
             max_request_bytes: None,
-            auto_compact_threshold_percent: None,
             system_prompt_label: None,
             use_concise: false,
             agent_type: default_agent_type(),
@@ -4013,7 +3989,6 @@ impl ModelInfo {
             context_window: entry.context_window,
             context_windows: entry.context_windows.clone(),
             max_request_bytes: entry.max_request_bytes,
-            auto_compact_threshold_percent: entry.auto_compact_threshold_percent,
             system_prompt_label: entry.system_prompt_label.clone(),
             use_concise: entry.use_concise,
             agent_type: entry.agent_type.clone(),
@@ -4741,7 +4716,6 @@ pub(crate) fn resolve_aux_model_sampling_config(
                 context_window: NonZeroU64::new(200_000).unwrap(),
                 context_windows: Vec::new(),
                 max_request_bytes: None,
-                auto_compact_threshold_percent: None,
                 system_prompt_label: None,
                 use_concise: false,
                 agent_type: default_agent_type(),
@@ -4978,7 +4952,6 @@ fn resolve_hidden_default_web_search_sampling_config(
             context_window: NonZeroU64::new(200_000).unwrap(),
             context_windows: Vec::new(),
             max_request_bytes: None,
-            auto_compact_threshold_percent: None,
             system_prompt_label: None,
             use_concise: false,
             agent_type: default_agent_type(),

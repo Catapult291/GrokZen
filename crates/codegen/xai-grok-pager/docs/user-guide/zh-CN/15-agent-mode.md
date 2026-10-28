@@ -177,7 +177,7 @@ ACP 会流式传输结构化事件。每条 `session/update` 通知都带有 `se
 | `x.ai/fs_notify`           | 文件系统变更通知 |
 | `x.ai/fs/index`            | 完整文件索引更新 |
 | `x.ai/fs/index/delta`      | 增量文件索引更新 |
-| `x.ai/session_notification`| 会话专属更新（差异审查、重试状态、自动压缩） |
+| `x.ai/session_notification`| 会话专属更新（差异审查、重试状态、压缩） |
 | `x.ai/session/update`      | 会话更新（工具调用、内容） |
 
 ---

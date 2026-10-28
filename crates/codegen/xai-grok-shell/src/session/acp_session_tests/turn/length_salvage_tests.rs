@@ -333,10 +333,6 @@ fn suppressed_overflow_mid_continuation_still_completes_truncated() {
                     "enough history that the token estimate clears the tiny window",
                 ),
             );
-            actor.compaction.auto_compact_suppressed.store(
-                crate::session::compaction_config::SUPPRESS_STICKY,
-                std::sync::atomic::Ordering::Relaxed,
-            );
             let error = error_with_tiny_window(xai_grok_sampler::SamplingErrorKind::Api, 500);
             let Err(err) = actor
                 .handle_sampling_failure(

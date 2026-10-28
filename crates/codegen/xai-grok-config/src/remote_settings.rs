@@ -598,12 +598,6 @@ pub struct RemoteSettings {
     /// Gradual rollout of the `/feedback` trace-consent card.
     #[serde(default)]
     pub feedback_trace_card_enabled: Option<bool>,
-    /// Two-pass (prefire) compaction.
-    /// Near the auto-compact threshold the shell speculatively summarizes the history prefix in the background (pass 1 produces an interim note).
-    /// At compaction it summarizes that note plus the recent tail (pass 2), keeping summarizer latency off the critical path.
-    /// `Some(false)` forces off; `None` falls through env, `[features]`, then the default (on).
-    #[serde(default)]
-    pub two_pass_compaction_enabled: Option<bool>,
     /// Dynamic tip list from remote settings. When present with non-empty entries, one tip is shown at startup (rotated daily by UTC day).
     /// `None` or `[]` shows no tips.
     #[serde(default)]
@@ -883,10 +877,6 @@ pub struct RemoteSettings {
     /// Enable AI-powered shell command suggestions remotely.
     #[serde(default)]
     pub suggestions_ai_enabled: Option<bool>,
-    /// Global auto-compact threshold percent (0-100) from remote settings `grok_build_settings`.
-    /// A per-model override on `ModelInfo` (`grok_build_models`) takes precedence; user config and env var further override per the resolver chain.
-    #[serde(default)]
-    pub auto_compact_threshold_percent: Option<u8>,
     /// Max subagent nesting depth (`grok_build_settings.subagents_max_depth`).
     #[serde(default)]
     pub subagents_max_depth: Option<u32>,

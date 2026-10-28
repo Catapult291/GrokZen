@@ -418,29 +418,6 @@ fn localized_resume_error(
                     ],
                 ));
             }
-            if let Some((estimated, rest)) = rest.split_once(
-                " tokens) is over the auto-compact threshold (",
-            ) && let Some((threshold, rest)) = rest.split_once("% of ")
-                && let Some(context) = rest.strip_suffix(
-                    "), but this child has an output token budget and cannot compact a fat transcript. Compact the source first, or resume without a budget.",
-                )
-                && [estimated, threshold, context]
-                    .iter()
-                    .all(|value| !value.is_empty() && value.chars().all(|c| c.is_ascii_digit()))
-            {
-                return Some(replace_placeholders_once(
-                    &text(
-                        "scrollback.subagent.error.resume_budgeted_compaction",
-                        "Cannot resume from subagent '{subagent}': source transcript (~{estimated} tokens) is over the auto-compact threshold ({threshold}% of {context}), but this child has an output token budget and cannot compact a fat transcript. Compact the source first, or resume without a budget.",
-                    ),
-                    &[
-                        ("{subagent}", subagent),
-                        ("{estimated}", estimated),
-                        ("{threshold}", threshold),
-                        ("{context}", context),
-                    ],
-                ));
-            }
             None
         }
     }

@@ -344,7 +344,7 @@ pub(super) const GOAL_CONTINUATION_DIRECTIVE_TEMPLATE: &str =
     include_str!("templates/goal_continuation_directive.md");
 pub(super) const GOAL_CONTINUATION_DIRECTIVE_TEMPLATE_LEGACY: &str =
     include_str!("templates/goal_continuation_directive_legacy.md");
-/// Compact can run mid-turn (`run_compact_only` / CompactAndResubmit); those
+/// Compact can run mid-turn (manual `/compact`); those
 /// callers must not inherit TurnEnd drain, `rounds_since_verify++`, or budget stop.
 enum GoalContinuationPurpose {
     TurnEnd,
@@ -2004,9 +2004,6 @@ mod idle_resume_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/image_strip_tests.rs"]
 mod image_strip_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/inline_auto_compact_flow_tests.rs"]
-mod inline_auto_compact_flow_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/laziness/laziness_debug_tests.rs"]
 mod laziness_debug_tests;

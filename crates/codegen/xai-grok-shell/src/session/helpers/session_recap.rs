@@ -158,8 +158,8 @@ pub(crate) fn build_instruction_items(
 /// Applied via `min(window, CAP)`, so a smaller real window still wins (e.g. a 256k legacy model or a debug override).
 const RECAP_CONTEXT_WINDOW_CAP: u64 = 500_000;
 
-/// Fraction of the (conservative) window a recap may occupy: the DEFAULT auto-compact threshold.
-/// It is fixed rather than the remote-settings-resolved value (which can exceed 85), so recap stays at least as conservative as the turn path.
+/// Fraction of the (conservative) window a recap may occupy; matches the memory-flush budget.
+/// It is fixed rather than config-derived, so recap stays at least as conservative as the turn path.
 const RECAP_BUDGET_THRESHOLD_PERCENT: u64 = 85;
 
 /// Estimator/serialization slack (mirrors memory-flush's soft-threshold pad).

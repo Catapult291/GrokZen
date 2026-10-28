@@ -1303,22 +1303,17 @@ pub(crate) fn with_run_loop(mut actor: SessionActor) -> (Arc<SessionActor>, Star
     });
     (actor, startup_tasks)
 }
-/// Default compaction config for test actors; only the trigger threshold varies per test.
+/// Default compaction config for test actors.
 pub(crate) fn test_compaction_config(
-    threshold_percent: u8,
+    _threshold_percent: u8,
 ) -> crate::session::compaction_config::CompactionConfig {
     crate::session::compaction_config::CompactionConfig {
-        threshold_percent: std::cell::Cell::new(threshold_percent),
-        force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         context_window_override: None,
         context_window_selection: Default::default(),
         count: std::sync::atomic::AtomicU64::new(0),
-        auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
-        previous_model: std::cell::Cell::new(None),
         compaction_mode: xai_chat_state::CompactionMode::Transcript,
         verbatim_input: true,
         tool_choice: crate::util::config::CompactionToolChoice::Auto,
-        prefire: crate::session::compaction_config::PrefireState::default(),
         prefix_released: std::sync::atomic::AtomicBool::new(false),
         cancel: Default::default(),
     }

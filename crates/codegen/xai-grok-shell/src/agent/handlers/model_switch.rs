@@ -60,15 +60,6 @@ pub(crate) async fn apply(
     let required_agent_type =
         resolve_required_agent_type(Some(model.info().agent_type.as_str()), session_default);
     let previous_model_id = handle.model_id.0.clone();
-    let is_family_switch = {
-        let models = agent.models_manager.models();
-        let old_family = config::find_model_by_id(&models, &previous_model_id)
-            .and_then(|e| e.info.model_family.as_deref());
-        matches!(
-            (old_family, model.info().model_family.as_deref()),
-            (Some(a), Some(b)) if a != b
-        )
-    };
     let mut pending_rebuild_definition: Option<xai_grok_agent::AgentDefinition> = None;
     {
         let required = &required_agent_type;
@@ -171,19 +162,12 @@ pub(crate) async fn apply(
     let supported_context_windows = std::iter::once(model.info().context_window)
         .chain(model.info().context_windows.iter().copied())
         .collect();
-    let (new_threshold, system_prompt_label) = {
+    let system_prompt_label = {
         let cfg = agent.cfg.borrow();
-        (
-            crate::util::config::resolve_auto_compact_threshold_percent(
-                &cfg,
-                model_sampling.model.as_str(),
-                Some(model.info()),
-            ),
-            crate::util::config::resolve_system_prompt_label(
-                &cfg,
-                model_id.0.as_ref(),
-                Some(model.info()),
-            ),
+        crate::util::config::resolve_system_prompt_label(
+            &cfg,
+            model_id.0.as_ref(),
+            Some(model.info()),
         )
     };
     let gate_closed = !handle
@@ -242,10 +226,8 @@ pub(crate) async fn apply(
         switch: SessionModelSwitch {
             sampling_config: model_sampling,
             use_concise,
-            is_family_switch,
             apply_prompt_override,
             skip_prompt_rewrite: did_rebuild || model_unchanged,
-            auto_compact_threshold_percent: new_threshold,
             system_prompt_label,
             context_window_selection: context_window,
             supported_context_windows,

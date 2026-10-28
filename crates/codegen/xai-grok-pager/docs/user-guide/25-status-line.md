@@ -20,7 +20,7 @@ This renders, for example, `grok-shell-status-line │ Grok 4.5 │ 12% ctx`. It
 | --- | --- |
 | `cwd` | Current directory (basename) |
 | `model` | Model display name |
-| `context` | Context-window percent, amber at the auto-compaction threshold or at 80% when the agent reports none |
+| `context` | Context-window percent, amber from 80% up |
 | `cost` | Session cost, hidden below $0.005 so it never shows a misleading `$0.00` |
 | `turn-timer` | Elapsed time of the running turn, from one second in |
 | `session-name` | Session name, when set |
@@ -105,7 +105,6 @@ Nothing outside the table below is sent. A ported script that reads counts of li
 | `context_window.session_input_tokens`, `.session_output_tokens` | Billed across the whole session, so they only grow. Named for the session because that is what they count: `total_*` is used elsewhere for what is in the window right now, which here is `context_tokens`. Dividing these by `context_window_size` passes 100% and keeps going. Omitted when the usage ledger is unreadable |
 | `context_window.used_percentage`, `.remaining_percentage` | How full the window is right now, whole numbers from 0 to 100. Omitted with `context_window_size` or `context_tokens`, since a percentage of an unknown window is not a number |
 | `context_window.session_usage.{input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens}` | `input_tokens`, `cache_creation_input_tokens` and `cache_read_input_tokens`, which sum back to `session_input_tokens`, plus `output_tokens`. Cumulative for the session, not one turn's. Absent before the first call |
-| `context_window.auto_compact_threshold_percent` | Where the session auto-compacts. Omitted when the agent reported none |
 | `effort.level` | Reasoning effort, when the model supports it |
 | `turn.started_at_ms` | Unix milliseconds the turn in flight began, absent between turns. Subtract it from your own clock for an elapsed time |
 | `worktree.{name,path,branch,main_worktree_root}` | Active worktree, inside a linked worktree. `name` is omitted for a worktree at a filesystem root, and `main_worktree_root` is where the worktree branched from |

@@ -399,67 +399,6 @@ pub(super) async fn create_test_actor_with_memory(
     }
 }
 #[tokio::test(flavor = "current_thread")]
-async fn test_is_flushing_suppresses_auto_compact() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let (gateway_tx, _) = mpsc::unbounded_channel();
-            let (persistence_tx, _) = mpsc::unbounded_channel();
-            let actor = create_test_actor(90_000, 100_000, 85, gateway_tx, persistence_tx).await;
-            let result = actor.check_auto_compact_needed().await;
-            assert!(result.is_some(), "should trigger at 90%");
-            actor
-                .memory
-                .is_flushing
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            let result = actor.check_auto_compact_needed().await;
-            assert!(result.is_none(), "should suppress when is_flushing=true");
-            actor
-                .memory
-                .is_flushing
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-            let result = actor.check_auto_compact_needed().await;
-            assert!(
-                result.is_some(),
-                "should trigger again after is_flushing=false"
-            );
-        })
-        .await;
-}
-#[tokio::test(flavor = "current_thread")]
-async fn test_force_compact_triggers_below_threshold() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let (gateway_tx, _) = mpsc::unbounded_channel();
-            let (persistence_tx, _) = mpsc::unbounded_channel();
-            let actor = create_test_actor(10_000, 100_000, 85, gateway_tx, persistence_tx).await;
-            let result = actor.check_auto_compact_needed().await;
-            assert!(result.is_none(), "should not trigger at 10%");
-            actor
-                .compaction
-                .force_compact
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            let result = actor.check_auto_compact_needed().await;
-            assert!(
-                result.is_some(),
-                "force_compact should trigger at any usage"
-            );
-            let info = result.unwrap();
-            assert_eq!(info.tokens_used, 10_000);
-            assert!(
-                !actor
-                    .compaction
-                    .force_compact
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                "force_compact should be consumed after use"
-            );
-            let result = actor.check_auto_compact_needed().await;
-            assert!(result.is_none(), "should not trigger after flag consumed");
-        })
-        .await;
-}
-#[tokio::test(flavor = "current_thread")]
 #[allow(clippy::field_reassign_with_default)]
 async fn test_flush_config_from_memory_config() {
     let local = tokio::task::LocalSet::new();

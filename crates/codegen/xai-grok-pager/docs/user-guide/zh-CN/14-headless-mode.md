@@ -241,7 +241,7 @@ Grok 也可能发出 `max_turns_reached` 和 `auto_compact_*` 事件；应将列
 
 | 类型 | 说明 |
 | ----------- | ---------------------------------------------------------------------- |
-| `system`    | 会话前导（`subtype: "init"`），包含模型、cwd、权限模式、工具、斜杠命令和 MCP 服务器；`subtype: "compact_boundary"` 表示自动压缩 |
+| `system`    | 会话前导（`subtype: "init"`），包含模型、cwd、权限模式、工具、斜杠命令和 MCP 服务器；`subtype: "compact_boundary"` 表示压缩边界 |
 | `assistant` | 模型消息；`message.content[]` 保存 `text`/`thinking`/`tool_use`，以及内联后端网页搜索的 `server_tool_use`/`web_search_tool_result` |
 | `user`      | 工具结果，作为 `message.content[]` 中的 `tool_result` 块 |
 | `result`    | 终端消息，包含最终文本、停止原因和开销字段 |
@@ -296,7 +296,7 @@ Messages API 的 `citations_delta` 携带被引用文本跨度（例如网页搜
 
 已知时，`num_turns` 和 `total_cost_usd` 是权威值。未知时，`num_turns` 回退为本轮完成的模型响应数，`total_cost_usd` 回退为 `0`。已完成但没有内容的响应不会发出 `assistant` 行，但仍计为一轮。不会过量报告开销。
 
-`modelUsage` 携带 grok 跟踪的每模型令牌和开销字段，以及归属于活动模型的 `webSearchRequests`。reducer 跟踪单个全局网页搜索计数，而不是按模型计数，因此总数会落到当前或最后一个模型，其他行保持 `0`。当某模型的开销未知或被隐藏时，其每模型 `modelUsage.*.costUSD` 为 `0`。这与顶层 `total_cost_usd` 的失败关闭为零行为相同。`json` 格式在部分情况下完全省略开销浮点数，但此流保留字段并设为 `0`。`contextWindow` 是当前模型真实的总上下文窗口（与 grok 用于自动压缩的值相同），只出现在当前模型行。其他行省略它；当前行在窗口未知时也省略。grok 没有 `maxOutputTokens` 目录，因此完全省略该键。没有每模型明细时，`modelUsage` 为 `{}`。
+`modelUsage` 携带 grok 跟踪的每模型令牌和开销字段，以及归属于活动模型的 `webSearchRequests`。reducer 跟踪单个全局网页搜索计数，而不是按模型计数，因此总数会落到当前或最后一个模型，其他行保持 `0`。当某模型的开销未知或被隐藏时，其每模型 `modelUsage.*.costUSD` 为 `0`。这与顶层 `total_cost_usd` 的失败关闭为零行为相同。`json` 格式在部分情况下完全省略开销浮点数，但此流保留字段并设为 `0`。`contextWindow` 是当前模型真实的总上下文窗口（与 grok 用于压缩的值相同），只出现在当前模型行。其他行省略它；当前行在窗口未知时也省略。grok 没有 `maxOutputTokens` 目录，因此完全省略该键。没有每模型明细时，`modelUsage` 为 `{}`。
 
 与 `streaming-json` 一样，该流是只读的。工具批准及其他双向流程使用 ACP 接口（`grok-zh agent`）。
 

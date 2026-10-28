@@ -1480,7 +1480,6 @@ mod searchable_text_tests {
             message_tokens: 30,
             free_tokens: 900,
             usage_pct: 10,
-            auto_compact_threshold_percent: 85,
             usage_categories: vec![],
         };
         let block = RenderBlock::context_info(snapshot, "grok-4.5");

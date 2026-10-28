@@ -882,15 +882,15 @@ fn compact_failure_plain_output_localizes_fixed_chrome_only() {
     };
     assert_eq!(
         failed.plain_message_with_locale(&zh),
-        "自动压缩失败：api failed"
+        "压缩失败：api failed"
     );
     assert_eq!(
         failed.plain_message_with_locale(&crate::locale::LocaleContext::default()),
-        "Auto-compact failed - api failed"
+        "Compaction failed - api failed"
     );
 
     let empty = super::reducer::Lifecycle::CompactFailed { error: "  ".into() };
-    assert_eq!(empty.plain_message_with_locale(&zh), "自动压缩失败。");
+    assert_eq!(empty.plain_message_with_locale(&zh), "压缩失败。");
 }
 
 #[test]

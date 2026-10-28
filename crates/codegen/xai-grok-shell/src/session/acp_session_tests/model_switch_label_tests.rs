@@ -2,7 +2,6 @@ use xai_grok_sampling_types::conversation::ConversationItem;
 
 use super::support::{build_actor, running_task_stub};
 use crate::session::SwitchContextWindow;
-use crate::session::compaction_config::AsyncCompactionCache;
 
 const SWITCH_TARGET_LABEL: &str = "Aurora";
 
@@ -34,10 +33,8 @@ async fn model_switch_relabels_live_agent_and_system_head() {
                         ..xai_grok_sampler::SamplerConfig::default()
                     },
                     use_concise: false,
-                    is_family_switch: false,
                     apply_prompt_override: true,
                     skip_prompt_rewrite: false,
-                    auto_compact_threshold_percent: 85,
                     system_prompt_label: SWITCH_TARGET_LABEL.to_owned(),
                     context_window_selection: SwitchContextWindow::Set(None),
                     supported_context_windows: Vec::new(),
@@ -63,27 +60,16 @@ async fn model_switch_relabels_live_agent_and_system_head() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn relabel_skipped_mid_turn_keeps_prefire_cache() {
+async fn relabel_skipped_mid_turn_keeps_system_prompt_label() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let (actor, _gateway_rx) = build_actor().await;
-            actor.compaction.prefire.store(AsyncCompactionCache {
-                note1: "NOTE1".to_owned(),
-                prefix_len: 1,
-                fingerprint: 42,
-                model_slug: "switch-target".to_owned(),
-                pass1_latency_ms: 5,
-            });
             actor.state.lock().await.running_task = Some(running_task_stub("running"));
 
             actor
                 .relabel_agent_system_prompt(SWITCH_TARGET_LABEL.to_owned())
                 .await;
 
-            assert!(
-                actor.compaction.prefire.has_cache(),
-                "a skipped relabel must not drop a prefire built on the still-live prompt"
-            );
             assert_eq!(
                 xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL,
                 actor.agent.borrow().prompt_context().system_prompt_label

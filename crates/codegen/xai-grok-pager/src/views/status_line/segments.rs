@@ -89,10 +89,7 @@ pub fn compose_builtin(
             StatusLineItem::Context => {
                 let window = &ctx.context_window;
                 let pct = window.used_percentage?;
-                let warn_at = window
-                    .auto_compact_threshold_percent
-                    .unwrap_or(CONTEXT_WARN_PCT);
-                let tone = if pct >= warn_at {
+                let tone = if pct >= CONTEXT_WARN_PCT {
                     SegmentTone::Warn
                 } else {
                     SegmentTone::Dim

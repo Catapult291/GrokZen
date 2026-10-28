@@ -3,7 +3,7 @@
 use super::ChatStateActor;
 use crate::compaction_utils::extract_last_user_query;
 use crate::events::ChatStateEvent;
-use crate::types::{AutoCompactTrigger, ChatStateSnapshot, ConversationCounts, NotificationMeta};
+use crate::types::{ChatStateSnapshot, ConversationCounts, NotificationMeta};
 
 impl ChatStateActor {
     /// Build a notification meta from current timing state.
@@ -68,28 +68,6 @@ impl ChatStateActor {
         self.send_event(ChatStateEvent::ConversationReset {
             new_len: self.state.conversation.len(),
         });
-    }
-
-    /// Check if auto-compact is needed based on token utilization.
-    /// `Some` when `total_tokens` exceeds `context_window * threshold_percent / 100`.
-    pub(super) fn check_auto_compact_needed(
-        &self,
-        threshold_percent: u8,
-    ) -> Option<AutoCompactTrigger> {
-        let context_window = self.state.sampling_config.context_window;
-        let cw = context_window.get();
-
-        if xai_token_estimation::exceeds_threshold(self.state.total_tokens, cw, threshold_percent) {
-            let utilization_percent =
-                xai_token_estimation::usage_percentage_truncated_u8(self.state.total_tokens, cw);
-            Some(AutoCompactTrigger {
-                total_tokens: self.state.total_tokens,
-                context_window,
-                utilization_percent,
-            })
-        } else {
-            None
-        }
     }
 
     pub(super) fn get_last_model_metadata(&self) -> crate::commands::ModelMetadata {

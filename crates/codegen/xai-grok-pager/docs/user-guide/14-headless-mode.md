@@ -267,7 +267,7 @@ Message types:
 
 | Type        | Description                                                              |
 | ----------- | ---------------------------------------------------------------------- |
-| `system`    | Session preamble (`subtype: "init"`) with model, cwd, permission mode, tools, slash commands, and MCP servers. `subtype: "compact_boundary"` marks an auto compaction |
+| `system`    | Session preamble (`subtype: "init"`) with model, cwd, permission mode, tools, slash commands, and MCP servers. `subtype: "compact_boundary"` marks a compaction boundary |
 | `assistant` | A model message; `message.content[]` holds `text`/`thinking`/`tool_use`, plus `server_tool_use`/`web_search_tool_result` for inline backend web search |
 | `user`      | Tool results, as `tool_result` blocks inside `message.content[]`         |
 | `result`    | Terminal message with final text, stop reason, and spend fields         |
@@ -322,7 +322,7 @@ Fidelity caveats apply to a few fields.
 
 `num_turns` and `total_cost_usd` are authoritative when known. When they are not, `num_turns` falls back to the count of completed model responses this turn, and `total_cost_usd` falls back to `0`. A completed but contentless response emits no `assistant` line, yet still counts as a turn. Spend is never overreported.
 
-`modelUsage` carries the per-model token and cost fields grok tracks, plus `webSearchRequests` attributed to the active model. The reducer tracks a single global web-search count rather than per-model, so the whole count lands on the current or last model and other rows stay `0`. A per-model `modelUsage.*.costUSD` is `0` when that model's cost is unknown or withheld. This is the same fail-closed-to-zero behavior as the top-level `total_cost_usd`. The `json` format omits cost floats entirely when partial, but this stream keeps the field present and `0`. `contextWindow` is the current model's real total context window (the same value grok uses for auto-compaction), and it appears only on the current model's row. Other rows omit it, and so does the current row when the window is unknown. `maxOutputTokens` has no grok catalog, so that key is omitted entirely. `modelUsage` is `{}` when no per-model breakdown is available.
+`modelUsage` carries the per-model token and cost fields grok tracks, plus `webSearchRequests` attributed to the active model. The reducer tracks a single global web-search count rather than per-model, so the whole count lands on the current or last model and other rows stay `0`. A per-model `modelUsage.*.costUSD` is `0` when that model's cost is unknown or withheld. This is the same fail-closed-to-zero behavior as the top-level `total_cost_usd`. The `json` format omits cost floats entirely when partial, but this stream keeps the field present and `0`. `contextWindow` is the current model's real total context window (the same value grok uses for compaction), and it appears only on the current model's row. Other rows omit it, and so does the current row when the window is unknown. `maxOutputTokens` has no grok catalog, so that key is omitted entirely. `modelUsage` is `{}` when no per-model breakdown is available.
 
 Like `streaming-json`, this stream is read only. Tool approvals and other bidirectional flows use the ACP interface (`grok agent`).
 

@@ -698,9 +698,6 @@ pub(crate) fn parse_remote_model_value(
         max_request_bytes: get_u64(obj, "maxRequestBytes")
             .or_else(|| get_u64(obj, "max_request_bytes"))
             .and_then(std::num::NonZeroU64::new),
-        auto_compact_threshold_percent: get_u64(obj, "autoCompactThresholdPercent")
-            .or_else(|| get_u64(obj, "auto_compact_threshold_percent"))
-            .and_then(|v| u8::try_from(v).ok()),
         system_prompt_label: get_string(obj, "systemPromptLabel")
             .or_else(|| get_string(obj, "system_prompt_label"))
             .filter(|s| !s.trim().is_empty()),

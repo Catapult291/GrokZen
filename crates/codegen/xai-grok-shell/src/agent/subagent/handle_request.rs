@@ -905,8 +905,6 @@ pub(crate) async fn run_shell_child(
             }));
     }
     let subagent_model_id = effective_sampling_config.model.clone();
-    let auto_compact_threshold_percent =
-        ctx.resolve_auto_compact_threshold_percent(&subagent_model_id);
     let subagent_id = request.id.clone();
     let child_session_id = acp::SessionId::new(subagent_id.clone());
     let override_cwd = select_override_cwd(resume_source.as_ref(), request.cwd.as_deref());
@@ -947,7 +945,6 @@ pub(crate) async fn run_shell_child(
         copy_error: fork_copy_error,
         prefix_len: inherited_prefix_len,
         conversation: forked_conversation,
-        force_compact: force_compact_on_first_turn,
         verbatim_fork: context_verbatim_fork,
     } = match bootstrap_initial_context(
         &request,
@@ -958,7 +955,6 @@ pub(crate) async fn run_shell_child(
         effective_model_id.0.as_ref(),
         super::resume_window::ResumeWindowPolicy {
             context_window: effective_sampling_config.context_window,
-            auto_compact_threshold_percent,
         },
     )
     .await
@@ -1511,13 +1507,11 @@ pub(crate) async fn run_shell_child(
             ..Default::default()
         },
         xai_grok_workspace::permission::ClientType::Generic,
-        auto_compact_threshold_percent,
         xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
         pins.mode,
         ctx.resolve_compaction_verbatim_input(),
         ctx.resolve_long_reasoning_reminder(),
         ctx.resolve_compaction_tool_choice(),
-        pins.two_pass,
         None,
         None,
         std::sync::Arc::new(parking_lot::Mutex::new(
@@ -1697,10 +1691,6 @@ pub(crate) async fn run_shell_child(
         cancel_token.clone(),
     );
     let (prompt_admitted, prompt_admitted_rx) = oneshot::channel();
-    super::resume_window::arm_force_compact(
-        &child_handle.force_compact,
-        force_compact_on_first_turn,
-    );
     let child_prompt_id = wake_message_id.unwrap_or_else(|| match wake_message_source {
         Some(ActiveAgentMessageSource::Agent) => {
             format!("parent-agent-message-{}", uuid::Uuid::now_v7())

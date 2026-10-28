@@ -240,13 +240,11 @@ pub(crate) async fn spawn_session_actor(
     initial_total_tokens: u64,
     mut startup_hints: StartupHints,
     client_type: ClientType,
-    auto_compact_threshold_percent: u8,
     system_prompt_label: String,
     compaction_mode: xai_chat_state::CompactionMode,
     compaction_verbatim_input: bool,
     long_reasoning_reminder: crate::session::long_reasoning_reminder::LongReasoningReminder,
     compaction_tool_choice: crate::util::config::CompactionToolChoice,
-    two_pass_enabled: bool,
     buffering_settings: Option<BufferingSettings>,
     origin_client: Option<crate::http::OriginClientInfo>,
     codebase_indexes: std::sync::Arc<parking_lot::Mutex<CodebaseIndexManager>>,
@@ -838,7 +836,6 @@ pub(crate) async fn spawn_session_actor(
     let initial_agent_name = agent_definition.name.clone();
     let initial_agent_type = Some(initial_agent_name.clone());
     let compaction_policy = xai_grok_agent::CompactionPolicy {
-        auto_compact_threshold_percent: auto_compact_threshold_percent as u32,
         compact_model: None,
         memory_flush_enabled: memory_config
             .as_ref()
@@ -848,7 +845,6 @@ pub(crate) async fn spawn_session_actor(
                 .as_ref()
                 .and_then(|r| r.compaction_wall_clock_budget_secs),
         ),
-        two_pass_enabled,
     };
     let reminder_policy = resolve_reminder_policy(remote_settings.as_ref(), todo_gate);
     let (user_question_tx, user_question_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -1526,7 +1522,6 @@ pub(crate) async fn spawn_session_actor(
     } else {
         None
     };
-    let force_compact = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let resolved_workspace_root = xai_grok_workspace::session::git::find_git_root_from_path(
         std::path::Path::new(&session_info.cwd),
     )
@@ -1839,17 +1834,12 @@ pub(crate) async fn spawn_session_actor(
         startup_hints,
         forked_tool_override,
         compaction: super::compaction_config::CompactionConfig {
-            threshold_percent: std::cell::Cell::new(auto_compact_threshold_percent),
-            force_compact: force_compact.clone(),
             context_window_override,
             context_window_selection: context_window_selection.clone(),
             count: std::sync::atomic::AtomicU64::new(0),
-            auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
-            previous_model: std::cell::Cell::new(None),
             compaction_mode,
             verbatim_input: compaction_verbatim_input,
             tool_choice: compaction_tool_choice,
-            prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
             cancel: Default::default(),
         },
@@ -2456,7 +2446,6 @@ pub(crate) async fn spawn_session_actor(
         ask_user_question_enabled,
         non_interactive: session_non_interactive,
         plan_mode: plan_mode.clone(),
-        force_compact,
         permission_handle: permissions_for_handle,
         attribution_callback: attribution_callback_for_handle,
         agent_name: agent_name_for_handle,
@@ -2559,13 +2548,11 @@ pub(crate) async fn spawn_session_on_thread(
     initial_total_tokens: u64,
     startup_hints: StartupHints,
     client_type: ClientType,
-    auto_compact_threshold_percent: u8,
     system_prompt_label: String,
     compaction_mode: xai_chat_state::CompactionMode,
     compaction_verbatim_input: bool,
     long_reasoning_reminder: crate::session::long_reasoning_reminder::LongReasoningReminder,
     compaction_tool_choice: crate::util::config::CompactionToolChoice,
-    two_pass_enabled: bool,
     buffering_settings: Option<BufferingSettings>,
     origin_client: Option<crate::http::OriginClientInfo>,
     codebase_indexes: std::sync::Arc<parking_lot::Mutex<CodebaseIndexManager>>,
@@ -2775,13 +2762,11 @@ pub(crate) async fn spawn_session_on_thread(
                     initial_total_tokens,
                     startup_hints,
                     client_type,
-                    auto_compact_threshold_percent,
                     system_prompt_label,
                     compaction_mode,
                     compaction_verbatim_input,
                     long_reasoning_reminder,
                     compaction_tool_choice,
-                    two_pass_enabled,
                     buffering_settings,
                     origin_client,
                     codebase_indexes,

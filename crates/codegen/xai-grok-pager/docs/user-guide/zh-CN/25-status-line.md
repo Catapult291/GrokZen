@@ -18,7 +18,7 @@ items = ["cwd", "model", "context"]   # 省略时的默认值
 | --- | --- |
 | `cwd` | 当前目录（最后一级目录名） |
 | `model` | 模型显示名称 |
-| `context` | 上下文窗口使用百分比；达到自动压缩阈值时显示琥珀色，智能体未报告阈值时则以 80% 为界 |
+| `context` | 上下文窗口使用百分比；达到 80% 起显示琥珀色 |
 | `cost` | 会话费用；低于 0.005 美元时隐藏，避免显示具有误导性的 `$0.00` |
 | `turn-timer` | 当前回合的已用时间，从运行满一秒后开始显示 |
 | `session-name` | 已设置的会话名称 |
@@ -105,7 +105,6 @@ refresh_interval = 300   # 秒
 | `context_window.session_input_tokens`, `.session_output_tokens` | 整个会话累计计费值，只增不减。名称含 `session` 是因为它们统计整个会话；其他位置的 `total_*` 表示当前窗口，而此处由 `context_tokens` 表示。用它们除以窗口大小可能超过 100%。用量账本不可读时省略 |
 | `context_window.used_percentage`, `.remaining_percentage` | 当前窗口的已用/剩余整数百分比，范围 0–100。窗口大小或 token 数未知时省略 |
 | `context_window.session_usage.{input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens}` | `input_tokens`、`cache_creation_input_tokens`、`cache_read_input_tokens` 相加等于 `session_input_tokens`，另含 `output_tokens`。按整个会话累计，而非单个回合；首次调用前省略 |
-| `context_window.auto_compact_threshold_percent` | 会话自动压缩阈值；智能体未报告时省略 |
 | `effort.level` | 模型支持时的推理强度 |
 | `turn.started_at_ms` | 当前回合开始时的 Unix 毫秒时间戳；回合之间省略。可用自己的时钟相减得到已用时间 |
 | `worktree.{name,path,branch,main_worktree_root}` | 链接工作树中的活动工作树；工作树位于文件系统根目录时省略 `name`，`main_worktree_root` 是该工作树的分支来源 |

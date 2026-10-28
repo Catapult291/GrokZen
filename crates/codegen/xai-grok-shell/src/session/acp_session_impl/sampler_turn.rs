@@ -713,9 +713,8 @@ impl SessionActor {
             creds.alpha_test_key.as_deref(),
             &cfg.base_url,
         );
-        let compaction_at_tokens = self.compaction_at_tokens.get();
         let compactions_remaining = self.compactions_remaining.get();
-        if compactions_remaining.is_some() || compaction_at_tokens.is_some() {
+        if compactions_remaining.is_some() {
             let has_compaction_summary = self
                 .chat_state_handle
                 .get_last_compaction_prompt_index()
@@ -725,17 +724,6 @@ impl SessionActor {
                 compactions_remaining.and_then(|c| c.resolve(has_compaction_summary))
             {
                 extra_headers.insert("x-compactions-remaining".to_string(), value.to_string());
-            }
-            // Send on the uncompacted prefix; drop the header once the session compacts.
-            if !has_compaction_summary
-                && let Some(value) = compaction_at_tokens.and_then(|c| {
-                    c.resolve(
-                        cfg.context_window.get(),
-                        self.compaction.threshold_percent.get(),
-                    )
-                })
-            {
-                extra_headers.insert("x-compaction-at".to_string(), value.to_string());
             }
         }
         let extra_response_includes = crate::agent::config::response_include_extensions(
@@ -1273,45 +1261,6 @@ impl SessionActor {
                 &message,
             );
             return Err(acp::Error::internal_error().data(message));
-        }
-
-        // Never compact mid-salvage: the rewrite would drop the continue reminder and split the joined report
-        // Genuine overflows already completed truncated in the quiet arm above
-        // The remaining mid-salvage kinds (rate limit) take their terminal arms below
-        if !mid_salvage_continuation && self.should_compact_on_error(&error).await {
-            // SAFETY: `should_compact_on_error` returned true only when `model_metadata.context_window` was Some(>0)
-            let cw = error
-                .model_metadata
-                .as_ref()
-                .and_then(|m| m.context_window)
-                .expect("should_compact_on_error guarantees context_window");
-            {
-                let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
-                let percentage = xai_token_estimation::usage_percentage_u8(total_tokens, cw);
-
-                // Update the in-memory sampling config's `context_window` if the model reported a different value (mirror the legacy path's bookkeeping)
-                if let Some(mut cfg) = self.chat_state_handle.get_sampling_config().await
-                    && let Some(new_cw) = std::num::NonZeroU64::new(cw)
-                    && self.compaction.context_window_override.is_none()
-                {
-                    cfg.context_window = self.context_window_after_overflow(&cfg, new_cw);
-                    self.chat_state_handle.update_sampling_config(cfg);
-                }
-
-                let trigger_info = compaction::AutoCompactTriggerInfo {
-                    tokens_used: total_tokens,
-                    context_window: cw,
-                    percentage,
-                    reason_override: None,
-                };
-                if let Err(e) = self.run_compact_only(trigger_info, false).await {
-                    if Self::is_auth_compact_error(&e) {
-                        return Err(self.surface_compact_auth_failure(e).await);
-                    }
-                    return Err(e);
-                }
-                return Ok(SamplerFailureRecovery::CompactAndResubmit);
-            }
         }
 
         // Telemetry and notification for terminal failures
@@ -1964,9 +1913,6 @@ impl SessionActor {
             )
             .await?
         {
-            SamplerFailureRecovery::CompactAndResubmit => {
-                Ok(SamplerTurnOutcome::CompactAndResubmit)
-            }
             SamplerFailureRecovery::RefreshAuthAndResubmit { credential, store } => {
                 Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store })
             }
@@ -2070,8 +2016,6 @@ impl SessionActor {
                             creds.api_key = Some(key);
                             self.chat_state_handle.update_credentials(creds);
                         }
-                        // Re-enable auth-suppressed compact; waiting for a 200 deadlocks over-window
-                        self.clear_auth_compact_suppression();
                         return;
                     }
                     Err(e) => {

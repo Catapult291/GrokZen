@@ -382,20 +382,6 @@ impl SessionActor {
                 self.chat_state_handle.restore_snapshot(snap);
             }
 
-            // The conversation shrank: clear budget-based (size/schema) and stale per-turn suppression so compaction can run on the smaller context
-            // Account-state suppression (credit/auth sets SUPPRESS_UNTIL_SUCCESS) isn't budget-related, so it persists until a successful model call
-            if self
-                .compaction
-                .auto_compact_suppressed
-                .load(std::sync::atomic::Ordering::Relaxed)
-                != crate::session::compaction_config::SUPPRESS_UNTIL_SUCCESS
-            {
-                self.compaction.auto_compact_suppressed.store(
-                    crate::session::compaction_config::SUPPRESS_NONE,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-            }
-
             // The rewind may have dropped failed-server reminders with the truncated turns, so still-down servers must re-announce
             // See rearm_failed_server_announcements for why connected fingerprints stay latched
             self.rearm_failed_server_announcements().await;

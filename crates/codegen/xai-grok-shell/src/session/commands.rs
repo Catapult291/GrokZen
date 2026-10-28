@@ -360,8 +360,6 @@ impl From<SkillUpdateKind> for AdvertiseTrigger {
 pub struct SessionModelSwitch {
     pub sampling_config: xai_grok_sampler::SamplerConfig,
     pub use_concise: bool,
-    /// The two models declare differing `model_family`s, so a lossy compaction runs at switch end.
-    pub is_family_switch: bool,
     /// When `false`, skip the system prompt rewrite (concise/default swap).
     /// Set to `false` for forked sessions so mid-session model switches cannot contaminate the inherited prompt configuration.
     pub apply_prompt_override: bool,
@@ -369,10 +367,6 @@ pub struct SessionModelSwitch {
     /// Set by the model-switch orchestrator immediately after a successful `RebuildAgentForDefinition`.
     /// The rebuild handler already installed the fresh harness's prompt; the concise/default swap must not clobber it.
     pub skip_prompt_rewrite: bool,
-    /// Computed by `MvpAgent` against the new model id.
-    /// Per-model remote settings and per-model user TOML overrides then target the right model after a `/model` switch.
-    /// The session actor stores this on `compaction.threshold_percent` (which is `Cell<u8>` so it can update without `&mut self`).
-    pub auto_compact_threshold_percent: u8,
     pub system_prompt_label: String,
     pub context_window_selection: SwitchContextWindow,
     /// The new model's default window and menu, from the entry the handler resolved.

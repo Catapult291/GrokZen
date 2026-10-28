@@ -2,68 +2,22 @@
 //!
 //! Spawn injects the system prompt, AGENTS.md, and the resume task before the
 //! first compact can run, so a copy that fills the window is not safe.
-//! Budgeted children skip `check_auto_compact_needed`, so a fat transcript
-//! that needs compact must abort instead of arming a no-op flag.
-
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Spawn injects prelude tokens before the first compact can shrink history.
 const RESUME_WINDOW_FIT_PERCENT: u8 = 95;
 
-/// Child context window and auto-compact threshold for resume admission.
+/// Child context window used for resume admission.
 pub(super) struct ResumeWindowPolicy {
     pub context_window: u64,
-    pub auto_compact_threshold_percent: u8,
 }
 
 impl ResumeWindowPolicy {
     pub(super) fn token_limit(&self) -> u64 {
-        // Transcript estimate omits spawn prelude; never admit above the auto-compact threshold.
-        let fit_percent =
-            u64::from(RESUME_WINDOW_FIT_PERCENT.min(self.auto_compact_threshold_percent));
-        self.context_window * fit_percent / 100
+        self.context_window * u64::from(RESUME_WINDOW_FIT_PERCENT) / 100
     }
 
     pub(super) fn fits(&self, estimated_tokens: u64) -> bool {
         self.context_window != 0 && estimated_tokens <= self.token_limit()
-    }
-
-    fn over_auto_compact_threshold(&self, estimated_tokens: u64) -> bool {
-        xai_token_estimation::exceeds_threshold(
-            estimated_tokens,
-            self.context_window,
-            self.auto_compact_threshold_percent,
-        )
-    }
-
-    /// First-turn compact plan for a resumed transcript that already fits the window.
-    pub(super) fn plan_force_compact(
-        &self,
-        estimated_tokens: u64,
-        has_task_output_budget: bool,
-    ) -> ResumeForceCompact {
-        if !self.over_auto_compact_threshold(estimated_tokens) {
-            return ResumeForceCompact::NotNeeded;
-        }
-        if has_task_output_budget {
-            return ResumeForceCompact::AbortBudgeted;
-        }
-        ResumeForceCompact::Arm
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ResumeForceCompact {
-    NotNeeded,
-    Arm,
-    /// Over the auto-compact threshold, but a budgeted child never runs
-    /// `check_auto_compact_needed`, so arming `force_compact` would no-op.
-    AbortBudgeted,
-}
-
-pub(super) fn arm_force_compact(force_compact: &AtomicBool, should_force: bool) {
-    if should_force {
-        force_compact.store(true, Ordering::Relaxed);
     }
 }
 

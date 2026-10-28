@@ -1319,7 +1319,6 @@ pub(super) fn make_test_handle(
         plan_mode: std::sync::Arc::new(parking_lot::Mutex::new(
             crate::session::plan_mode::PlanModeTracker::new(std::env::temp_dir()),
         )),
-        force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         permission_handle: xai_grok_workspace::permission::PermissionHandle::allow_all(),
         attribution_callback: None,
         agent_name: "grok-build".to_string(),

@@ -233,7 +233,6 @@ Grok Build 还会按以下层级读取配置；后列层级优先，但 requirem
 | `features.terminal_theme` | `boolean` | `pin` | `user` | 在分阶段发布期间显示采用终端原生颜色的 terminal 主题，默认 false。也对应 `GROK_TERMINAL_THEME`。 |
 | `features.title_refresh` | `boolean` | `pin` | `user` | 会话早期自动刷新标题；在 requirements 中固定可压过 `GROK_TITLE_REFRESH`。 |
 | `features.turn_summary` | `boolean` | `pin` | `user` | 启用或禁用 `turn_summary`；默认 true。也对应 `GROK_TURN_SUMMARY`。 |
-| `features.two_pass_compaction` | `boolean` | `pin` | `user` | 启用或禁用 `two_pass_compaction`；默认 true。也对应 `GROK_TWO_PASS_COMPACTION`。 |
 | `features.video_gen` | `boolean` | `pin` | `user` | 启用视频工具／`/imagine-video`。 |
 | `features.voice_mode` | `boolean` | `pin` | `user` | 启用或禁用 `voice_mode`；默认 true。也对应 `GROK_VOICE_MODE`。 |
 | `features.web_fetch` | `boolean` | `pin` | `user` | 启用或禁用 `web_fetch`；默认 false。也对应 `GROK_WEB_FETCH`。 |
@@ -392,11 +391,10 @@ Grok Build 还会按以下层级读取配置；后列层级优先，但 requirem
 | `model.<id>.api_base_url` | `string` | `yes` | `user` | 配合 XAI_API_KEY 解析使用的替代 API 基础 URL。 |
 | `model.<id>.api_key` | `string` | `yes` | `user` | 内联 API Key；优先使用 `env_key`，不要把密钥放入共享仓库。 |
 | `model.<id>.auth_provider` | `string` | `yes` | `user` | 为模型签发 bearer token 的 `[auth_provider.<name>]` 助手名称。 |
-| `model.<id>.auto_compact_threshold_percent` | `integer` | `yes` | `user` | 单模型自动压缩阈值（0–100）。 |
 | `model.<id>.base_url` | `string` | `yes` | `user` | 提供方端点基础 URL。 |
-| `model.<id>.compaction_at_tokens` | `number / table` | `yes` | `user` | 该模型触发压缩的 token 阈值。 |
+| `model.<id>.compaction_at_tokens` | `number / table` | `yes` | `user` | 为兼容旧配置保留；客户端不再发送服务端 `x-compaction-at` 提示。 |
 | `model.<id>.compactions_remaining` | `string / table` | `yes` | `user` | 压缩后剩余上下文的发送方式；别名 `send_compactions_remaining`。 |
-| `model.<id>.context_window` | `number` | `yes` | `user` | 上下文窗口 token 数，决定自动压缩时机。 |
+| `model.<id>.context_window` | `number` | `yes` | `user` | 上下文窗口 token 数。 |
 | `model.<id>.description` | `string` | `yes` | `user` | 模型选择器中的可选描述。 |
 | `model.<id>.env_http_headers` | `map<string,string>` | `yes` | `user` | 从已设置环境变量填充的 HTTP 标头。 |
 | `model.<id>.env_key` | `string / string[]` | `yes` | `user` | 保存提供方 API Key 的环境变量名。 |
@@ -511,7 +509,6 @@ Grok Build 还会按以下层级读取配置；后列层级优先，但 requirem
 
 | 键 | 类型／取值 | Requirements | 托管 | 说明 |
 | --- | --- | --- | --- | --- |
-| `session.auto_compact_threshold_percent` | `integer` | `yes` | `user` | 上下文用量达到此百分比（0–100）时自动压缩。 |
 | `session.load_envrc` | `boolean` | `yes` | `user` | 将 `.envrc` 变量注入 Bash。 |
 
 ### `shell_environment_policy`

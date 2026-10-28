@@ -1658,10 +1658,8 @@ fn config_only_model_switch(
     crate::session::SessionModelSwitch {
         sampling_config,
         use_concise: false,
-        is_family_switch: false,
         apply_prompt_override: false,
         skip_prompt_rewrite: true,
-        auto_compact_threshold_percent: 85,
         system_prompt_label: xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_owned(),
         context_window_selection: SwitchContextWindow::Set(None),
         supported_context_windows: Vec::new(),

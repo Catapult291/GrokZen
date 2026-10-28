@@ -170,7 +170,7 @@ The agent sends push notifications to clients for real-time updates:
 | `x.ai/fs_notify`           | Filesystem change notification       |
 | `x.ai/fs/index`            | Full file index update               |
 | `x.ai/fs/index/delta`      | Incremental file index update        |
-| `x.ai/session_notification`| Session-specific updates (diff review, retry state, auto-compact) |
+| `x.ai/session_notification`| Session-specific updates (diff review, retry state, compaction) |
 | `x.ai/session/update`      | Session update (tool calls, content) |
 
 ---

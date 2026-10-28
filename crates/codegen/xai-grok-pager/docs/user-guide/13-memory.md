@@ -266,7 +266,7 @@ min_score = 0.9    # Score threshold for first-turn injection
 
 ### After Compaction
 
-Memory is also searched after auto-compaction to recover relevant context that may have been discarded.
+Memory is also searched after compaction to recover relevant context that may have been discarded.
 
 ---
 
