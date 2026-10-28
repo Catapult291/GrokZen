@@ -222,12 +222,12 @@ pub(crate) fn snap_position(root: &Path, path: &str, symbol: &str, pos: Position
             character: utf16_col(line, byte),
         };
         let was = at
-            .map(|w| format!("是 `{w}`"))
-            .unwrap_or_else(|| "不在标识符上".to_string());
+            .map(|w| format!("is `{w}`"))
+            .unwrap_or_else(|| "not on an identifier".to_string());
         return Snap {
             position: Some(snapped),
             note: Some(format!(
-                "坐标已校正：line={} character={} 处{was}，已按 symbol 改为 `{symbol}` 所在的 line={} character={}（0 起）。",
+                "Coordinates corrected: line={} character={} was {was}; snapped to `{symbol}` at line={} character={} (0-based).",
                 pos.line, pos.character, snapped.line, snapped.character
             )),
         };
@@ -235,7 +235,7 @@ pub(crate) fn snap_position(root: &Path, path: &str, symbol: &str, pos: Position
     Snap {
         position: None,
         note: Some(format!(
-            "line={} 附近 ±{SNAP_RADIUS} 行没有 `{symbol}`，已忽略 line/character，按名字查询。",
+            "No `{symbol}` within ±{SNAP_RADIUS} lines of line={}; ignored line/character and queried by name.",
             pos.line
         )),
     }
@@ -324,9 +324,9 @@ pub(crate) fn fix_path(
     }
     let files: BTreeSet<FileId> = decls.iter().map(|s| s.file).collect();
     let why = match given {
-        None => "未给 path".to_string(),
-        Some(p) if !exists => format!("path `{p}` 不存在"),
-        Some(p) => format!("`{p}` 里没有 `{symbol}`"),
+        None => "path not given".to_string(),
+        Some(p) if !exists => format!("path `{p}` does not exist"),
+        Some(p) => format!("`{p}` has no `{symbol}`"),
     };
     match files.len() {
         0 => PathFix::Keep,
@@ -338,7 +338,7 @@ pub(crate) fn fix_path(
             PathFix::Use {
                 path: file.path.as_str().to_string(),
                 note: format!(
-                    "{why}；已按索引改用 `{symbol}` 唯一定义所在文件 {}（定义 @{}:{}）。",
+                    "{why}; switched via index to the unique definition file of `{symbol}` at {} (definition @{}:{}).",
                     file.path.as_str(),
                     file.path.as_str(),
                     s.start_line
@@ -346,7 +346,18 @@ pub(crate) fn fix_path(
             }
         }
         n if !exists => {
-            let list: Vec<String> = decls
+            // Rank candidates so the model picks a useful path: non-test and
+            // exported first, then path/line (stable).
+            let mut ranked: Vec<&CodeSymbol> = decls;
+            ranked.sort_by_key(|s| {
+                let path = index.file(s.file).map(|f| f.path.as_str()).unwrap_or("");
+                let test = path.contains("/test")
+                    || path.contains("_test.")
+                    || path.contains("/tests/")
+                    || path.starts_with("tests/");
+                (!s.exported, test, path, s.start_line)
+            });
+            let list: Vec<String> = ranked
                 .iter()
                 .take(8)
                 .filter_map(|s| {
@@ -355,15 +366,15 @@ pub(crate) fn fix_path(
                         .map(|f| format!("{}:{}", f.path.as_str(), s.start_line))
                 })
                 .collect();
-            let more = if decls.len() > 8 {
-                format!(" …共 {} 处", decls.len())
+            let more = if ranked.len() > 8 {
+                format!(" …{} hits total", ranked.len())
             } else {
                 String::new()
             };
             PathFix::Ambiguous {
                 note: format!(
-                    "{why}，而索引里 `{symbol}` 定义在 {n} 个文件：{}{more}。请把其中一个作为 path 再查。",
-                    list.join("、")
+                    "{why}, and the index has `{symbol}` defined in {n} files (exported/non-test first): {}{more}. Pass one as path and retry (or find_symbol to narrow, then find_references).",
+                    list.join(", ")
                 ),
             }
         }
@@ -1567,9 +1578,9 @@ fn list_hits(hits: &[(String, usize)]) -> String {
         .map(|(p, l)| format!("{p}:{}", l + 1))
         .collect();
     if hits.len() > NOTE_LIST {
-        s.push(format!("…共 {} 处", hits.len()));
+        s.push(format!("…{} hits total", hits.len()));
     }
-    s.join("、")
+    s.join(", ")
 }
 
 /// The index's answer to "references of `name`", when it can tell which
@@ -1942,32 +1953,35 @@ fn decl_refs(
     let pkg = if def_dir.is_empty() { "." } else { def_dir };
     let scope = if go {
         if exported {
-            format!("包 {pkg}/ 内及导入该包的文件")
+            format!("inside package {pkg}/ and files that import it")
         } else {
-            format!("包 {pkg}/ 内（未导出名）")
+            format!("inside package {pkg}/ (unexported name)")
         }
     } else if let Some(t) = ts
         .as_ref()
         .filter(|t| t.barrels > 0 || !t.aliases().is_empty())
     {
-        let mut s = "定义文件、导入它的文件".to_string();
+        let mut s = "definition file and files that import it".to_string();
         if t.barrels > 0 {
-            s += &format!("，以及经 {} 个转导出（barrel）文件到达的文件", t.barrels);
+            s += &format!(
+                ", plus files reached via {} re-export (barrel) files",
+                t.barrels
+            );
         }
         let aliases = t.aliases();
         if !aliases.is_empty() {
             let shown: Vec<String> = aliases.iter().take(5).map(|a| format!("`{a}`")).collect();
-            s += &format!("（含改名绑定 {}）", shown.join("、"));
+            s += &format!(" (including rename bindings {})", shown.join(", "));
         }
         s
     } else if let Some((scope, via)) = py.as_ref() {
-        let mut s = "定义文件及导入它的文件".to_string();
+        let mut s = "definition file and files that import it".to_string();
         if !via.is_empty() {
             let shown: Vec<&str> = via.iter().take(3).map(String::as_str).collect();
             s += &format!(
-                "，以及经 {} 个转导出模块（{}）到达的文件",
+                ", plus files reached via {} re-export modules ({})",
                 via.len(),
-                shown.join("、")
+                shown.join(", ")
             );
         }
         let aliases: BTreeSet<&str> = scope
@@ -1978,22 +1992,22 @@ fn decl_refs(
             .collect();
         if !aliases.is_empty() {
             let shown: Vec<String> = aliases.iter().take(5).map(|a| format!("`{a}`")).collect();
-            s += &format!("（含 as 改名 {}）", shown.join("、"));
+            s += &format!(" (including as-renames {})", shown.join(", "));
         }
         if via.truncated {
-            s += "（转导出链超过跟踪上限，结果可能不全）";
+            s += " (re-export chain exceeded tracking limit; results may be incomplete)";
         }
         s
     } else {
-        "定义文件及导入它的文件".to_string()
+        "definition file and files that import it".to_string()
     };
     let at = format!("@{def_path}:{}", decl.start_line);
     let what = if let Some(recv) = &method_recv {
-        format!("`{name}` 是 `{recv}` 的方法，定义 {at}")
+        format!("`{name}` is a method of `{recv}`, defined {at}")
     } else if interface_method {
-        format!("`{name}` 是接口方法，定义 {at}")
+        format!("`{name}` is an interface method, defined {at}")
     } else if decls.len() == 1 {
-        format!("`{name}` 全仓唯一定义 {at}")
+        format!("`{name}` is the unique definition in the repo {at}")
     } else {
         let rest: Vec<&&CodeSymbol> = decls.iter().filter(|s| !std::ptr::eq(**s, decl)).collect();
         let fields = rest.iter().filter(|s| s.kind == SymbolKind::Field).count();
@@ -2012,64 +2026,69 @@ fn decl_refs(
             elsewhere.push("…".to_string());
         }
         let fields = if fields > 0 {
-            format!("，其中结构体字段 {fields} 处")
+            format!(", including {fields} struct-field hits")
         } else {
             String::new()
         };
         let listed = if elsewhere.is_empty() {
             String::new()
         } else {
-            format!("：{}", elsewhere.join("、"))
+            format!(":{}", elsewhere.join(", "))
         };
         let by = if how == Choice::CallSite {
-            "按 path 所给行的用法（包限定名 / 接收者类型 / 所在包）"
+            "by usage on the path's given line (package-qualified name / receiver type / enclosing package)"
         } else {
-            "按 path"
+            "by path"
         };
         format!(
-            "`{name}` 另有 {} 处同名定义{fields}{listed}；已{by}选定 {at}",
+            "`{name}` has {} more same-name definitions{fields}{listed}; selected {at} via {by}",
             rest.len()
         )
     };
     let mut note = format!(
-        "索引作答（未启动语言服务器）：{what}；以下是{scope}中的代码出现，已排除注释和字符串"
+        "Index answer (language server not started): {what}; code occurrences in {scope} below, comments and strings excluded"
     );
     if method_recv.is_some() {
-        note.push_str("，已按接收者类型核对");
+        note.push_str(", checked against receiver type");
     }
     if py.is_some() {
-        note.push_str("（字符串形式的类型注解 `x: \"Foo\"` 按代码计）");
+        note.push_str(" (string-form type annotations `x: \"Foo\"` counted as code)");
     }
     if let Some(m) = &py_member {
         note.push_str(&format!(
-            "，`x.{name}` 已按接收者类核对（定义类 `{}` 及其子类；另查了 {} 个未导入定义文件但出现 `.{name}` 的文件）",
+            ", `x.{name}` checked against receiver class (defining class `{}` and subclasses; also searched {} files that were not importers of the definition file but contain `.{name}`)",
             m.class,
             m.extra_files.len()
         ));
     }
-    note.push('。');
+    note.push('.');
     if interface_method {
-        note.push_str("调用经接口分派，未按接收者类型核对。");
+        note.push_str("Call is interface-dispatched; receiver type was not checked.");
     }
     if !other_type.is_empty() {
         note.push_str(&format!(
-            "已排除 {} 处其他类型的同名方法调用：{}。",
+            "Excluded {} same-name method calls on other types: {}.",
             other_type.len(),
             list_hits(&other_type)
         ));
     }
     if members > 0 {
         note.push_str(&format!(
-            "已排除 {members} 处同名的其他标识符（字段/方法访问 `x.{name}`、字面量键 `{name}:`、他包未经导入名的裸名、方法同名的局部变量）。"
+            "Excluded {members} other same-name identifiers (field/method access `x.{name}`, literal keys `{name}:`, bare names from other packages without import, locals sharing the method name)."
         ));
     }
     if ts.as_ref().is_some_and(|t| t.truncated) {
-        note.push_str("转导出链超过跟踪上限，结果可能不全。");
+        note.push_str("re-export chain exceeded tracking limit; results may be incomplete.");
     }
     if !unconfirmed.is_empty() {
+        let n = unconfirmed.len();
+        let (verb, noun) = if n == 1 {
+            ("has", "hit")
+        } else {
+            ("have", "hits")
+        };
         note.push_str(&format!(
-            "其中 {} 处接收者类型无法从索引判定（未核实，可能是其他类型的同名方法）：{}。",
-            unconfirmed.len(),
+            "Of these, {n} {noun} {verb} receiver type undetermined from the index (unchecked; may be same-name methods on other types): {}.",
             list_hits(&unconfirmed)
         ));
     }
@@ -2212,16 +2231,18 @@ fn grouped_references(
         let path = index.file(d.file)?.path.as_str();
         let kind = match d.kind {
             SymbolKind::Method => match go_receiver_type(&d.signature) {
-                Some(r) => format!("`{r}` 的方法，已按接收者类型核对"),
-                None => "接口方法".to_string(),
+                Some(r) => format!("method of `{r}`, checked against receiver type"),
+                None => "interface method".to_string(),
             },
-            SymbolKind::Function => "包级函数，只计裸名和 `包名.` 限定的用法".to_string(),
-            _ => "包级声明，只计裸名和 `包名.` 限定的用法".to_string(),
+            SymbolKind::Function => {
+                "package-level function; only bare name and `pkg.`-qualified uses".to_string()
+            }
+            _ => "package-level declaration; only bare name and `pkg.`-qualified uses".to_string(),
         };
         let sig: String = d.signature.trim().chars().take(100).collect();
         let n = g.answer.value.len();
         let list = if i == largest {
-            format!("其余 {n} 处都属于它")
+            format!("the other {n} hits belong to it")
         } else {
             let hits: Vec<String> = g
                 .answer
@@ -2229,25 +2250,30 @@ fn grouped_references(
                 .iter()
                 .map(|l| format!("{}:{}", l.path.as_str(), l.range.start.line + 1))
                 .collect();
-            format!("{n} 处：{}", hits.join("、"))
+            format!("{n} hits: {}", hits.join(", "))
         };
         lines.push(format!(
-            "  [定义{}] `{sig}` @{path}:{}（{kind}）—— {list}",
+            "  [definition{}] `{sig}` @{path}:{} ({kind}) — {list}",
             i + 1,
             d.start_line
         ));
         unconfirmed.extend(g.unconfirmed.iter().cloned());
     }
     let mut note = format!(
-        "索引作答（未启动语言服务器）：`{name}` 有 {} 处同名定义，path 选不出其中一处；各定义的引用互不重叠，已按定义分组（下方清单是各组合并，每处只属于一个定义，含各自的 [声明]）：\n{}\n以下是各定义所在包内及导入该包的文件中的代码出现，已排除注释和字符串。只要其中一个定义时，把 path 设为它的声明文件并传它的 line。",
+        "Index answer (language server not started): `{name}` has {} same-name definitions; path does not pick one. References per definition do not overlap and are grouped by definition (merged list below; each hit belongs to one definition, including its [declaration]):\n{}\nCode occurrences below are inside each definition's package and files that import it, comments and strings excluded. To keep one definition, set path to its declaration file and pass its line.",
         groups.len(),
         lines.join("\n")
     );
     if !unconfirmed.is_empty() {
         unconfirmed.sort();
+        let n = unconfirmed.len();
+        let (verb, noun) = if n == 1 {
+            ("has", "hit")
+        } else {
+            ("have", "hits")
+        };
         note.push_str(&format!(
-            "其中 {} 处接收者类型无法从索引判定（未核实，可能是其他类型的同名方法）：{}。",
-            unconfirmed.len(),
+            "Of these, {n} {noun} {verb} receiver type undetermined from the index (unchecked; may be same-name methods on other types): {}.",
             list_hits(&unconfirmed)
         ));
     }
@@ -2497,7 +2523,10 @@ mod tests {
             })
         );
         assert!(
-            snap.note.as_deref().unwrap().contains("坐标已校正"),
+            snap.note
+                .as_deref()
+                .unwrap()
+                .contains("Coordinates corrected"),
             "{snap:?}"
         );
         // Pointing at `Command` on the same line: symbol wins.
@@ -2569,7 +2598,7 @@ mod tests {
             },
         );
         assert_eq!(snap.position, None);
-        assert!(snap.note.unwrap().contains("按名字查询"));
+        assert!(snap.note.unwrap().contains("queried by name"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2622,7 +2651,7 @@ mod tests {
         match fix {
             PathFix::Use { path, note } => {
                 assert_eq!(path, "service/channel.go");
-                assert!(note.contains("不存在"), "{note}");
+                assert!(note.contains("does not exist"), "{note}");
             }
             other => panic!("{other:?}"),
         }
@@ -2643,10 +2672,16 @@ mod tests {
         ));
         // Ambiguous without a path: candidates listed.
         match fix_path(&ix, &dir, "Dup", None) {
-            PathFix::Ambiguous { note } => assert!(
-                note.contains("a/x.go:3") && note.contains("b/y.go:3"),
-                "{note}"
-            ),
+            PathFix::Ambiguous { note } => {
+                assert!(
+                    note.contains("a/x.go:3") && note.contains("b/y.go:3"),
+                    "{note}"
+                );
+                assert!(
+                    note.contains("pass one of them as path") || note.contains("find_symbol"),
+                    "{note}"
+                );
+            }
             other => panic!("{other:?}"),
         }
         // Unknown names: keep (the server path reports it).
@@ -2688,7 +2723,7 @@ mod tests {
             ]
         );
         assert_eq!(r.confidence, Confidence::Scoped);
-        assert!(r.note.unwrap().contains("未启动语言服务器"));
+        assert!(r.note.unwrap().contains("language server not started"));
         // Two declarations: the path picks one; a path that reaches
         // neither defers to the language server.
         let dir2 = repo(&[
@@ -2704,7 +2739,7 @@ mod tests {
         // A path that reaches neither: grouped per declaration (batch 8).
         let r = graph_references(&ix2, &dir2, "Dup", &RelPath::new("c/z.go")).expect("grouped");
         assert_eq!(hit_lines(&r), vec!["a/x.go:3", "b/y.go:3"]);
-        assert!(r.note.unwrap().contains("已按定义分组"));
+        assert!(r.note.unwrap().contains("grouped by definition"));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
     }
@@ -2859,17 +2894,26 @@ mod tests {
             ]
         );
         let note = r.note.unwrap();
-        assert!(note.contains("是 `Command` 的方法"), "{note}");
-        assert!(!note.contains("全仓唯一"), "{note}");
-        assert!(note.contains("已排除 2 处其他类型的同名方法调用"), "{note}");
+        assert!(note.contains("is a method of `Command`"), "{note}");
+        assert!(!note.contains("unique in repo"), "{note}");
+        assert!(
+            note.contains("Excluded 2 same-name method calls on other types"),
+            "{note}"
+        );
         assert!(
             note.contains("cobra.go:11") && note.contains("runner.go:9"),
             "{note}"
         );
         // `helper`'s parameter named `Execute`: a bare name, not the method.
-        assert!(note.contains("已排除 2 处同名的其他标识符"), "{note}");
+        assert!(
+            note.contains("Excluded 2 other same-name identifiers"),
+            "{note}"
+        );
         // A `range` variable is not typed: kept, flagged unconfirmed.
-        assert!(note.contains("1 处接收者类型无法从索引判定"), "{note}");
+        assert!(
+            note.contains("1 hit has receiver type undetermined from the index"),
+            "{note}"
+        );
         assert!(note.contains("command_test.go:23"), "{note}");
         // The other type's method, chosen by its file.
         let r = graph_references(&ix, &dir, "Execute", &RelPath::new("runner.go")).unwrap();
@@ -2877,7 +2921,7 @@ mod tests {
             hit_lines(&r),
             vec!["command_test.go:23", "runner.go:5", "runner.go:9"]
         );
-        assert!(r.note.unwrap().contains("是 `runner` 的方法"));
+        assert!(r.note.unwrap().contains("is a method of `runner`"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2900,11 +2944,11 @@ mod tests {
             hit_lines(&r),
             vec!["p/a.go:6", "p/a.go:8", "p/a.go:13", "p/a.go:13"]
         );
-        assert!(r.note.unwrap().contains("已按定义分组"));
+        assert!(r.note.unwrap().contains("grouped by definition"));
         // A line whose two uses resolve to different methods picks
         // neither: still the grouped answer.
         let r = graph_references_at(&ix, &dir, "Name", &origin, Some(12)).expect("line 13");
-        assert!(r.note.unwrap().contains("已按定义分组"));
+        assert!(r.note.unwrap().contains("grouped by definition"));
         let r = graph_references_at(&ix, &dir, "Name", &origin, Some(7)).expect("line 8");
         assert_eq!(hit_lines(&r), vec!["p/a.go:8", "p/a.go:13"]);
         assert_eq!(r.value[1].range.start.character, 18);
@@ -2959,19 +3003,21 @@ mod tests {
         );
         let note = r.note.clone().unwrap();
         assert!(
-            note.contains("索引作答") && note.contains("已按定义分组"),
+            note.contains("Index answer") && note.contains("grouped by definition"),
             "{note}"
         );
         assert!(
-            note.contains("[定义1]") && note.contains("`Command` 的方法"),
+            note.contains("[definition1]") && note.contains("method of `Command`"),
             "{note}"
         );
         // The function's group is listed hit by hit, the method's is "the rest".
         assert!(
-            note.contains("3 处：app/main.go:12、shell_completions.go:11、shell_completions.go:15"),
+            note.contains(
+                "3 hits: app/main.go:12, shell_completions.go:11, shell_completions.go:15"
+            ),
             "{note}"
         );
-        assert!(note.contains("其余 4 处都属于它"), "{note}");
+        assert!(note.contains("the other 4 hits belong to it"), "{note}");
         // Complete by construction: the "已全列" line applies.
         assert!(
             crate::refs_render::complete_source(r.confidence, r.note.as_deref()).is_some(),
@@ -2988,7 +3034,7 @@ mod tests {
             )
             .expect("picked");
             let note = r.note.clone().unwrap_or_default();
-            assert!(!note.contains("已按定义分组"), "{note}");
+            assert!(!note.contains("grouped by definition"), "{note}");
             hit_lines(&r)
         };
         let function = vec![
@@ -3064,7 +3110,7 @@ mod tests {
         );
         let note = r.note.unwrap();
         assert!(
-            note.contains("有 2 处同名定义") && note.contains("[定义2]"),
+            note.contains("has 2 same-name definitions") && note.contains("[definition2]"),
             "{note}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -3111,12 +3157,12 @@ mod tests {
             ]
         );
         let note = r.note.unwrap();
-        assert!(note.contains("另有 1 处同名定义"), "{note}");
+        assert!(note.contains("1 more same-name definition"), "{note}");
         assert!(
             note.contains("src/daemon/internal/signaling/wake.go:3"),
             "{note}"
         );
-        assert!(!note.contains("全仓唯一"), "{note}");
+        assert!(!note.contains("unique in repo"), "{note}");
         // A caller file: the declaration in the package it imports.
         let r = graph_references(
             &ix,
@@ -3175,8 +3221,11 @@ mod tests {
             ]
         );
         let note = r.note.unwrap();
-        assert!(note.contains("其中结构体字段 1 处"), "{note}");
-        assert!(note.contains("已排除 3 处同名的其他标识符"), "{note}");
+        assert!(note.contains("including 1 struct-field hit"), "{note}");
+        assert!(
+            note.contains("Excluded 3 other same-name identifiers"),
+            "{note}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

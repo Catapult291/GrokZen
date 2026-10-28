@@ -122,7 +122,7 @@ impl Session {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             let text = self.call_text(tool, args.clone());
-            if !text.contains("索引正在后台构建") || Instant::now() > deadline {
+            if !text.contains("Index is building in the background") || Instant::now() > deadline {
                 return text;
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -293,19 +293,19 @@ fn per_session_state_is_isolated() {
     let first = f1.call_text("search_code", query.clone());
     let again = f1.call_text("search_code", query.clone());
     assert!(
-        again.contains("同一查询已在本会话"),
+        again.contains("Same query already returned"),
         "dedup in the same session:\n{again}"
     );
     // Another session asking the same thing gets the full result.
     let other = f2.call_text("search_code", query.clone());
     assert!(
-        !other.contains("同一查询已在本会话"),
+        !other.contains("Same query already returned"),
         "dedup leaked across sessions:\n{other}"
     );
     assert_eq!(first, other, "same index, same first answer");
     // …and so does the leader's own client.
     let own = leader.call_text("search_code", query);
-    assert!(!own.contains("同一查询已在本会话"), "{own}");
+    assert!(!own.contains("Same query already returned"), "{own}");
 }
 
 #[test]

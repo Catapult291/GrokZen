@@ -257,6 +257,40 @@ pub fn resolve_index_root(requested: &Path) -> anyhow::Result<PathBuf> {
     Ok(start.canonicalize().unwrap_or(start))
 }
 
+/// Resolve a per-call MCP `index_root` argument.
+///
+/// Absolute paths are used as-is; relative paths join the process cwd at call
+/// time. The result is canonicalized and must be an existing directory. Unlike
+/// startup [`resolve_index_root`], this never walks up to `.git` /
+/// `.serena/project.yml` and never applies MultiProject / TooLarge refuses.
+pub fn resolve_call_index_root(raw: &str) -> Result<PathBuf, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("index_root is empty".to_string());
+    }
+    let requested = PathBuf::from(raw);
+    let start = if requested.is_absolute() {
+        requested
+    } else {
+        let cwd = std::env::current_dir()
+            .map_err(|e| format!("cannot resolve index_root relative to process cwd: {e}"))?;
+        cwd.join(requested)
+    };
+    let canon = std::fs::canonicalize(&start).map_err(|e| {
+        format!(
+            "index_root `{}` is not an existing path ({e})",
+            start.display()
+        )
+    })?;
+    if !canon.is_dir() {
+        return Err(format!(
+            "index_root `{}` is not a directory",
+            canon.display()
+        ));
+    }
+    Ok(canon)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -703,5 +737,25 @@ mod tests {
             other => panic!("expected Repo(ancestor), got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&ancestor);
+    }
+
+    #[test]
+    fn resolve_call_index_root_accepts_abs_and_cwd_relative() {
+        let root = unique_temp_dir();
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        let abs = resolve_call_index_root(root.to_str().unwrap()).unwrap();
+        assert_eq!(abs, root.canonicalize().unwrap());
+
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&root).unwrap();
+        let rel = resolve_call_index_root("nested").unwrap();
+        std::env::set_current_dir(&prev).unwrap();
+        assert_eq!(rel, root.join("nested").canonicalize().unwrap());
+
+        let err = resolve_call_index_root("/no/such/astrolabe/index_root_xyz").unwrap_err();
+        assert!(err.contains("not an existing path"), "{err}");
+        let empty = resolve_call_index_root("   ").unwrap_err();
+        assert!(empty.contains("empty"), "{empty}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

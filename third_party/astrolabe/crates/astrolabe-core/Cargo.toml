@@ -54,6 +54,7 @@ tree-sitter-kotlin-ng.workspace = true
 tree-sitter-bash.workspace = true
 tree-sitter-ruby.workspace = true
 tree-sitter-lua.workspace = true
+tree-sitter-proto.workspace = true
 sha2.workspace = true
 hex.workspace = true
 flate2.workspace = true

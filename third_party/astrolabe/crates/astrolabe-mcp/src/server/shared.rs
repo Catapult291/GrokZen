@@ -50,6 +50,7 @@ impl AstrolabeServer {
         view.call_seq = Arc::new(AtomicU64::new(0));
         view.shown_once = Arc::new(Mutex::new(Default::default()));
         view.coverage_note_override = Some(Arc::new(Mutex::new(None)));
+        view.recent_symbols = Arc::new(crate::recent_symbol::RecentSymbols::new());
         // A view never forwards: it *is* the leader.
         view.shared = None;
         view
@@ -79,6 +80,8 @@ impl AstrolabeServer {
             "find_references" => self.find_references(params(args)?),
             "goto_definition" => self.goto_definition(params(args)?),
             "get_diagnostics" => self.get_diagnostics(params(args)?),
+            // Call-time alias: not in tools/list (catalog stays at 7).
+            crate::compat::EXPLAIN_SYMBOL => self.explain_symbol_compat(args),
             other => {
                 return Err(ErrorData::invalid_params(
                     format!("tool not found: {other}"),
@@ -333,15 +336,15 @@ impl SessionView for View {
             Ok(Err(_panic)) => {
                 tracing::error!(tool = %name, "tool body panicked (shared session)");
                 to_json(Ok(self.0.finish(text_error(format!(
-                    "{name} 内部错误（已记录日志）。confidence: unknown"
+                    "{name} internal error (logged). confidence: unknown"
                 )))))
             }
             Err(limit) => {
                 flag.store(true, Ordering::Relaxed);
                 let secs = limit.map(|d| d.as_secs()).unwrap_or_default();
                 to_json(Ok(self.0.finish(text_error(format!(
-                    "{name} 超过 {secs} 秒未完成，已放弃等待。请缩小范围（path_filter / aggregate / count_only）后重试；\
-                     可用 ASTROLABE_TOOL_TIMEOUT_SECS 调整。confidence: unknown"
+                    "{name} did not finish within {secs}s; gave up waiting. Narrow the scope (path_filter / aggregate / count_only) and retry;\
+                     tune via ASTROLABE_TOOL_TIMEOUT_SECS. confidence: unknown"
                 )))))
             }
         }

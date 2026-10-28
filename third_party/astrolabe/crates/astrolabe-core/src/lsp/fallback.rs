@@ -128,11 +128,10 @@ pub(crate) fn syntactic_references(
         files,
     );
     let mut note = format!(
-        "{reason}. 已退回 tree-sitter 语法检索：以下是 `{name}` 在代码中（已排除注释和字符串）的同名出现，\
-         不是语言服务器的语义结果，可能包含同名但无关的符号（confidence: Syntactic）"
+        "{reason}. Fell back to tree-sitter syntactic search: same-name occurrences of `{name}` in code (comments and strings excluded);          not a language-server semantic result — may include unrelated same-name symbols (confidence: Syntactic)"
     );
     if truncated {
-        note.push_str("；检索达到文件数/时间上限，结果可能不完整");
+        note.push_str("; search hit file-count/time limits; results may be incomplete");
     }
     Precise {
         value: hits,

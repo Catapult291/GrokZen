@@ -39,6 +39,7 @@ mod decor;
 mod kotlin;
 mod lua;
 mod objc;
+mod proto;
 pub use objc::header_language as objc_header_language;
 mod diag;
 mod ruby;
@@ -55,7 +56,7 @@ pub(crate) use razor::extract_razor_csharp;
 
 const PARSE_BUDGET: Duration = Duration::from_secs(5);
 const MAX_SIGNATURE_CHARS: usize = 240;
-const LANGUAGES: [Language; 20] = [
+const LANGUAGES: [Language; 21] = [
     Language::Python,
     Language::Go,
     Language::Java,
@@ -76,6 +77,7 @@ const LANGUAGES: [Language; 20] = [
     Language::Shell,
     Language::Ruby,
     Language::Lua,
+    Language::Proto,
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -627,6 +629,7 @@ fn language_index(lang: Language) -> Option<usize> {
         Language::Shell => 17,
         Language::Ruby => 18,
         Language::Lua => 19,
+        Language::Proto => 20,
         Language::Vue => return None,
     })
 }
@@ -662,6 +665,7 @@ pub(crate) fn grammar(lang: Language) -> Option<tree_sitter::Language> {
         Language::Shell => tree_sitter_bash::LANGUAGE.into(),
         Language::Ruby => tree_sitter_ruby::LANGUAGE.into(),
         Language::Lua => tree_sitter_lua::LANGUAGE.into(),
+        Language::Proto => tree_sitter_proto::LANGUAGE.into(),
         Language::Vue => return None,
     })
 }
@@ -1322,9 +1326,12 @@ fn is_exported(lang: Language, name: &str, node: tree_sitter::Node<'_>, source: 
         Language::Shell => shell::exported(name, node, source),
         Language::Ruby => ruby::exported(name, node, source),
         Language::Lua => lua::exported(name, node, source),
-        Language::C | Language::Cpp | Language::Vue | Language::CSharp | Language::VisualBasic => {
-            true
-        }
+        Language::C
+        | Language::Cpp
+        | Language::Vue
+        | Language::CSharp
+        | Language::VisualBasic
+        | Language::Proto => true,
     }
 }
 
@@ -2636,7 +2643,8 @@ function f(opts: { inlineParam: string }) { return (opts as { castOnly: 1 }); }\
             | Language::Kotlin
             | Language::Shell
             | Language::Ruby
-            | Language::Lua => Vec::new(),
+            | Language::Lua
+            | Language::Proto => Vec::new(),
         }
     }
 

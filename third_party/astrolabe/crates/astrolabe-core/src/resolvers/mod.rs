@@ -59,6 +59,7 @@ pub mod visualbasic;
 pub mod kotlin;
 pub mod lua;
 pub mod objc;
+pub mod proto;
 pub mod ruby;
 pub mod shell;
 pub mod swift;
@@ -82,6 +83,7 @@ pub fn all() -> Vec<Box<dyn ModuleResolver>> {
         Box::new(shell::ShellResolver),
         Box::new(ruby::RubyResolver),
         Box::new(lua::LuaResolver),
+        Box::new(proto::ProtoResolver),
         Box::new(php::PhpResolver),
     ]
 }

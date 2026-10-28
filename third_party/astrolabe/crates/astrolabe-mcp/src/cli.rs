@@ -10,40 +10,40 @@ use crate::context::{resolve_context_name, ClientContext};
 pub const USAGE: &str = "\
 Astrolabe MCP server (stdio)
 
-用法: astrolabe [选项] [ROOT]
+Usage: astrolabe [options] [ROOT]
 
-ROOT 优先级：位置参数 → ASTROLABE_ROOT → .（从 cwd 探测）
-  . / 省略   向上找最近的 .git 或 .serena/project.yml
-  其它路径   只 canonicalize，不向上走
+ROOT priority: positional → ASTROLABE_ROOT → . (detect from cwd)
+  . / omitted   walk up for nearest .git or .serena/project.yml
+  other path    canonicalize only; do not walk up
 
-选项:
-  --context NAME   客户端上下文（default, claude-code, cursor, codex, readonly）
-                   或指向自定义 .yml 的路径
-                   也可用 ASTROLABE_CONTEXT；CLI 优先
-  -V, --version    显示版本号
-  -h, --help       显示本说明
+Options:
+  --context NAME   client context (default, claude-code, cursor, codex, readonly)
+                   or a path to a custom .yml
+                   also ASTROLABE_CONTEXT; CLI wins
+  -V, --version    print version
+  -h, --help       print this help
 
-子命令（Serena 式防漂移 hooks 与提示词输出）:
-  hooks remind --client=NAME   PreToolUse hook：stdin 读 hook payload，计数连续
-                               grep/read 滥用，超阈值输出 deny 决策 JSON。
+Subcommands (Serena-style anti-drift hooks and prompt output):
+  hooks remind --client=NAME   PreToolUse hook: read hook payload from stdin; count consecutive
+                               grep/read abuse; over threshold emit deny decision JSON.
                                client: claude-code/codebuddy/vscode/codex/grok/
                                        kimicode/zcode/cursor/opencode
-                               （grokbuild/grok-build 亦映射为 grok；
-                                kimi-code/kimi_code/kimi→kimicode，z-code/zai→zcode，
-                                cursor-agent/cursor_agent/cursor-cli→cursor）
-                               可选：--deny-text-search[=true|false]
-                                     硬禁用 Grep/Glob/shell 文本搜索（首次即 deny）
-                               可选：--context=NAME  加载上下文 YAML 的 deny_text_search
-                               优先级：CLI > ASTROLABE_DENY_TEXT_SEARCH >
-                                       context YAML > 默认 off
-  hooks cleanup                SessionEnd hook：按 stdin session_id 清理状态目录
-  hooks gc                     清理超过 24h（ASTROLABE_HOOK_GC_HOURS 可调）未活动的
-                               会话状态目录；remind 也会每小时机会式执行一次
-                               （适用于 ZCode 等无 SessionEnd 事件的宿主）
+                               (grokbuild/grok-build also maps to grok;
+                                kimi-code/kimi_code/kimi→kimicode, z-code/zai→zcode, 
+                                cursor-agent/cursor_agent/cursor-cli→cursor)
+                               optional: --deny-text-search[=true|false]
+                                     hard-deny Grep/Glob/shell text search (deny on first use)
+                               optional: --context=NAME  load deny_text_search from context YAML
+                               priority: CLI > ASTROLABE_DENY_TEXT_SEARCH >
+                                       context YAML > default off
+  hooks cleanup                SessionEnd hook: clear state dir by stdin session_id
+  hooks gc                     remove session state dirs idle longer than 24h (ASTROLABE_HOOK_GC_HOURS tunable);
+                               remind also opportunistically runs once per hour
+                               (for hosts like ZCode without SessionEnd events)
   print-cc-system-prompt-override
-                               输出 Claude Code --system-prompt 整体替换文本
-  setup                        探测本机 AI 客户端并写入 MCP 配置（实现在 npm 包；
-                               cargo 安装请运行: npx -y @zlnap/astrolabe setup）
+                               emit Claude Code --system-prompt full replacement text
+  setup                        detect local AI clients and write MCP config (implemented in the npm package;
+                               for cargo installs run: npx -y @zlnap/astrolabe setup)
 ";
 
 #[derive(Debug)]
@@ -52,7 +52,7 @@ pub enum Launch {
     Version,
     HooksRemind {
         client: String,
-        /// CLI `--deny-text-search` / `--deny-text-search=true|false`；None = 未指定
+        /// CLI `--deny-text-search` / `--deny-text-search=true|false`; None = unset
         deny_text_search: Option<bool>,
         /// Optional `--context=NAME` for YAML `deny_text_search`
         context: Option<String>,

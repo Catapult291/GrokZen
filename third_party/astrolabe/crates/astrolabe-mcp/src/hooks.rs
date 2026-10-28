@@ -212,7 +212,8 @@ pub(crate) fn config() -> &'static HooksConfig {
     CONFIG.get_or_init(HooksConfig::from_env)
 }
 
-/// 非符号工具子串：Astrolabe 工具名包含这些子串时不重置 burst 计数
+/// 非符号工具子串：仍用于分类（AstrolabeNonSymbolic vs Symbolic），
+/// 但两类工具在 decide 中都会 `reset_burst`（含 grep/read/non_symbolic/slice）。
 pub(crate) const NON_SYMBOLIC_ASTROLABE_SUBSTRINGS: &[&str] =
     &["search_code", "diagnostics", "languages"];
 
@@ -297,6 +298,7 @@ pub(crate) const SUPPORTED_CODE_EXTENSIONS: &[&str] = &[
     "rake",
     "gemspec",
     "lua",
+    "proto",
 ];
 
 /// 触发 hook 的客户端类型
@@ -378,8 +380,9 @@ impl CounterState {
 pub(crate) enum ToolKind {
     /// Astrolabe 符号工具（find_symbol, find_references 等，重置计数）
     AstrolabeSymbolic,
-    /// Astrolabe 非符号工具（search_code / diagnostics / instructions 等）：
-    /// 只清零切片读额度，不清零 grep/read/non_symbolic 计数
+    /// Astrolabe 非符号工具（search_code / diagnostics / languages 等）：
+    /// 与符号工具一样清零全部 burst 计数（grep/read/non_symbolic/slice），
+    /// 并结束静默窗（清 last_deny_ts），避免跟 deny 文案走仍 sticky deny。
     AstrolabeNonSymbolic,
     /// grep 类工具（含 shell 文本搜索）
     Grep,
@@ -415,7 +418,7 @@ pub(crate) enum Decision {
     Silenced,
     /// 符号工具，计数清零并保存，无输出
     ResetSymbolic,
-    /// 非符号 astrolabe 工具，切片读额度清零并保存，无输出
+    /// 任意 astrolabe 工具（含非符号）全量清零 burst + 结束静默窗，无输出
     ResetSlice,
     /// 中立工具，直接放行不写盘
     NeutralAllow,
@@ -656,19 +659,24 @@ const ASTROLABE_CATALOG_TOOLS: &[&str] = &[
     "get_languages",
 ];
 
-/// 工具名是否属于 Astrolabe：含 "astrolabe" 且含固定目录里的某个工具名。
+/// 工具名是否属于 Astrolabe：含 "astrolabe" 且含固定目录或兼容别名里的某个工具名。
 /// 第三方 `mcp__astrolabe_docs__fetch` 之类仅名字撞上的工具不算。
 pub(crate) fn is_astrolabe_tool(tool_name: &str) -> bool {
-    tool_name.contains("astrolabe")
-        && ASTROLABE_CATALOG_TOOLS
+    if !tool_name.contains("astrolabe") {
+        return false;
+    }
+    ASTROLABE_CATALOG_TOOLS
+        .iter()
+        .any(|t| tool_name.contains(t))
+        || crate::compat::COMPAT_TOOL_NAMES
             .iter()
             .any(|t| tool_name.contains(t))
 }
 
-/// 判定工具名是否为 Astrolabe 符号工具
+/// 判定工具名是否为 Astrolabe 符号（导航）工具。
 ///
-/// tool_name 含 "astrolabe" 且不含子串
-/// {pattern, search_code, diagnostics, languages, instructions}
+/// 分类用：含 "astrolabe" 且不含 NON_SYMBOLIC 子串。decide 中符号与非符号
+/// 都会全量 reset_burst；此函数仅用于分类与观测。
 pub(crate) fn is_astrolabe_symbolic_tool(tool_name: &str) -> bool {
     is_astrolabe_tool(tool_name)
         && !NON_SYMBOLIC_ASTROLABE_SUBSTRINGS
@@ -722,9 +730,9 @@ fn is_sed_in_place(args_str: &str) -> bool {
     })
 }
 
-/// 从 JSON 值提取非空 id 字符串（String trim 非空或 Number→字符串）。
-/// 用于 session/conversation/agent 标识的跨键 fallback 解析：按"第一个合法值"而非
-/// "第一个存在的键"取值，null/空白占位键会被跳过继续找后续键。
+/// 从 JSON 值提取非空 id 字符串(String trim 非空或 Number→字符串).
+/// 用于 session/conversation/agent 标识的跨键 fallback 解析:按"第一个合法值"而非
+/// "第一个存在的键"取值，null/空白占位键会被跳过继续找后续键.
 fn json_nonempty_id(v: Option<&serde_json::Value>) -> Option<String> {
     match v? {
         serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
@@ -733,7 +741,7 @@ fn json_nonempty_id(v: Option<&serde_json::Value>) -> Option<String> {
     }
 }
 
-/// 从 tool_input JSON 字段提取 u64（接受 Number 或可解析为数字的 String）
+/// 从 tool_input JSON 字段提取 u64(接受 Number 或可解析为数字的 String)
 fn json_value_as_u64(v: &serde_json::Value) -> Option<u64> {
     match v {
         serde_json::Value::Number(n) => n.as_u64(),
@@ -742,8 +750,8 @@ fn json_value_as_u64(v: &serde_json::Value) -> Option<u64> {
     }
 }
 
-/// 解析纯数字字符串为 u64（拒绝 `+N`/`-N`/混入其它字符的形式：
-/// 如 tail -n +5 表示从第 5 行打印到 EOF，不是有界切片）
+/// 解析纯数字字符串为 u64(拒绝 `+N`/`-N`/混入其它字符的形式:
+/// 如 tail -n +5 表示从第 5 行打印到 EOF，不是有界切片)
 fn parse_digits(s: &str) -> Option<u64> {
     if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
         s.parse::<u64>().ok()
@@ -752,8 +760,8 @@ fn parse_digits(s: &str) -> Option<u64> {
     }
 }
 
-/// 解析 head/tail 参数中的行数：-n N、-nN、--lines=N（只接受有界行数，
-/// 不接受 tail 的 `+N` 起始行形式——那会打印到 EOF，不是有界切片）
+/// 解析 head/tail 参数中的行数:-n N, -nN, --lines=N(只接受有界行数，
+/// 不接受 tail 的 `+N` 起始行形式——那会打印到 EOF，不是有界切片)
 fn parse_head_tail_line_count(args_str: &str) -> Option<u64> {
     let tokens: Vec<&str> = args_str.split_whitespace().collect();
     for (i, raw) in tokens.iter().enumerate() {
@@ -778,11 +786,11 @@ fn parse_head_tail_line_count(args_str: &str) -> Option<u64> {
     None
 }
 
-/// 判定单个 sed 脚本 token 是否为"纯数字地址 + p 打印"命令（如 300,340p / 50p / 50p;80p）
+/// 判定单个 sed 脚本 token 是否为"纯数字地址 + p 打印"命令(如 300,340p / 50p / 50p;80p)
 ///
-/// 检查 sed 脚本是否为受限的切片打印 token（如 `'300,340p'`、`'50p'` 或 `'50p;80p'`）。
-/// 仅放行纯数字单行或跨度 <= slice_read_max_limit（默认 200）的明确行号区间；
-/// 拒绝 `$p`、`/re/p`、`1,$p` 以及超限大范围倾倒。
+/// 检查 sed 脚本是否为受限的切片打印 token(如 `'300,340p'`, `'50p'` 或 `'50p;80p'`).
+/// 仅放行纯数字单行或跨度 <= slice_read_max_limit(默认 200)的明确行号区间；
+/// 拒绝 `$p`, `/re/p`, `1,$p` 以及超限大范围倾倒.
 fn is_sed_print_script_token(cleaned: &str) -> bool {
     let mut total: u64 = 0;
     for part in cleaned.split(';') {
@@ -795,17 +803,17 @@ fn is_sed_print_script_token(cleaned: &str) -> bool {
     total <= config().slice_read_max_limit
 }
 
-/// 单段 `Np` / `A,Bp` 的行数；非纯数字打印返回 None；区间超上限返回 None。
+/// 单段 `Np` / `A,Bp` 的行数；非纯数字打印返回 None；区间超上限返回 None.
 fn sed_print_part_lines(s_raw: &str) -> Option<u64> {
     let s = s_raw.strip_suffix('p')?;
     if s.is_empty() {
         return None;
     }
-    // 单行形式：如 "50p"
+    // 单行形式:如 "50p"
     if parse_digits(s).is_some() {
         return Some(1);
     }
-    // 区间形式：如 "300,340p"
+    // 区间形式:如 "300,340p"
     if let Some((start_str, end_str)) = s.split_once(',') {
         if let (Some(start), Some(end)) = (parse_digits(start_str), parse_digits(end_str)) {
             if end >= start && (end - start + 1) <= config().slice_read_max_limit {
@@ -816,7 +824,7 @@ fn sed_print_part_lines(s_raw: &str) -> Option<u64> {
     None
 }
 
-/// 是否为 sed 的静默 flag：`-n`、`--quiet`、`--silent`，或合并短 flag（如 `-ne`、`-nE`）。
+/// 是否为 sed 的静默 flag:`-n`, `--quiet`, `--silent`，或合并短 flag(如 `-ne`, `-nE`).
 fn is_sed_quiet_flag(cleaned: &str) -> bool {
     if cleaned == "--quiet" || cleaned == "--silent" {
         return true;
@@ -829,8 +837,8 @@ fn is_sed_quiet_flag(cleaned: &str) -> bool {
         && !cleaned[1..].contains('i')
 }
 
-/// 判定 sed 参数是否为切片打印：带 -n（--quiet/--silent）静默且脚本含 p 打印命令，
-/// 且不含 -i 原地写（如 `sed -n '300,340p' src/a.rs`）
+/// 判定 sed 参数是否为切片打印:带 -n(--quiet/--silent)静默且脚本含 p 打印命令，
+/// 且不含 -i 原地写(如 `sed -n '300,340p' src/a.rs`)
 fn is_sed_slice_print(args_str: &str) -> bool {
     if args_str.trim().is_empty() || is_sed_in_place(args_str) {
         return false;
@@ -1269,10 +1277,20 @@ pub(crate) fn effective_shell_command(cmd: &str) -> Option<(String, Option<Strin
 
 /// 硬模式文本搜索检测：只看各"命令位置"的命令名（含 `bash -c`、`sudo`、`.exe`、`git grep`），
 /// 不对整串做子串匹配，因此 `echo grep is great` / `git commit -m "fix grep bug"` 不误伤，
-/// 路径 `src/grep_utils.rs` 也不会命中。
+/// 路径 `src/grep_utils.rs` 也不会命中。含管道后的 grep（`go test | grep FAIL`）。
 pub(crate) fn command_contains_text_search(cmd: &str) -> bool {
     shell_invocations(cmd)
         .iter()
+        .any(|i| is_text_search_command(&i.command) || is_git_grep(i))
+}
+
+/// Soft-mode / primary code-search detection：与 [`command_contains_text_search`] 同口径，
+/// 但**忽略管道后段**。`rg foo src` / `cd x && grep -rn pat .` / `git grep foo` → true；
+/// `go test | grep FAIL` / `cargo test 2>&1 | rg error` → false（管道过滤合法，不拦）。
+pub(crate) fn command_contains_primary_text_search(cmd: &str) -> bool {
+    shell_invocations(cmd)
+        .iter()
+        .filter(|i| !i.after_pipe)
         .any(|i| is_text_search_command(&i.command) || is_git_grep(i))
 }
 
@@ -1327,8 +1345,8 @@ pub(crate) fn classify_tool_ex(
         return ToolKind::AstrolabeSymbolic;
     }
 
-    // 1.5 非符号 astrolabe 工具（search_code / diagnostics / instructions 等）：
-    // 只清零切片读额度（decide 中处理），不清零 grep/read/non_symbolic 计数
+    // 1.5 非符号 astrolabe 工具（search_code / diagnostics / languages 等）：
+    // decide 中与符号工具一样 reset_burst（含 grep/read）；分类保留便于观测。
     if is_astrolabe_tool(tool_name) {
         return ToolKind::AstrolabeNonSymbolic;
     }
@@ -1348,6 +1366,18 @@ pub(crate) fn classify_tool_ex(
                 None => cmd.to_string(),
             };
             if command_contains_text_search(&reconstructed) {
+                return ToolKind::Grep;
+            }
+        }
+    }
+
+    // 1.8 Soft primary code-search: non-piped `rg`/`grep -rn`/`git grep` (and wrappers
+    // like `cd x && rg …`) count as Grep so Bash cannot bypass the host Grep deny.
+    // Pipe-only greps stay Neutral here (`go test | grep FAIL`); hard mode still
+    // catches them via 1.7 when ASTROLABE_DENY_TEXT_SEARCH is on.
+    if !deny_text_search {
+        if let Some(cmd) = full_command {
+            if command_contains_primary_text_search(cmd) {
                 return ToolKind::Grep;
             }
         }
@@ -1485,23 +1515,25 @@ pub(crate) fn decide_with(
         }
     }
 
-    // 1. 静默窗内 → no-op（allow，无输出更新）
+    // 1. 任意 Astrolabe MCP 工具（符号 + 非符号）→ 全量清零 burst，并结束静默窗。
+    //    必须排在静默窗判定之前：否则 deny 后跟文案调用 search_code/find_symbol
+    //    会落在 Silenced 分支，计数/sticky deny 状态得不到恢复。
+    //    PreToolUse 时尚未知工具成败；与既有符号路径一致，以「即将调用」为准。
+    if matches!(
+        tool_kind,
+        ToolKind::AstrolabeSymbolic | ToolKind::AstrolabeNonSymbolic
+    ) {
+        counter.reset_burst();
+        counter.last_deny_ts = None;
+        return match tool_kind {
+            ToolKind::AstrolabeSymbolic => Decision::ResetSymbolic,
+            _ => Decision::ResetSlice,
+        };
+    }
+
+    // 2. 静默窗内 → no-op（allow，无输出更新）；Astrolabe 已在上面处理
     if !counter.is_hook_active(now) {
         return Decision::Silenced;
-    }
-
-    // 2. astrolabe 符号工具 → 重置 burst 计数（含切片额度），保留 last_deny_ts
-    if tool_kind == ToolKind::AstrolabeSymbolic {
-        counter.reset_burst();
-        return Decision::ResetSymbolic;
-    }
-
-    // 2.5 非符号 astrolabe 工具 → 只清零切片读额度；
-    // 不清零 n_grep/n_read/n_non_symbolic（维持既有符号重置语义不变）
-    if tool_kind == ToolKind::AstrolabeNonSymbolic {
-        counter.n_slice = 0;
-        counter.last_slice_ts = None;
-        return Decision::ResetSlice;
     }
 
     // 2.7 切片读（Read 带 limit<=max）→ 连续额度制：
@@ -1625,40 +1657,42 @@ pub(crate) fn build_output(client: Client, deny_kind: DenyKind) -> String {
     let slice_threshold = config().slice_read_threshold;
     let readonly_note = format!(" Note: all Astrolabe tools are read-only and safe for exploration tasks. Also note: slice reads with limit <= {max_limit} are still permitted, but {slice_threshold} consecutive ones without any Astrolabe tool call trigger a reminder (tunable via ASTROLABE_SLICE_READ_THRESHOLD).");
     let unindexed_lang_note = " If your target files are in a language Astrolabe does not index (see the get_languages tool), grep is the correct tool for them — ignore this reminder.";
+    // Prefer symbolic tools: they reset n_grep/n_read/n_non_symbolic. search_code only
+    // clears n_slice — following a search_code-only hint can still hit Read/Grep deny.
     let switch_instruction =
-        "Stop using grep/read for code discovery. Call mcp__astrolabe__search_code or mcp__astrolabe__find_symbol now (read-only, safe).";
+        "Stop using Grep/grep/rg/read for code discovery. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context first (they reset grep/read burst counters); mcp__astrolabe__search_code is for literal/regex text search but only clears the slice-read counter, not n_grep/n_read. Call a symbolic Astrolabe tool now (read-only, safe).";
     let (reason, ctx) = match deny_kind {
         DenyKind::Grep => (
-            "Too many consecutive grep calls without using symbolic tools. Stop using grep for code discovery. Call mcp__astrolabe__search_code or mcp__astrolabe__find_symbol now (read-only, safe).",
+            "Too many consecutive grep/rg calls without using symbolic tools. Stop using Grep/grep/rg (including Bash rg/grep -rn) for code discovery. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context first (full burst reset); mcp__astrolabe__search_code only clears the slice-read counter. Call a symbolic Astrolabe tool now (read-only, safe).",
             format!(
-                "You were using many grep calls recently. Use Astrolabe's symbolic mcp tools instead for more code-centric search (search_code / find_references are read-only and return path:line anchors). {switch_instruction}{unindexed_lang_note}"
+                "You were using many Grep/grep/rg calls recently (host Grep or Bash text-search). Prefer Astrolabe symbolic tools: find_symbol / resolve_context reset the grep/read burst counters; find_references returns path:line anchors. search_code is fine for literal/regex but only clears the slice-read counter — it will not clear n_grep/n_read, so you may still hit Read deny afterward. {switch_instruction}{unindexed_lang_note}"
             ),
         ),
         DenyKind::TextSearch => (
-            "Text search with Grep/grep/rg/ag/ack/git grep is disabled (ASTROLABE_DENY_TEXT_SEARCH). Use Astrolabe MCP tools instead: search_code, find_symbol, find_references, goto_definition. Reading known files with Read/cat, ls, and build/test commands are still allowed.",
+            "Text search with Grep/grep/rg/ag/ack/git grep is disabled (ASTROLABE_DENY_TEXT_SEARCH). Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context first (full burst reset); mcp__astrolabe__search_code for literal/regex (slice counter only); also find_references / goto_definition. Reading known files with Read/cat, ls, and build/test commands are still allowed.",
             format!(
-                "Host text-search tools (Grep, grep, rg, ag, ack, git grep, zgrep) are hard-disabled for this Astrolabe process. Call mcp__astrolabe__search_code (literal/regex, enclosing bodies), mcp__astrolabe__find_symbol, mcp__astrolabe__find_references, or mcp__astrolabe__goto_definition now (read-only, safe).{unindexed_lang_note}"
+                "Host text-search tools (Grep, grep, rg, ag, ack, git grep, zgrep) are hard-disabled for this Astrolabe process. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context first (they reset burst counters); use mcp__astrolabe__search_code for literal/regex enclosing bodies (clears slice-read counter only); also find_references / goto_definition (read-only, safe).{unindexed_lang_note}"
             ),
         ),
         DenyKind::Glob => (
-            "Glob / file_search is disabled (ASTROLABE_DENY_TEXT_SEARCH). Use Astrolabe MCP tools instead: search_code, find_symbol, find_references, goto_definition.",
-            "Host Glob / file_search is hard-disabled for this Astrolabe process. Prefer mcp__astrolabe__search_code or mcp__astrolabe__find_symbol to locate symbols and paths (read-only, safe).".to_string(),
+            "Glob / file_search is disabled (ASTROLABE_DENY_TEXT_SEARCH). Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context first; also search_code / find_references / goto_definition.",
+            "Host Glob / file_search is hard-disabled for this Astrolabe process. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context to locate symbols and paths (full burst reset); mcp__astrolabe__search_code is an alternative for text/path discovery (slice counter only).".to_string(),
         ),
         DenyKind::Read => (
-            "Too many consecutive read calls of files without using symbolic tools. Stop using read for code discovery. Call mcp__astrolabe__search_code or mcp__astrolabe__find_symbol now (read-only, safe).",
+            "Too many consecutive read calls of files without using symbolic tools. Stop using read for code discovery. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context first (full burst reset); mcp__astrolabe__search_code only clears the slice-read counter. Call a symbolic Astrolabe tool now (read-only, safe).",
             format!(
-                "You were using many read calls on files recently. Use Astrolabe's symbolic mcp tools instead for more targeted reads (read-only exploration included: find_symbol / search_code return exact bodies and path:line anchors without whole-file reads). {switch_instruction}"
+                "You were using many read calls on files recently. Prefer Astrolabe symbolic tools for targeted reads: find_symbol / resolve_context return exact bodies and path:line anchors and reset grep/read burst counters; search_code helps locate text but only clears the slice-read counter. {switch_instruction}"
             ),
         ),
         DenyKind::Mixed => (
-            "Too many consecutive non-symbolic tool calls (mixed grep and read). Stop using grep/read for code discovery. Call mcp__astrolabe__search_code or mcp__astrolabe__find_symbol now (read-only, safe).",
+            "Too many consecutive non-symbolic tool calls (mixed grep and read). Stop using Grep/grep/rg/read for code discovery. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context first (full burst reset); mcp__astrolabe__search_code only clears the slice-read counter. Call a symbolic Astrolabe tool now (read-only, safe).",
             format!(
-                "You were alternating between grep and read file calls recently without using Astrolabe's symbolic mcp tools. Use symbolic search and targeted symbol reads instead for more code-centric exploration. {switch_instruction}{unindexed_lang_note}"
+                "You were alternating between grep/rg and read file calls recently without using Astrolabe's symbolic mcp tools. Prefer find_symbol / resolve_context (reset burst counters); search_code is for literal/regex and only clears the slice-read counter. {switch_instruction}{unindexed_lang_note}"
             ),
         ),
         DenyKind::Slice => (
-            "Too many consecutive file-slice reads without using any Astrolabe tool. Call search_code or find_symbol now — they are read-only and return exact bodies with path:line anchors.",
-            "You were using many slice reads (small limit-bounded Read calls) recently without calling any Astrolabe tool. Slice reads are still permitted for precision work, but locate the region first: mcp__astrolabe__search_code or mcp__astrolabe__find_symbol are read-only and return exact bodies with path:line anchors, usually cheaper than repeated slice reads. Call them now (read-only, safe).".to_string(),
+            "Too many consecutive file-slice reads without using any Astrolabe tool. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context first; mcp__astrolabe__search_code also clears the slice-read counter — they are read-only and return exact bodies with path:line anchors.",
+            "You were using many slice reads (small limit-bounded Read calls) recently without calling any Astrolabe tool. Slice reads are still permitted for precision work, but locate the region first: prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context; mcp__astrolabe__search_code also clears this slice-read counter (unlike grep/read counters). Call an Astrolabe tool now (read-only, safe).".to_string(),
         ),
     };
     let ctx = format!("{ctx}{readonly_note}");
@@ -1797,7 +1831,7 @@ pub(crate) fn gc_stale_sessions(
             match std::fs::remove_dir_all(&path) {
                 Ok(()) => removed += 1,
                 Err(err) => {
-                    tracing::debug!(path = %path.display(), error = %err, "hook GC 删除失败")
+                    tracing::debug!(path = %path.display(), error = %err, "hook GC delete failed")
                 }
             }
         }
@@ -1829,7 +1863,7 @@ fn maybe_gc_opportunistic(home: &Path, now: std::time::SystemTime, keep: &str, m
     let _ = std::fs::write(&stamp, b"");
     let max_age = std::time::Duration::from_secs(max_age_hours.saturating_mul(3600));
     match gc_stale_sessions(home, now, max_age, Some(keep)) {
-        Ok(n) if n > 0 => tracing::debug!(removed = n, "hook GC 清理过期会话"),
+        Ok(n) if n > 0 => tracing::debug!(removed = n, "hook GC cleaned expired sessions"),
         _ => {}
     }
 }
@@ -2051,7 +2085,7 @@ pub(crate) fn run_remind_impl_with<R: Read, W: Write, E: Write>(
         ?agent_id,
         tool_name = %tool_name,
         ?tool_kind,
-        "处理 PreToolUse hook 调用"
+        "handling PreToolUse hook call"
     );
 
     let now_ts = now.unwrap_or_else(current_timestamp);
@@ -2110,7 +2144,7 @@ pub(crate) fn run_remind_impl_with<R: Read, W: Write, E: Write>(
             0
         }
         Decision::ResetSlice => {
-            // 非符号 astrolabe 工具：已清零切片读额度并保存，无输出
+            // 非符号 astrolabe 工具：已全量清零 burst（含 grep/read）并结束静默窗
             0
         }
         Decision::Allow => {
@@ -2120,7 +2154,7 @@ pub(crate) fn run_remind_impl_with<R: Read, W: Write, E: Write>(
         Decision::Deny(deny_kind) => {
             // 超阈值触发 deny：已清零并保存，输出 JSON
             let output_str = build_output(client, deny_kind);
-            tracing::info!(?deny_kind, client = %client_name, "触发防漂移 deny 提示");
+            tracing::info!(?deny_kind, client = %client_name, "emitting anti-drift deny hint");
             let _ = writeln!(stdout, "{output_str}");
             0
         }
@@ -2187,7 +2221,7 @@ pub(crate) fn run_cleanup_impl<R: Read, E: Write>(
     if let Some(h) = home {
         match cleanup_session(&h, &session_id) {
             Ok(()) => {
-                tracing::debug!(session_id = %session_id, "SessionEnd cleanup 成功");
+                tracing::debug!(session_id = %session_id, "SessionEnd cleanup succeeded");
                 0
             }
             Err(err) => {
@@ -2324,15 +2358,14 @@ mod tests {
     }
 
     #[test]
-    fn test_3_search_code_does_not_reset_counter() {
-        // search_code / diagnostics 等非导航类工具不应重置符号计数
+    fn test_3_search_code_resets_burst_counters() {
+        // 分类仍区分非符号 vs 符号（观测/文案用），但 decide 一律 reset_burst
         assert!(!is_astrolabe_symbolic_tool("mcp__astrolabe__search_code"));
         assert!(!is_astrolabe_symbolic_tool(
             "mcp__astrolabe__get_diagnostics"
         ));
         assert!(!is_astrolabe_symbolic_tool("mcp__astrolabe__get_languages"));
 
-        // 导航类工具正常重置
         assert!(is_astrolabe_symbolic_tool("mcp__astrolabe__find_symbol"));
         assert!(is_astrolabe_symbolic_tool(
             "mcp__astrolabe__find_references"
@@ -2357,19 +2390,66 @@ mod tests {
 
         let mut counter = CounterState {
             n_grep: 2,
+            n_read: 1,
+            n_non_symbolic: 3,
             n_slice: 5,
             last_grep_ts: Some(100.0),
+            last_read_ts: Some(100.2),
+            last_non_symbolic_ts: Some(100.3),
             last_slice_ts: Some(100.5),
-            ..CounterState::default()
+            last_deny_ts: Some(90.0),
         };
 
-        // 调用 search_code：grep 计数不重置（维持既有符号重置语义），
-        // 但切片读额度清零（任何 astrolabe 工具调用都清零切片额度）
+        // search_code：全量清零 burst（含 grep/read/non_symbolic/slice）并结束静默窗
         let d = decide(&mut counter, kind, 101.0);
         assert_eq!(d, Decision::ResetSlice);
-        assert_eq!(counter.n_grep, 2);
+        assert_eq!(counter.n_grep, 0);
+        assert_eq!(counter.n_read, 0);
+        assert_eq!(counter.n_non_symbolic, 0);
         assert_eq!(counter.n_slice, 0);
+        assert_eq!(counter.last_grep_ts, None);
         assert_eq!(counter.last_slice_ts, None);
+        assert_eq!(counter.last_deny_ts, None);
+    }
+
+    #[test]
+    fn test_3b_astrolabe_resets_even_inside_silence_window() {
+        // 回归：静默窗内调用 Astrolabe 必须恢复，不能落 Silenced 留下 sticky 计数
+        let mut counter = CounterState {
+            n_grep: 2,
+            n_read: 2,
+            n_non_symbolic: 3,
+            n_slice: 4,
+            last_grep_ts: Some(1000.0),
+            last_deny_ts: Some(1000.0), // 静默至 1015
+            ..CounterState::default()
+        };
+        let d = decide(
+            &mut counter,
+            ToolKind::AstrolabeNonSymbolic,
+            1005.0, // 仍在 15s 静默窗内
+        );
+        assert_eq!(d, Decision::ResetSlice);
+        assert_eq!(counter.n_grep, 0);
+        assert_eq!(counter.n_read, 0);
+        assert_eq!(counter.n_non_symbolic, 0);
+        assert_eq!(counter.n_slice, 0);
+        assert_eq!(counter.last_deny_ts, None);
+
+        // 恢复后立刻 grep 应从 0 累加，不再 sticky deny
+        let d2 = decide(&mut counter, ToolKind::Grep, 1005.5);
+        assert_eq!(d2, Decision::Allow);
+        assert_eq!(counter.n_grep, 1);
+
+        let mut counter2 = CounterState {
+            n_grep: 2,
+            last_deny_ts: Some(2000.0),
+            ..CounterState::default()
+        };
+        let d3 = decide(&mut counter2, ToolKind::AstrolabeSymbolic, 2005.0);
+        assert_eq!(d3, Decision::ResetSymbolic);
+        assert_eq!(counter2.n_grep, 0);
+        assert_eq!(counter2.last_deny_ts, None);
     }
 
     #[test]
@@ -2828,7 +2908,7 @@ mod tests {
         assert_eq!(c3, 0);
         let out_str = String::from_utf8_lossy(&out);
         assert!(out_str.contains("\"permissionDecision\":\"deny\""));
-        assert!(out_str.contains("Too many consecutive grep calls"));
+        assert!(out_str.contains("Too many consecutive grep/rg calls"));
 
         let _ = std::fs::remove_dir_all(&temp_home);
     }
@@ -2892,7 +2972,7 @@ mod tests {
         assert_eq!(c3, 0);
         let out_str = String::from_utf8_lossy(&out);
         assert!(out_str.contains("\"permissionDecision\":\"deny\""));
-        assert!(out_str.contains("Too many consecutive grep calls"));
+        assert!(out_str.contains("Too many consecutive grep/rg calls"));
 
         let _ = std::fs::remove_dir_all(&temp_home);
     }
@@ -2930,7 +3010,11 @@ mod tests {
                 Some(&temp_home),
             );
             assert_eq!(code, 0);
-            assert!(out.is_empty(), "第 {} 次调用不应产生 deny 输出", i + 1);
+            assert!(
+                out.is_empty(),
+                "call #{} should not produce deny output",
+                i + 1
+            );
         }
 
         let _ = std::fs::remove_dir_all(&temp_home);
@@ -3007,7 +3091,10 @@ mod tests {
                 Some(&temp_home),
             );
             assert_eq!(code, 0);
-            assert!(out.is_empty(), "README.md 读取不应触发 read deny");
+            assert!(
+                out.is_empty(),
+                "README.md read should not trigger read deny"
+            );
         }
 
         let _ = std::fs::remove_dir_all(&temp_home);
@@ -3182,7 +3269,7 @@ mod tests {
             assert_eq!(code, 0);
             assert!(
                 out.is_empty(),
-                "第 {} 次 heredoc 写操作不应产生 deny 输出",
+                "heredoc write #{} should not produce deny output",
                 i + 1
             );
         }
@@ -3225,7 +3312,7 @@ mod tests {
             assert_eq!(code, 0);
             assert!(
                 out.is_empty(),
-                "第 {} 次 echo 追加操作不应产生 deny 输出",
+                "echo append #{} should not produce deny output",
                 i + 1
             );
         }
@@ -3318,7 +3405,7 @@ mod tests {
                 Some(&temp_home),
             );
             assert_eq!(code, 0);
-            assert!(out.is_empty(), "sed -i 不应计为 read");
+            assert!(out.is_empty(), "sed -i should not count as read");
         }
 
         // sed 变体：-i''、-i.bak、--in-place 均不触发 deny
@@ -3347,7 +3434,10 @@ mod tests {
                 Some(&temp_home),
             );
             assert_eq!(code, 0);
-            assert!(out.is_empty(), "sed 原地变体不应计为 read: {cmd}");
+            assert!(
+                out.is_empty(),
+                "sed in-place variant should not count as read: {cmd}"
+            );
         }
 
         // Case 2: sed 's/a/b/' src/a.rs（无 -i，stdout 读）连续 3 次 -> 触发 read deny
@@ -3439,7 +3529,7 @@ mod tests {
         assert_eq!(code3, 0);
         let out_str = String::from_utf8_lossy(&out);
         assert!(out_str.contains("\"permissionDecision\":\"deny\""));
-        assert!(out_str.contains("Too many consecutive grep calls"));
+        assert!(out_str.contains("Too many consecutive grep/rg calls"));
 
         let _ = std::fs::remove_dir_all(&temp_home);
     }
@@ -3478,7 +3568,7 @@ mod tests {
                     Some(300)
                 ),
                 ToolKind::Neutral,
-                "非代码文件切片应保持中立: {non_code}"
+                "non-code file slice should stay Neutral: {non_code}"
             );
         }
 
@@ -3510,7 +3600,7 @@ mod tests {
             assert_eq!(code, 0);
             assert!(
                 out.is_empty(),
-                "第 {} 次切片 Read 不应产生 deny 输出",
+                "slice Read #{} should not produce deny output",
                 i + 1
             );
         }
@@ -3579,8 +3669,12 @@ mod tests {
                 Some(now),
                 Some(&temp_home),
             );
-            assert_eq!(code, 0, "第 {} 次切片读应正常放行", i + 1);
-            assert!(out.is_empty(), "第 {} 次切片读不应有输出", i + 1);
+            assert_eq!(code, 0, "slice read #{} should be allowed", i + 1);
+            assert!(
+                out.is_empty(),
+                "slice read #{} should have no output",
+                i + 1
+            );
             now += 1.0;
         }
 
@@ -3598,7 +3692,7 @@ mod tests {
         let denied = String::from_utf8_lossy(&out);
         assert!(
             denied.contains("\"permissionDecision\":\"deny\""),
-            "第 10 次切片读应触发 deny，got: {denied}"
+            "10th slice read should trigger deny, got: {denied}"
         );
         assert!(denied.contains("file-slice reads"));
         now += 1.0;
@@ -3618,7 +3712,11 @@ mod tests {
                 Some(&temp_home),
             );
             assert_eq!(code, 0);
-            assert!(out.is_empty(), "静默窗后第 {} 次切片读不应有输出", i + 1);
+            assert!(
+                out.is_empty(),
+                "slice read #{} after silence window should have no output",
+                i + 1
+            );
             now += 1.0;
         }
 
@@ -3633,12 +3731,18 @@ mod tests {
             Some(&temp_home),
         );
         assert_eq!(code_search, 0);
-        assert!(out.is_empty(), "astrolabe 非符号工具调用本身不应有输出");
+        assert!(
+            out.is_empty(),
+            "astrolabe non-symbol tool call itself should have no output"
+        );
         let counter_path = get_hook_data_dir(&temp_home, sess_id, None)
             .unwrap()
             .join("counter.json");
         let counter = load_counter(&counter_path);
-        assert_eq!(counter.n_slice, 0, "search_code 调用后切片额度应清零");
+        assert_eq!(
+            counter.n_slice, 0,
+            "slice counter should reset after search_code call"
+        );
         assert_eq!(counter.last_slice_ts, None);
         now += 1.0;
 
@@ -3656,7 +3760,7 @@ mod tests {
             assert_eq!(code, 0);
             assert!(
                 out.is_empty(),
-                "清零后第 {} 次切片读不应有输出（额度应已被 search_code 清零）",
+                "slice read #{} after reset should have no output (counter should have been cleared by search_code)",
                 i + 1
             );
             now += 1.0;
@@ -3707,7 +3811,11 @@ mod tests {
                 Some(&temp_home),
             );
             assert_eq!(code, 0);
-            assert!(out.is_empty(), "第 {} 次 .scala 切片读不应有输出", i + 1);
+            assert!(
+                out.is_empty(),
+                ".scala slice read #{} should have no output",
+                i + 1
+            );
         }
 
         let _ = std::fs::remove_dir_all(&temp_home);
@@ -3717,7 +3825,8 @@ mod tests {
     fn test_old_counter_json_without_slice_fields_deserializes() {
         // 旧版 counter.json（无 n_slice/last_slice_ts 字段）反序列化落到默认值，不 panic
         let old = r#"{"n_grep":2,"n_read":1,"n_non_symbolic":3,"last_grep_ts":1.0,"last_read_ts":1.0,"last_non_symbolic_ts":1.0,"last_deny_ts":null}"#;
-        let c: CounterState = serde_json::from_str(old).expect("旧 counter.json 应可反序列化");
+        let c: CounterState =
+            serde_json::from_str(old).expect("legacy counter.json should deserialize");
         assert_eq!(c.n_slice, 0);
         assert_eq!(c.last_slice_ts, None);
         assert_eq!(c.n_grep, 2);
@@ -3736,7 +3845,10 @@ mod tests {
         };
         let d = decide(&mut counter, ToolKind::SliceRead, 105.0);
         assert_eq!(d, Decision::Silenced);
-        assert_eq!(counter.n_slice, 9, "静默窗内不应累加切片计数");
+        assert_eq!(
+            counter.n_slice, 9,
+            "should not increment slice counter inside silence window"
+        );
 
         // 2. 间隔 > SLICE_RESET_PERIOD_SECONDS(2000s) → 重置为 1
         let mut counter = CounterState {
@@ -3746,7 +3858,7 @@ mod tests {
         };
         let d = decide(&mut counter, ToolKind::SliceRead, 2101.5);
         assert_eq!(d, Decision::Allow);
-        assert_eq!(counter.n_slice, 1, "超 2000s 间隔应重置为 1");
+        assert_eq!(counter.n_slice, 1, "gap > 2000s should reset counter to 1");
 
         // 3. 符号工具 reset_burst 清零 n_slice
         let mut counter = CounterState {
@@ -3756,7 +3868,7 @@ mod tests {
         };
         let d = decide(&mut counter, ToolKind::AstrolabeSymbolic, 101.0);
         assert_eq!(d, Decision::ResetSymbolic);
-        assert_eq!(counter.n_slice, 0, "符号工具应清零切片额度");
+        assert_eq!(counter.n_slice, 0, "symbol tool should clear slice counter");
         assert_eq!(counter.last_slice_ts, None);
     }
 
@@ -3784,27 +3896,120 @@ mod tests {
 
     #[test]
     fn test_deny_texts_direct_switch_instruction() {
-        // Grep/Read/Mixed 三种 DenyKind：输出必须给出直接切换指令，
-        // 不得残留 "You can continue using ... the counter was reset" 软口径
+        // Grep/Read/Mixed：优先推 find_symbol / resolve_context（清零 burst），
+        // 诚实说明 search_code 只清 n_slice；不得残留软口径
         for kind in [DenyKind::Grep, DenyKind::Read, DenyKind::Mixed] {
             let out = build_output(Client::ClaudeCode, kind);
             assert!(
-                out.contains("search_code"),
-                "{kind:?} deny 输出应含 search_code 切换指令: {out}"
+                out.contains("find_symbol"),
+                "{kind:?} deny output should prefer find_symbol: {out}"
             );
             assert!(
-                out.contains("Stop using grep/read for code discovery"),
-                "{kind:?} deny 输出应含明确停止+切换指令: {out}"
+                out.contains("resolve_context"),
+                "{kind:?} deny output should prefer resolve_context: {out}"
+            );
+            assert!(
+                out.contains("search_code"),
+                "{kind:?} deny output should still mention search_code: {out}"
+            );
+            assert!(
+                out.contains("slice-read counter") || out.contains("slice counter"),
+                "{kind:?} deny should honestly say search_code only clears the slice counter: {out}"
+            );
+            assert!(
+                out.contains("Stop using"),
+                "{kind:?} deny output should include a clear stop+switch instruction: {out}"
             );
             assert!(
                 !out.contains("You can continue using"),
-                "{kind:?} deny 输出不应残留软口径: {out}"
+                "{kind:?} deny output should not retain soft wording: {out}"
             );
             assert!(
                 !out.contains("the counter was reset"),
-                "{kind:?} deny 输出不应残留计数重置软话术: {out}"
+                "{kind:?} deny output should not retain soft counter-reset wording: {out}"
             );
         }
+    }
+
+    #[test]
+    fn command_contains_primary_text_search_skips_pipe_only() {
+        assert!(command_contains_primary_text_search("rg foo src"));
+        assert!(command_contains_primary_text_search("grep -rn pat ."));
+        assert!(command_contains_primary_text_search("cd src && rg foo"));
+        assert!(command_contains_primary_text_search("git grep foo"));
+        assert!(command_contains_primary_text_search("bash -c \"rg foo .\""));
+        // Pipe-only filter greps must NOT count as primary code search
+        assert!(!command_contains_primary_text_search("go test | grep FAIL"));
+        assert!(!command_contains_primary_text_search(
+            "cargo test 2>&1 | rg error"
+        ));
+        assert!(!command_contains_primary_text_search("ls"));
+        // Hard mode still sees pipe greps; soft primary does not
+        assert!(command_contains_text_search("go test | grep FAIL"));
+        assert!(!command_contains_primary_text_search("go test | grep FAIL"));
+    }
+
+    #[test]
+    fn soft_mode_classifies_primary_bash_rg_and_git_grep_not_pipe_filter() {
+        let soft_rg = classify_tool_ex(
+            "bash",
+            Client::ClaudeCode,
+            None,
+            Some("rg"),
+            Some("foo src"),
+            Some("rg foo src"),
+            None,
+            None,
+            false,
+        );
+        assert_eq!(soft_rg, ToolKind::Grep);
+
+        let soft_grep_rn = classify_tool_ex(
+            "bash",
+            Client::ClaudeCode,
+            None,
+            Some("cd"),
+            Some("src && grep -rn pool ."),
+            Some("cd src && grep -rn pool ."),
+            None,
+            None,
+            false,
+        );
+        assert_eq!(soft_grep_rn, ToolKind::Grep);
+
+        let soft_git = classify_tool_ex(
+            "bash",
+            Client::ClaudeCode,
+            None,
+            Some("git"),
+            Some("grep foo"),
+            Some("git grep foo"),
+            None,
+            None,
+            false,
+        );
+        assert_eq!(
+            soft_git,
+            ToolKind::Grep,
+            "soft mode should count primary git grep as Grep"
+        );
+
+        let pipe_filter = classify_tool_ex(
+            "bash",
+            Client::ClaudeCode,
+            None,
+            Some("go"),
+            Some("test | grep FAIL"),
+            Some("go test | grep FAIL"),
+            None,
+            None,
+            false,
+        );
+        assert_eq!(
+            pipe_filter,
+            ToolKind::Neutral,
+            "soft mode must not deny go test | grep FAIL"
+        );
     }
 
     #[test]
@@ -4308,13 +4513,13 @@ mod tests {
             );
             assert_eq!(code, 0);
             if i < 2 {
-                assert!(out.is_empty(), "agent-a 第 {} 次 grep 不应 deny", i + 1);
+                assert!(out.is_empty(), "agent-a grep #{} should not deny", i + 1);
             }
         }
         let out_str = String::from_utf8_lossy(&out);
         assert!(
             out_str.contains("\"permissionDecision\":\"deny\""),
-            "agent-a 第 3 次 grep 应触发 deny，got: {out_str}"
+            "agent-a 3rd grep should trigger deny, got: {out_str}"
         );
 
         // agent-b：同会话第 1 次 grep（now=103）不受 agent-a 计数影响，无 deny 输出
@@ -4330,7 +4535,7 @@ mod tests {
         assert_eq!(code_b1, 0);
         assert!(
             out.is_empty(),
-            "agent-b 首次 grep 不应被 agent-a 的 deny 计数/静默窗波及"
+            "agent-b first grep should not be affected by agent-a's deny count/silence window"
         );
 
         // 补强：agent-b 继续累计到自己的第 3 次（105）必须触发 deny。
@@ -4351,7 +4556,7 @@ mod tests {
         let out_b_str = String::from_utf8_lossy(&out);
         assert!(
             out_b_str.contains("\"permissionDecision\":\"deny\""),
-            "agent-b 第 3 次 grep 应触发独立 deny，got: {out_b_str}"
+            "agent-b 3rd grep should trigger its own deny, got: {out_b_str}"
         );
 
         // 落盘路径按 agent 分片
@@ -4411,7 +4616,7 @@ mod tests {
         assert_eq!(
             entries.len(),
             1,
-            "无 agent_id 时会话目录应只有 counter.json 一个条目"
+            "without agent_id, session dir should contain only counter.json"
         );
         assert!(entries[0].as_ref().unwrap().path().is_file());
 
@@ -4481,11 +4686,11 @@ mod tests {
             assert_eq!(
                 got.len(),
                 3 + 16,
-                "应收敛为 ag-<16hex> 哈希分量: {bad} -> {got}"
+                "should collapse to ag-<16hex> hash component: {bad} -> {got}"
             );
             assert!(
                 got.starts_with("ag-"),
-                "应收敛为 ag-<16hex> 哈希分量: {bad} -> {got}"
+                "should collapse to ag-<16hex> hash component: {bad} -> {got}"
             );
         }
         assert_eq!(
@@ -4599,7 +4804,7 @@ mod tests {
         assert_eq!(
             hook_data_entries.len(),
             1,
-            "hook_data 下应只有会话目录一个条目"
+            "hook_data should contain only the session directory entry"
         );
 
         let _ = std::fs::remove_dir_all(&temp_home);
@@ -4643,11 +4848,11 @@ mod tests {
                 Some(100.0),
                 Some(&temp_home),
             );
-            assert_eq!(code, 0, "{sess} 应正常处理");
+            assert_eq!(code, 0, "{sess} should process normally");
             let sess_dir = get_hook_data_dir(&temp_home, sess, None).unwrap();
             assert!(
                 sess_dir.join("counter.json").exists(),
-                "{sess} 应落会话级平面 counter"
+                "{sess} should land a session-level flat counter"
             );
             let entries: Vec<_> = std::fs::read_dir(&sess_dir)
                 .unwrap()
@@ -4661,7 +4866,7 @@ mod tests {
             assert_eq!(
                 entries.len(),
                 1,
-                "{sess} 会话目录应只有 counter.json 一个条目"
+                "{sess} session dir should contain only counter.json"
             );
         }
 
@@ -4699,7 +4904,7 @@ mod tests {
         let both_dir = get_hook_data_dir(&temp_home, "edge_both", None).unwrap();
         assert!(
             both_dir.join("snake-x").join("counter.json").exists(),
-            "agent_id 应优先于 agentId"
+            "agent_id should take precedence over agentId"
         );
         assert!(!both_dir.join("camel-y").exists());
 
@@ -4736,7 +4941,10 @@ mod tests {
             Some(100.0),
             Some(&temp_home),
         );
-        assert_eq!(code, 0, "应跳过占位键用 conversation_id，而非 exit 2");
+        assert_eq!(
+            code, 0,
+            "should skip placeholder keys and use conversation_id, not exit 2"
+        );
         // 计数落盘：会话目录 conv-abc、分片 camel-1（agent_id 空串被跳过）
         let sess_dir = get_hook_data_dir(&temp_home, "conv-abc", None).unwrap();
         assert!(sess_dir.join("camel-1").join("counter.json").exists());
@@ -4788,7 +4996,7 @@ mod tests {
             assert_eq!(code, 0);
             assert!(
                 out.is_empty(),
-                "README 非代码文件，第 {} 次不应 deny（path 未提取时会误走保守分支）",
+                "README is non-code; call #{} should not deny (conservative branch when path is missing)",
                 i + 1
             );
         }
@@ -5029,7 +5237,7 @@ mod tests {
         let user_msg = cursor_val["user_message"].as_str().unwrap();
         assert!(
             agent_msg.len() > user_msg.len(),
-            "agent_message 应承载长引导文案: agent={agent_msg} user={user_msg}"
+            "agent_message should carry the long guidance text: agent={agent_msg} user={user_msg}"
         );
         assert!(agent_msg.contains("read-only"));
 
@@ -5369,7 +5577,10 @@ mod tests {
             SystemTime::now() - Duration::from_secs(48 * 3600),
         );
         maybe_gc_opportunistic(home, SystemTime::now(), "cur", 24);
-        assert!(root.join("b").exists(), "节流窗口内不应扫描");
+        assert!(
+            root.join("b").exists(),
+            "should not scan inside throttle window"
+        );
     }
 
     #[test]
@@ -5464,7 +5675,9 @@ mod tests {
     }
 
     #[test]
-    fn classify_git_grep_and_pipeline_only_when_hard() {
+    fn classify_git_grep_primary_in_soft_pipe_filter_only_when_hard() {
+        // Soft mode now counts primary `git grep` (and `cd && rg`) as Grep so Bash
+        // cannot bypass host Grep deny; pipe-only filters stay Neutral until hard mode.
         let soft = classify_tool_ex(
             "bash",
             Client::ClaudeCode,
@@ -5476,7 +5689,7 @@ mod tests {
             None,
             false,
         );
-        assert_eq!(soft, ToolKind::Neutral);
+        assert_eq!(soft, ToolKind::Grep);
         let hard = classify_tool_ex(
             "bash",
             Client::ClaudeCode,
@@ -5501,6 +5714,30 @@ mod tests {
             true,
         );
         assert_eq!(pipe, ToolKind::Grep);
+        let soft_pipe_filter = classify_tool_ex(
+            "bash",
+            Client::ClaudeCode,
+            None,
+            Some("go"),
+            Some("test | grep FAIL"),
+            Some("go test | grep FAIL"),
+            None,
+            None,
+            false,
+        );
+        assert_eq!(soft_pipe_filter, ToolKind::Neutral);
+        let hard_pipe_filter = classify_tool_ex(
+            "bash",
+            Client::ClaudeCode,
+            None,
+            Some("go"),
+            Some("test | grep FAIL"),
+            Some("go test | grep FAIL"),
+            None,
+            None,
+            true,
+        );
+        assert_eq!(hard_pipe_filter, ToolKind::Grep);
     }
 
     #[test]
@@ -5564,10 +5801,13 @@ mod tests {
     fn build_output_hard_text_search_and_glob() {
         let out = build_output(Client::ClaudeCode, DenyKind::TextSearch);
         assert!(out.contains("ASTROLABE_DENY_TEXT_SEARCH"), "{out}");
+        assert!(out.contains("find_symbol"), "{out}");
+        assert!(out.contains("resolve_context"), "{out}");
         assert!(out.contains("search_code"), "{out}");
         assert!(out.contains("\"permissionDecision\":\"deny\""));
         let glob = build_output(Client::ClaudeCode, DenyKind::Glob);
         assert!(glob.contains("Glob"), "{glob}");
+        assert!(glob.contains("find_symbol"), "{glob}");
         assert!(glob.contains("search_code"), "{glob}");
     }
 
@@ -5932,6 +6172,13 @@ mod tests {
         ));
         assert!(is_astrolabe_tool("mcp__astrolabe__search_code"));
         assert!(!is_astrolabe_symbolic_tool("mcp__astrolabe__search_code"));
+    }
+
+    #[test]
+    fn explain_symbol_compat_counts_as_astrolabe_symbolic() {
+        assert!(is_astrolabe_tool("mcp__astrolabe__explain_symbol"));
+        assert!(is_astrolabe_symbolic_tool("mcp__astrolabe__explain_symbol"));
+        assert!(!crate::CATALOG_TOOL_NAMES.contains(&"explain_symbol"));
     }
 
     #[test]
