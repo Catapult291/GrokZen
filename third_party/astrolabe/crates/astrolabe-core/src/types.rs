@@ -127,6 +127,8 @@ pub enum Language {
     Ruby,
     /// Lua (`.lua`). Storage tag 20.
     Lua,
+    /// Protocol Buffers IDL (`.proto`). Storage tag 21.
+    Proto,
 }
 
 /// Remove `/* */` (tracking state across lines) and `//` comments from one
@@ -304,6 +306,7 @@ impl Language {
             "sh" | "bash" | "zsh" | "zsh-theme" | "bats" | "ksh" => Language::Shell,
             "rb" | "rake" | "gemspec" | "ru" | "rbw" => Language::Ruby,
             "lua" => Language::Lua,
+            "proto" => Language::Proto,
             _ => return None,
         })
     }
@@ -419,6 +422,7 @@ impl Language {
             "shell" | "sh" | "bash" | "shellscript" => Some(Language::Shell),
             "ruby" | "rb" => Some(Language::Ruby),
             "lua" => Some(Language::Lua),
+            "proto" | "protobuf" | "protocolbuffers" | "protocol-buffers" => Some(Language::Proto),
             _ => None,
         }
     }
@@ -446,6 +450,7 @@ impl Language {
             Language::Shell => "shell",
             Language::Ruby => "ruby",
             Language::Lua => "lua",
+            Language::Proto => "proto",
         }
     }
 }
@@ -1011,6 +1016,7 @@ mod tests {
             ("Rakefile", Language::Ruby),
             ("sub/Gemfile", Language::Ruby),
             ("init.lua", Language::Lua),
+            ("api.proto", Language::Proto),
             ("A.swift", Language::Swift),
             ("A.m", Language::ObjC),
             ("A.mm", Language::ObjCpp),
@@ -1132,6 +1138,9 @@ mod tests {
         assert_eq!(Language::from_name("vue").unwrap().name(), "vue");
         assert_eq!(Language::from_name("dart"), Some(Language::Dart));
         assert_eq!(Language::Dart.name(), "dart");
+        assert_eq!(Language::from_name("proto"), Some(Language::Proto));
+        assert_eq!(Language::from_name("protobuf"), Some(Language::Proto));
+        assert_eq!(Language::Proto.name(), "proto");
         assert_eq!(
             Language::from_path(&RelPath::new("a.cs")),
             Some(Language::CSharp)

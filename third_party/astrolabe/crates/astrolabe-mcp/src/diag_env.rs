@@ -23,26 +23,26 @@ pub(crate) struct EnvFault {
 }
 
 const GO_HINT: &str =
-    "请直接用 go build ./... / go test 验证，或先修好 Go 环境（GOCACHE 可写、模块可下载）。";
-const RUST_HINT: &str = "请直接用 cargo check / cargo test 验证，或先修好 Rust 工具链（rustup component add rust-src）。";
+    "Verify directly with go build ./... / go test, or fix the Go environment first (writable GOCACHE, modules downloadable).";
+const RUST_HINT: &str = "Verify directly with cargo check / cargo test, or fix the Rust toolchain first (rustup component add rust-src).";
 const TS_HINT: &str =
-    "请先安装依赖（npm/pnpm/yarn install）或直接用 tsc --noEmit / 项目测试命令验证。";
+    "Install dependencies first (npm/pnpm/yarn install), or verify with tsc --noEmit / the project's test command.";
 const PY_HINT: &str =
-    "请确认语言服务用的是项目的解释器/虚拟环境并已安装依赖，或直接运行项目测试验证。";
-const GENERIC_HINT: &str = "请直接运行项目的构建/测试命令验证。";
+    "Confirm the language service uses the project's interpreter/venv with dependencies installed, or run the project tests directly.";
+const GENERIC_HINT: &str = "Verify directly with the project's build/test command.";
 
 /// Messages that only ever come from a broken environment, any language.
 const GENERIC_PATTERNS: &[(&str, &str)] = &[
-    ("read-only file system", "文件系统只读"),
-    ("permission denied", "权限不足（permission denied）"),
-    ("eacces", "权限不足（EACCES）"),
-    ("erofs", "文件系统只读"),
-    ("no space left on device", "磁盘已满"),
+    ("read-only file system", "filesystem is read-only"),
+    ("permission denied", "permission denied"),
+    ("eacces", "permission denied (EACCES)"),
+    ("erofs", "filesystem is read-only"),
+    ("no space left on device", "disk full"),
     (
         "executable file not found in $path",
-        "找不到工具链可执行文件",
+        "toolchain executable not found",
     ),
-    ("command not found", "找不到工具链可执行文件"),
+    ("command not found", "toolchain executable not found"),
 ];
 
 /// Go: gopls / go list messages that mean the toolchain, cache or module
@@ -50,36 +50,42 @@ const GENERIC_PATTERNS: &[(&str, &str)] = &[
 const GO_PATTERNS: &[(&str, &str)] = &[
     (
         "loading compiled go files from cache",
-        "Go 构建缓存不可读写（GOCACHE）",
+        "Go build cache not readable/writable (GOCACHE)",
     ),
     (
         "failed to initialize build cache",
-        "Go 构建缓存不可读写（GOCACHE）",
+        "Go build cache not readable/writable (GOCACHE)",
     ),
-    ("build cache is required", "Go 构建缓存未配置（GOCACHE）"),
-    ("gocache is not defined", "Go 构建缓存未配置（GOCACHE）"),
+    (
+        "build cache is required",
+        "Go build cache not configured (GOCACHE)",
+    ),
+    (
+        "gocache is not defined",
+        "Go build cache not configured (GOCACHE)",
+    ),
     (
         "missing metadata for import of",
-        "gopls 缺包元数据（go list/构建缓存失败）",
+        "gopls missing package metadata (go list/build-cache failure)",
     ),
     (
         "module lookup disabled by goproxy=off",
-        "Go 模块无法下载（GOPROXY=off）",
+        "Go modules cannot download (GOPROXY=off)",
     ),
-    ("cannot find goroot", "找不到 Go 工具链（GOROOT）"),
-    ("go: command not found", "找不到 go 命令"),
-    ("exec: \"go\"", "找不到 go 命令"),
+    ("cannot find goroot", "Go toolchain not found (GOROOT)"),
+    ("go: command not found", "go command not found"),
+    ("exec: \"go\"", "go command not found"),
     (
         "gotoolchain=local",
-        "Go 版本不满足 go.mod 要求且禁止自动下载工具链",
+        "Go version does not meet go.mod and auto toolchain download is disabled",
     ),
     (
         "no packages found for open file",
-        "gopls 没加载到这个文件所在的包（模块/工作区配置）",
+        "gopls did not load the package for this file (module/workspace config)",
     ),
     (
         "gopls was not able to find modules",
-        "gopls 找不到模块（工作区配置）",
+        "gopls cannot find the module (workspace config)",
     ),
 ];
 
@@ -97,32 +103,35 @@ const NETWORK_PATTERNS: &[&str] = &[
 const RUST_PATTERNS: &[(&str, &str)] = &[
     (
         "can't find crate for `std`",
-        "Rust 标准库缺失（sysroot/rust-src）",
+        "Rust standard library missing (sysroot/rust-src)",
     ),
     (
         "can't find crate for `core`",
-        "Rust 标准库缺失（sysroot/rust-src）",
+        "Rust standard library missing (sysroot/rust-src)",
     ),
     (
         "unresolved import `std",
-        "Rust 标准库缺失（sysroot/rust-src）",
+        "Rust standard library missing (sysroot/rust-src)",
     ),
     (
         "unresolved import `core",
-        "Rust 标准库缺失（sysroot/rust-src）",
+        "Rust standard library missing (sysroot/rust-src)",
     ),
-    ("failed to load workspace", "rust-analyzer 加载工作区失败"),
-    ("failed to run `cargo metadata`", "cargo metadata 失败"),
-    ("cargo metadata", "cargo metadata 失败"),
-    ("proc-macro server", "rust-analyzer 过程宏服务异常"),
-    ("proc macro server", "rust-analyzer 过程宏服务异常"),
+    (
+        "failed to load workspace",
+        "rust-analyzer failed to load the workspace",
+    ),
+    ("failed to run `cargo metadata`", "cargo metadata failed"),
+    ("cargo metadata", "cargo metadata failed"),
+    ("proc-macro server", "rust-analyzer proc-macro server error"),
+    ("proc macro server", "rust-analyzer proc-macro server error"),
     (
         "is not installed for the toolchain",
-        "Rust 工具链组件未安装",
+        "Rust toolchain component not installed",
     ),
     (
         "rustup could not choose a version",
-        "rustup 没有可用的工具链",
+        "rustup has no available toolchain",
     ),
 ];
 
@@ -187,7 +196,7 @@ pub(crate) fn detect(path: &str, diags: &[Diagnostic]) -> Option<EnvFault> {
     if lang == Lang::Go {
         for (i, msg) in lower.iter().enumerate() {
             if NETWORK_PATTERNS.iter().any(|p| msg.contains(p)) {
-                return fault("Go 模块下载失败（网络/GOPROXY 不通）", i);
+                return fault("Go module download failed (network/GOPROXY unreachable)", i);
             }
         }
         // `could not import fmt`: the standard library never fails to import
@@ -197,7 +206,10 @@ pub(crate) fn detect(path: &str, diags: &[Diagnostic]) -> Option<EnvFault> {
         for (i, d) in diags.iter().enumerate() {
             if let Some(pkg) = go_broken_import(&d.message) {
                 if go_is_stdlib(pkg) {
-                    return fault("Go 标准库无法导入（工具链/构建缓存异常）", i);
+                    return fault(
+                        "Go standard library cannot be imported (toolchain/build-cache issue)",
+                        i,
+                    );
                 }
                 third_party.insert(pkg.to_string());
                 first_third_party.get_or_insert(i);
@@ -205,7 +217,7 @@ pub(crate) fn detect(path: &str, diags: &[Diagnostic]) -> Option<EnvFault> {
         }
         if third_party.len() >= 3 {
             return fault(
-                "大量依赖包无法导入（模块未下载/构建缓存异常）",
+                "Many dependency packages cannot be imported (modules not downloaded / build-cache issue)",
                 first_third_party?,
             );
         }
@@ -218,10 +230,16 @@ pub(crate) fn detect(path: &str, diags: &[Diagnostic]) -> Option<EnvFault> {
         for (i, d) in diags.iter().enumerate() {
             let code = d.code.as_deref().unwrap_or("");
             if code == "2318" || lower[i].starts_with("cannot find global type") {
-                return fault("TypeScript 标准库（lib）缺失或 TypeScript 安装损坏", i);
+                return fault(
+                    "TypeScript standard library (lib) missing or TypeScript install corrupted",
+                    i,
+                );
             }
             if code == "2688" || lower[i].starts_with("cannot find type definition file for") {
-                return fault("类型声明依赖未安装（node_modules 缺失）", i);
+                return fault(
+                    "Type declaration deps not installed (node_modules missing)",
+                    i,
+                );
             }
             if code == "2307" || code == "2792" {
                 if let Some(m) = quoted(&d.message, '\'') {
@@ -234,7 +252,7 @@ pub(crate) fn detect(path: &str, diags: &[Diagnostic]) -> Option<EnvFault> {
         }
         if modules.len() >= 3 {
             return fault(
-                "依赖未安装（多个第三方模块找不到，node_modules 缺失）",
+                "Dependencies not installed (multiple third-party modules missing; node_modules absent)",
                 first_module?,
             );
         }
@@ -260,7 +278,7 @@ pub(crate) fn detect(path: &str, diags: &[Diagnostic]) -> Option<EnvFault> {
         }
         if modules.len() >= 3 {
             return fault(
-                "Python 解释器/虚拟环境不对或依赖未安装（多个第三方包无法解析）",
+                "Wrong Python interpreter/venv or dependencies not installed (multiple third-party packages unresolved)",
                 first?,
             );
         }
@@ -389,7 +407,7 @@ mod tests {
             detect_fixture("args_test.go", "go_broken_import_args_test.txt").expect("fault");
         assert!(root.starts_with("could not import fmt"), "{root}");
         assert!(
-            fault.kind.contains("元数据") || fault.kind.contains("标准库"),
+            fault.kind.contains("metadata") || fault.kind.contains("standard library"),
             "{fault:?}"
         );
     }
@@ -399,7 +417,7 @@ mod tests {
         let (fault, _) = detect_fixture("main.go", "go_ro_gocache_build.txt").expect("ro");
         assert!(fault.kind.contains("GOCACHE"), "{fault:?}");
         let (fault, root) = detect_fixture("main.go", "go_goproxy_network.txt").expect("net");
-        assert!(fault.kind.contains("网络"), "{fault:?}");
+        assert!(fault.kind.contains("network"), "{fault:?}");
         assert!(root.contains("dial tcp"));
     }
 
@@ -440,7 +458,7 @@ mod tests {
     #[test]
     fn python_env_faults_and_real_errors() {
         let (fault, root) = detect_fixture("a.py", "py_interpreter_missing.txt").expect("py");
-        assert!(fault.kind.contains("解释器"), "{fault:?}");
+        assert!(fault.kind.contains("interpreter"), "{fault:?}");
         assert!(root.contains("numpy"), "{root}");
         assert_eq!(detect_fixture("a.py", "py_real_errors.txt"), None);
     }
@@ -448,7 +466,7 @@ mod tests {
     #[test]
     fn rust_env_faults_and_real_errors() {
         let (fault, _) = detect_fixture("src/main.rs", "rust_sysroot_missing.txt").expect("rs");
-        assert!(fault.kind.contains("标准库"), "{fault:?}");
+        assert!(fault.kind.contains("standard library"), "{fault:?}");
         assert_eq!(detect_fixture("src/main.rs", "rust_real_errors.txt"), None);
     }
 
@@ -495,9 +513,12 @@ mod tests {
     fn tool_output_for_recorded_e2_floods_is_short() {
         // E2-Cnew-r1 T14: 10027 B of BrokenImport + undefined cascade.
         let (text, meta) = run_tool("args_test.go", fixture("go_broken_import_args_test.txt"));
-        assert!(text.contains("环境异常，诊断不可信"), "{text}");
         assert!(
-            text.contains("根因：@args_test.go:18 [error BrokenImport] could not import fmt"),
+            text.contains("Environment issue; diagnostics are not trustworthy"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Root cause: @args_test.go:18 [error BrokenImport] could not import fmt"),
             "{text}"
         );
         assert!(text.contains("go build"), "{text}");
@@ -510,10 +531,10 @@ mod tests {
         // E2-Cnew-r1 T13: 928 B, GOCACHE miss + 12 undefined.
         let (text, meta) = run_tool("args.go", fixture("go_gocache_args.txt"));
         assert!(
-            text.contains("根因：@args.go:1 [error] loading compiled Go files from cache"),
+            text.contains("Root cause: @args.go:1 [error] loading compiled Go files from cache"),
             "{text}"
         );
-        assert!(text.contains("另有 12 条"), "{text}");
+        assert!(text.contains("12 more"), "{text}");
         assert_eq!(meta["suppressed"], 12);
     }
 
@@ -524,7 +545,7 @@ mod tests {
             "@args.go:40 [error] expected ';', found foo\n",
         ));
         let (text, meta) = run_tool("args.go", diags);
-        assert!(text.contains("仍可信"), "{text}");
+        assert!(text.contains("still trustworthy"), "{text}");
         assert!(
             text.contains("@args.go:40 [error] expected ';', found foo"),
             "{text}"
@@ -533,7 +554,7 @@ mod tests {
 
         // Healthy environment: untouched, every diagnostic listed.
         let (text, meta) = run_tool("main.go", fixture("go_real_errors.txt"));
-        assert!(!text.contains("环境异常"), "{text}");
+        assert!(!text.contains("Environment fault"), "{text}");
         assert!(text.contains("undefined: Commnd"), "{text}");
         assert_eq!(meta["matches"], 4);
         assert!(meta.get("environment_fault").is_none());

@@ -26,7 +26,7 @@ native = []
 # `version` is required alongside `path` for `cargo publish`: crates.io cannot
 # resolve a path dependency, so it needs a registry version to fall back on.
 # Publish order is therefore astrolabe-core first, then this crate.
-astrolabe-core = { path = "../astrolabe-core", version = "0.17.0" }
+astrolabe-core = { path = "../astrolabe-core", version = "0.17.2" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

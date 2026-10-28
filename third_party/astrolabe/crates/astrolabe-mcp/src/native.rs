@@ -249,6 +249,7 @@ impl AstrolabeServer {
     pub fn native_search_code(&self, req: NativeSearchCode) -> NativeOutput {
         let params = SearchParams {
             root: None,
+            index_root: None,
             query: req.query,
             regex: req.regex,
             path_filter: req.path_filter,
@@ -285,6 +286,7 @@ impl AstrolabeServer {
     pub fn native_find_symbol(&self, req: NativeFindSymbol) -> NativeOutput {
         let params = QueryParams {
             root: None,
+            index_root: None,
             query: req.query,
             include_body: req.include_body,
             substring: req.substring,
@@ -301,6 +303,7 @@ impl AstrolabeServer {
     pub fn native_resolve_context(&self, req: NativeResolveContext) -> NativeOutput {
         let params = ResolveContextParams {
             root: None,
+            index_root: None,
             task_description: req.task_description,
             budget_tokens: budget(req.budget_tokens),
             dedup: Some(false),
@@ -315,6 +318,7 @@ impl AstrolabeServer {
     pub fn native_find_references(&self, req: NativeFindReferences) -> NativeOutput {
         let params = FindReferencesParams {
             root: None,
+            index_root: None,
             symbol: req.symbol,
             path: req.path,
             line: req.line,
@@ -330,6 +334,7 @@ impl AstrolabeServer {
     pub fn native_goto_definition(&self, req: NativeGotoDefinition) -> NativeOutput {
         let params = GotoDefinitionParams {
             root: None,
+            index_root: None,
             path: req.path,
             symbol: req.symbol,
             line: req.line,
@@ -344,6 +349,7 @@ impl AstrolabeServer {
     pub fn native_get_diagnostics(&self, req: NativeDiagnostics) -> NativeOutput {
         let params = GetDiagnosticsParams {
             root: None,
+            index_root: None,
             path: req.path,
             severity: req.severity,
             budget_tokens: budget(req.budget_tokens),
@@ -370,6 +376,7 @@ impl AstrolabeServer {
     ) -> NativeOutput {
         split(self.get_languages(Parameters(BudgetOnly {
             root: None,
+            index_root: None,
             budget_tokens: budget(budget_tokens),
             host_lsp: if host_lsp.is_empty() {
                 None

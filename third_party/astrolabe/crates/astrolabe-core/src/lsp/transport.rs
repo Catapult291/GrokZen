@@ -1372,6 +1372,7 @@ fn language_id(language: Language) -> &'static str {
         Language::Shell => "shellscript",
         Language::Ruby => "ruby",
         Language::Lua => "lua",
+        Language::Proto => "protobuf",
     }
 }
 

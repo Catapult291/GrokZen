@@ -627,7 +627,7 @@ impl Store {
 /// same bytes (new captures, different anchors/kinds). The parse cache is
 /// keyed by content hash, so without this an upgraded binary keeps serving
 /// symbols extracted by the old version until each file is edited.
-pub const EXTRACTOR_VERSION: u32 = 6;
+pub const EXTRACTOR_VERSION: u32 = 7;
 
 /// Encoding of parse-cache payloads and file stamps.
 ///
@@ -988,6 +988,7 @@ pub fn language_to_u8(language: Language) -> u8 {
         Language::Shell => 18,
         Language::Ruby => 19,
         Language::Lua => 20,
+        Language::Proto => 21,
     }
 }
 
@@ -1014,6 +1015,7 @@ pub fn language_from_u8(language: u8) -> Option<Language> {
         18 => Language::Shell,
         19 => Language::Ruby,
         20 => Language::Lua,
+        21 => Language::Proto,
         _ => return None,
     })
 }
@@ -1483,11 +1485,12 @@ mod tests {
         (Language::Shell, "m.sh", "#!/bin/bash\nsource ./lib.sh\nreadonly N=3\nhelper() { echo \"$1\"; }\nfunction main {\n  helper \"$N\"\n}\nmain \"$@\"\n"),
         (Language::Ruby, "m.rb", "require 'json'\nrequire_relative 'a'\nmodule M\n  class K < Base\n    C = 1\n    def m\n      helper(C)\n    end\n    def self.s; end\n  end\nend\ndef helper(x) = x\n"),
         (Language::Lua, "m.lua", "local a = require('a')\nlocal M = {}\nfunction M.f(x) return a.g(x) end\nlocal function helper(y) return y end\nfunction M:m() return helper(self) end\nreturn M\n"),
+        (Language::Proto, "api.proto", "syntax = \"proto3\";\npackage demo.v1;\nimport \"common/types.proto\";\nmessage User { string name = 1; }\nenum Status { STATUS_UNSPECIFIED = 0; STATUS_ACTIVE = 1; }\nservice UserService { rpc GetUser (User) returns (User); }\n"),
     ];
 
     /// What [`EXTRACTOR_PROBES`] extract under the current [`EXTRACTOR_VERSION`].
     /// See [`extractor_output_matches_its_version`].
-    const EXTRACTOR_FINGERPRINT: (u32, u64) = (6, 0x1240_3a72_764b_e436);
+    const EXTRACTOR_FINGERPRINT: (u32, u64) = (7, 0xeeac_3b97_e0b1_0670);
 
     /// Guard for the explicit cache versioning. The parse cache is no longer
     /// invalidated by every release, so an extractor change that forgets to
@@ -1696,6 +1699,7 @@ mod tests {
             Language::Shell,
             Language::Ruby,
             Language::Lua,
+            Language::Proto,
         ] {
             assert_eq!(language_from_u8(language_to_u8(lang)), Some(lang));
         }
@@ -1708,5 +1712,6 @@ mod tests {
         assert_eq!(language_to_u8(Language::Shell), 18);
         assert_eq!(language_to_u8(Language::Ruby), 19);
         assert_eq!(language_to_u8(Language::Lua), 20);
+        assert_eq!(language_to_u8(Language::Proto), 21);
     }
 }
