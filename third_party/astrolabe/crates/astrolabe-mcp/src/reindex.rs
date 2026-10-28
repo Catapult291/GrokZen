@@ -195,7 +195,7 @@ pub(crate) fn apply_reindex(
         Some(previous) => previous.apply_changeset(root, changes, opts),
         None => IncrementalIndex::build(root, opts),
     }))
-    .map_err(|_| "底层索引能力尚未实现或发生 panic".to_string())
+    .map_err(|_| "Underlying index capability is not implemented or panicked".to_string())
 }
 
 /// Merge `first` with everything that arrives before `throttle` elapses.

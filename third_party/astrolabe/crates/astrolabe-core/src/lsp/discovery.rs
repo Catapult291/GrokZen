@@ -897,7 +897,7 @@ impl Discovery {
                 " clangd is the primary ObjC server: Astrolabe writes a synthetic                   compile_commands.json (ObjC flags, header paths) when the repo has none,                   and ObjC-looking .h headers are routed here too. sourcekit-lsp is the fallback."
             }
             Language::Dart => {
-                " dart language-server 随 Dart SDK 自带；Flutter 工程安装 Flutter SDK 即可获得。"
+                " dart language-server ships with the Dart SDK; Flutter projects get it with the Flutter SDK."
             }
             Language::CSharp | Language::VisualBasic => {
                 " Roslyn Microsoft.CodeAnalysis.LanguageServer via `dotnet <dll> --stdio`; requires .NET 10 runtime to run the server (analyzed projects may target older frameworks). Not OmniSharp; not community csharp-ls. Visual Basic uses the same server and ASTROLABE_LSP_CSHARP."
@@ -1069,6 +1069,8 @@ fn candidates(language: Language) -> &'static [Candidate] {
         Language::Shell => SHELL,
         Language::Ruby => RUBY,
         Language::Lua => LUA,
+        // No dedicated protobuf language server in v1; graph tools cover .proto.
+        Language::Proto => &[],
     }
 }
 
@@ -1094,6 +1096,7 @@ fn env_override_keys(language: Language) -> &'static [&'static str] {
         Language::Shell => &["ASTROLABE_LSP_SHELL"],
         Language::Ruby => &["ASTROLABE_LSP_RUBY"],
         Language::Lua => &["ASTROLABE_LSP_LUA"],
+        Language::Proto => &[],
     }
 }
 
@@ -1554,6 +1557,8 @@ mod tests {
                 Language::Shell => assert!(result.install_hint.contains("bash-language-server")),
                 Language::Ruby => assert!(result.install_hint.contains("ruby-lsp")),
                 Language::Lua => assert!(result.install_hint.contains("lua-language-server")),
+                // Proto is graph-only (not in PROBED_LANGUAGES); arm keeps the match exhaustive.
+                Language::Proto => unreachable!("proto is not probed for LSP"),
             }
             assert!(
                 result.needs_install.is_some(),

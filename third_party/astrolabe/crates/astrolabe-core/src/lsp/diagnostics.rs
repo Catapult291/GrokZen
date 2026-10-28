@@ -303,26 +303,69 @@ fn sort_diagnostics(diagnostics: &mut [Diagnostic]) {
     });
 }
 
+/// Human-readable wait bound for agent-facing notes ("2.5s", "40ms").
+fn format_timeout(timeout: Duration) -> String {
+    let ms = timeout.as_millis();
+    if ms >= 1000 && ms.is_multiple_of(1000) {
+        format!("{}s", ms / 1000)
+    } else if ms >= 1000 {
+        format!("{:.1}s", timeout.as_secs_f64())
+    } else {
+        format!("{ms}ms")
+    }
+}
+
+/// Agent-facing note for a failed diagnostics fetch.
+///
+/// Distinguishes **not installed / not configured** from **timed out after Xs**
+/// so callers do not offer an install hint for a present-but-slow server.
+pub fn error_note(err: &LspError, path: &RelPath) -> String {
+    match err {
+        LspError::Unavailable(language, hint) => format!(
+            "language server not installed or not configured for {language:?}; \
+             cannot check diagnostics for {path}. Install or set ASTROLABE_LSP_*: {hint}"
+        ),
+        LspError::Timeout(timeout) => format!(
+            "language server timed out after {} checking diagnostics for {path}. \
+             The server is present but did not answer in time — this is a timeout, \
+             not a missing install. Retry, or call get_diagnostics without lsp=true \
+             to use the toolchain/parser checker.",
+            format_timeout(*timeout)
+        ),
+        LspError::Startup(language, why) => format!(
+            "language server for {language:?} failed to start ({why}); \
+             cannot check diagnostics for {path}"
+        ),
+        other => format!("could not fetch diagnostics for {path}: {other}"),
+    }
+}
+
 fn unknown_from_err(err: &LspError, path: &RelPath) -> Precise<Vec<Diagnostic>> {
-    Precise::unknown(
-        Vec::new(),
-        format!("could not fetch diagnostics for {path}: {err}"),
-    )
+    Precise::unknown(Vec::new(), error_note(err, path))
 }
 
 fn never_received_note(path: &RelPath, timeout: Duration) -> String {
     format!(
-        "timed out after {timeout:?} waiting for textDocument/publishDiagnostics on {path}; \
-         the server never published, so an empty list does not mean the file is clean"
+        "language server timed out after {} waiting for textDocument/publishDiagnostics on {path}; \
+         the server never published — this is a timeout (server present), not a missing install, \
+         and an empty list does not mean the file is clean. Retry, or call get_diagnostics without \
+         lsp=true to use the toolchain/parser checker.",
+        format_timeout(timeout)
     )
 }
 
 fn no_server_note(path: &RelPath) -> String {
     match Language::from_path(path) {
         Some(language) => format!(
-            "no language server available for {language:?}; cannot check diagnostics for {path}"
+            "language server not installed or not configured for {language:?}; \
+             cannot check diagnostics for {path}. Install: {}. \
+             Default get_diagnostics does not start an LSP; pass lsp=true only after \
+             the server is on PATH (or set ASTROLABE_LSP_*).",
+            super::router::install_hint_for(language)
         ),
-        None => format!("no language server available; cannot check diagnostics for {path}"),
+        None => format!(
+            "language server not installed or not configured; cannot check diagnostics for {path}"
+        ),
     }
 }
 
@@ -634,7 +677,15 @@ mod tests {
         assert!(got.value.is_empty());
         let note = got.note.as_deref().expect("must explain the gap");
         assert!(note.contains("Rust"), "note: {note}");
+        assert!(
+            note.contains("not installed") || note.contains("not configured"),
+            "note must say the server is missing: {note}"
+        );
         assert!(note.contains("cannot check diagnostics"), "note: {note}");
+        assert!(
+            note.contains("rust-analyzer"),
+            "note should name what to install: {note}"
+        );
     }
 
     #[test]
@@ -693,8 +744,12 @@ mod tests {
         );
         let note = got.note.as_deref().expect("Unknown must explain itself");
         assert!(
-            note.contains("publishDiagnostics"),
-            "note should name the missing notification: {note}"
+            note.contains("timed out"),
+            "note must say timed out (not missing LSP): {note}"
+        );
+        assert!(
+            note.contains("40ms") || note.contains("publishDiagnostics"),
+            "note should name the wait bound or notification: {note}"
         );
         assert!(
             note.contains("never"),
@@ -703,6 +758,10 @@ mod tests {
         assert!(
             note.contains("does not mean the file is clean"),
             "note must stop an agent treating this as success: {note}"
+        );
+        assert!(
+            !note.contains("not installed"),
+            "timeout must not look like a missing install: {note}"
         );
         assert_eq!(
             server.waited.lock().expect("waited").as_slice(),
@@ -966,6 +1025,46 @@ mod tests {
 
         assert_eq!(got.confidence, Confidence::Unknown);
         assert_eq!(server.events(), vec!["open:src/lib.rs".to_string()]);
+    }
+
+    #[test]
+    fn timeout_note_differs_from_missing_server_note() {
+        let path = RelPath::new("src/lib.rs");
+        let missing = query_server(None, &path, FetchOptions::default());
+        let timed = unknown_from_err(&LspError::Timeout(Duration::from_millis(2500)), &path);
+        let miss_note = missing.note.as_deref().unwrap();
+        let time_note = timed.note.as_deref().unwrap();
+        assert!(miss_note.contains("not installed") || miss_note.contains("not configured"));
+        assert!(time_note.contains("timed out after 2.5s"));
+        assert!(!time_note.contains("not installed"));
+        assert!(
+            time_note.contains("timeout") || time_note.contains("present"),
+            "timeout note must say the server was present: {time_note}"
+        );
+    }
+
+    #[test]
+    fn unavailable_err_note_says_not_installed() {
+        let path = RelPath::new("src/app.ts");
+        let got = unknown_from_err(
+            &LspError::Unavailable(
+                Language::TypeScript,
+                "typescript-language-server (`npm i -g typescript-language-server typescript`)"
+                    .into(),
+            ),
+            &path,
+        );
+        let note = got.note.as_deref().unwrap();
+        assert!(note.contains("not installed") || note.contains("not configured"));
+        assert!(note.contains("typescript-language-server"));
+        assert!(!note.contains("timed out"));
+    }
+
+    #[test]
+    fn format_timeout_uses_seconds_and_millis() {
+        assert_eq!(format_timeout(Duration::from_secs(2)), "2s");
+        assert_eq!(format_timeout(Duration::from_millis(2500)), "2.5s");
+        assert_eq!(format_timeout(Duration::from_millis(40)), "40ms");
     }
 
     #[test]

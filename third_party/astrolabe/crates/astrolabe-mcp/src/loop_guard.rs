@@ -171,9 +171,9 @@ impl<R: Clone> LoopGuard<R> {
             prune(&mut self.all, now, cfg.rate_window);
             if self.all.len() >= cfg.rate_max {
                 rate_note = Some(format!(
-                    "⚠ loop guard: 最近 {} 秒内已成功执行搜索 {} 次（上限 {}）。\
-                     很可能陷入了循环：请停止批量轮换查询，基于已有结果作答，或换用 \
-                     find_references / find_symbol / Read 等方式推进。",
+                    "⚠ loop guard: {} successful searches in the last {} seconds (limit {}).\
+                     Likely looping: stop rotating queries in bulk, answer from results you have, or switch to \
+                     find_references / find_symbol / Read.",
                     cfg.rate_window.as_secs(),
                     self.all.len() + 1,
                     cfg.rate_max
@@ -186,11 +186,11 @@ impl<R: Clone> LoopGuard<R> {
                 let prior = entry.runs.len();
                 if prior >= cfg.repeat_max {
                     let mut note = format!(
-                        "blocked: true\nloop guard: 这条 {tool} 查询（参数完全相同、索引自上次执行后未变化）\
-                         在最近 {} 秒内已执行 {prior} 次（上限 {}），本次未重新执行，下面附上上一次的执行结果。\
-                         下面的结果就是该查询的完整结果（即使这条查询最初来自其他子任务或你已压缩的上下文，也请直接使用）。\
-                         若需要不同信息，请修改查询/path_filter/budget_tokens，或换一种方法\
-                         （find_references、goto_definition、Read 指定行段）。",
+                        "blocked: true\nloop guard: this exact {tool} query (identical params; index unchanged since last run)\
+                         already ran {prior} times in the last {} seconds (limit {}); not re-executed — previous result attached below.\
+                         That result is complete for this query (use it even if the original call was from another subtask or compressed context).\
+                         For different info, change query/path_filter/budget_tokens, or switch approach\
+                         (find_references, goto_definition, Read with a line range).",
                         cfg.repeat_window.as_secs(),
                         cfg.repeat_max
                     );
@@ -290,7 +290,7 @@ mod tests {
             Verdict::Block { note, cached } => {
                 assert_eq!(cached, "res:q");
                 assert!(note.contains("blocked: true"), "{note}");
-                assert!(!note.contains("结果与之前相同"), "{note}");
+                assert!(!note.contains("same result as before"), "{note}");
             }
             v => panic!("expected block, got {v:?}"),
         }

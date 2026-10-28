@@ -203,10 +203,10 @@ fn stdio_get_languages_returns_nonempty_text() {
             "content[0].text must be non-empty: {last}"
         );
         assert!(
-            !text.contains("尚未实现"),
+            !text.contains("not implemented yet"),
             "index path still reports unimplemented: {text}"
         );
-        let still_building = text.contains("索引正在后台构建")
+        let still_building = text.contains("Index is building in the background")
             || text.to_lowercase().contains("still building")
             || text.to_lowercase().contains("index is building");
         if still_building {
@@ -279,7 +279,7 @@ fn stdio_startup_failure_is_reported_as_tool_error() {
     assert_eq!(call["result"]["isError"], json!(true), "{call}");
     let text = call["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("not a directory"), "{text}");
-    assert!(text.contains("启动失败"), "{text}");
+    assert!(text.contains("failed to start"), "{text}");
     drop(stdin);
     let status = child.wait().unwrap();
     assert_eq!(status.code(), Some(1));
@@ -330,7 +330,7 @@ fn stdio_single_nested_repo_is_selected_automatically() {
             .as_str()
             .unwrap_or_default()
             .to_string();
-        if text.contains("索引正在后台构建") && Instant::now() < deadline {
+        if text.contains("Index is building in the background") && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(200));
             continue;
         }
@@ -340,5 +340,5 @@ fn stdio_single_nested_repo_is_selected_automatically() {
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&parent);
     assert!(text.contains("only_here_marker"), "{text}");
-    assert!(!text.contains("无法路由"), "{text}");
+    assert!(!text.contains("cannot route"), "{text}");
 }

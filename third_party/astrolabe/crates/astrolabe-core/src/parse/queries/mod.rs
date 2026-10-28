@@ -96,6 +96,7 @@ pub fn for_language(lang: Language) -> Option<LanguageQueries> {
         Language::Shell => queries!("bash"),
         Language::Ruby => queries!("ruby"),
         Language::Lua => queries!("lua"),
+        Language::Proto => queries!("proto"),
         // Vue SFCs are peeled in `parse::vue` and parsed with JS/TS queries.
         Language::Vue => return None,
     })
@@ -146,7 +147,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
 
-    const ALL: [Language; 20] = [
+    const ALL: [Language; 21] = [
         Language::Python,
         Language::Go,
         Language::Java,
@@ -167,6 +168,7 @@ mod tests {
         Language::Shell,
         Language::Ruby,
         Language::Lua,
+        Language::Proto,
     ];
 
     fn grammar(lang: Language) -> tree_sitter::Language {
@@ -194,6 +196,7 @@ mod tests {
             Language::Shell => tree_sitter::Language::new(tree_sitter_bash::LANGUAGE),
             Language::Ruby => tree_sitter::Language::new(tree_sitter_ruby::LANGUAGE),
             Language::Lua => tree_sitter::Language::new(tree_sitter_lua::LANGUAGE),
+            Language::Proto => tree_sitter::Language::new(tree_sitter_proto::LANGUAGE),
             Language::Vue => {
                 panic!("{lang:?} grammar not registered in query tests yet")
             }
@@ -413,7 +416,7 @@ mod tests {
                 );
             }
             let calls = compile(lang, q.calls, "calls");
-            if lang != Language::Dart {
+            if !matches!(lang, Language::Dart | Language::Proto) {
                 assert!(
                     calls.capture_names().contains(&NAME),
                     "{lang:?}: no @name capture in calls"
