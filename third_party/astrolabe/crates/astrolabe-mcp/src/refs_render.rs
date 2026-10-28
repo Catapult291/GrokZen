@@ -45,15 +45,15 @@ const SUMMARY_MAX_CALLERS: usize = 12;
 
 /// Marker of the index (graph) answer in the backend note; see
 /// `refs_graph::graph_references`.
-const GRAPH_ANSWER_MARK: &str = "索引作答";
+const GRAPH_ANSWER_MARK: &str = "Index answer";
 /// Note fragments that mean the answer may be incomplete or imprecise.
 const INCOMPLETE_MARKS: &[&str] = &[
     "still indexing",
     "incomplete",
-    "未核",
-    "不完整",
-    "可能不全",
-    "文本回退",
+    "unchecked",
+    "incomplete",
+    "may be incomplete",
+    "text fallback",
     "fallback",
 ];
 
@@ -192,7 +192,7 @@ pub(crate) fn context_blocks(
 }
 
 /// One line naming the non-test callers when tests outnumber them, e.g.
-/// `非测试调用方（3 处 / 2 个函数）：Relay@controller/relay.go×2(L271,L410)；…`.
+/// `Non-test callers (3 hits / 2 functions): Relay@controller/relay.go×2(L271,L410); …`.
 pub(crate) fn caller_summary(locations: &[Location], infos: &[HitInfo]) -> Option<String> {
     let code = |h: &HitInfo| !h.declaration && h.kind == HitKind::Code;
     let tests = infos.iter().filter(|h| h.test && code(h)).count();
@@ -204,7 +204,7 @@ pub(crate) fn caller_summary(locations: &[Location], infos: &[HitInfo]) -> Optio
     }
     if prod.is_empty() {
         return Some(format!(
-            "非测试调用方：0 处（{tests} 处代码引用全在测试里）。\n"
+            "Non-test callers: 0 hits ({tests} code references are all in tests).\n"
         ));
     }
     let mut callers: Vec<(String, Vec<u32>)> = Vec::new();
@@ -213,7 +213,7 @@ pub(crate) fn caller_summary(locations: &[Location], infos: &[HitInfo]) -> Optio
         let name = infos[i]
             .enclosing
             .as_ref()
-            .map_or("<顶层>", |(n, _, _)| n.as_str());
+            .map_or("<top-level>", |(n, _, _)| n.as_str());
         let key = format!("{name}@{path}");
         let line1 = locations[i].range.start.line + 1;
         match callers.iter_mut().find(|(k, _)| *k == key) {
@@ -234,15 +234,20 @@ pub(crate) fn caller_summary(locations: &[Location], infos: &[HitInfo]) -> Optio
             }
         })
         .collect();
+    let fn_word = if n_callers == 1 {
+        "function"
+    } else {
+        "functions"
+    };
     let mut out = format!(
-        "非测试调用方（{} 处 / {n_callers} 个函数；测试 {tests} 处）：{}",
+        "Non-test callers ({} hits / {n_callers} {fn_word}; test {tests} hits): {}",
         prod.len(),
-        parts.join("；")
+        parts.join("; ")
     );
     if n_callers > SUMMARY_MAX_CALLERS {
-        out.push_str(&format!("；…另 {} 个", n_callers - SUMMARY_MAX_CALLERS));
+        out.push_str(&format!("; …and {} more", n_callers - SUMMARY_MAX_CALLERS));
     }
-    out.push_str("。\n");
+    out.push_str(".\n");
     Some(out)
 }
 
@@ -255,14 +260,14 @@ pub(crate) fn complete_source(confidence: Confidence, note: Option<&str>) -> Opt
         return None;
     }
     match confidence {
-        Confidence::Exact => Some("语言服务器解析"),
+        Confidence::Exact => Some("language-server resolution"),
         Confidence::Scoped if note.contains(GRAPH_ANSWER_MARK) => {
-            Some(if note.contains("定义文件") {
+            Some(if note.contains("definition file") {
                 // TS/JS/Python: the declaring file, its importers and the
                 // re-export chain.
-                "索引：定义文件 + 全部导入方及转导出链"
+                "index: definition file + all importers and re-export chain"
             } else {
-                "索引：定义所在包 + 全部导入方"
+                "index: definition package + all importers"
             })
         }
         _ => None,
@@ -271,7 +276,9 @@ pub(crate) fn complete_source(confidence: Confidence, note: Option<&str>) -> Opt
 
 /// Closing line of a complete, unpaged reference list.
 pub(crate) fn completion_line(total: usize, files: usize, source: &str) -> String {
-    format!("已全列：共 {total} 处 / {files} 个文件，覆盖全仓（{source}），无需再 grep 复核。\n")
+    let hw = if total == 1 { "hit" } else { "hits" };
+    let fw = if files == 1 { "file" } else { "files" };
+    format!("Fully listed: {total} {hw} / {files} {fw}, repo-wide ({source}); no need to re-check with grep.\n")
 }
 
 #[cfg(test)]
@@ -357,6 +364,7 @@ mod tests {
         let r = run_find_references(
             FindReferencesParams {
                 root: None,
+                index_root: None,
                 symbol: "callee".into(),
                 path: Some("a.go".into()),
                 line: None,
@@ -425,13 +433,13 @@ mod tests {
         );
         assert!(
             text.contains(
-                "非测试调用方（2 处 / 2 个函数；测试 3 处）：Short@relay.go(L12)；Long@relay.go(L100)。"
+                "Non-test callers (2 hits / 2 functions; test 3 hits): Short@relay.go(L12); Long@relay.go(L100)."
             ),
             "{text}"
         );
         assert!(
             text.trim_end().ends_with(
-                "已全列：共 5 处 / 2 个文件，覆盖全仓（语言服务器解析），无需再 grep 复核。"
+                "Fully listed: 5 hits / 2 files, repo-wide (language-server resolution); no need to re-check with grep."
             ),
             "{text}"
         );
@@ -441,10 +449,10 @@ mod tests {
 
     #[test]
     fn completion_line_only_for_complete_answers() {
-        let graph = "索引作答（未启动语言服务器）：`callee` 全仓唯一定义 @relay.go:3；以下是包 ./ 内及导入该包的文件中的代码出现。";
+        let graph = "Index answer (language server not started): `callee` unique definition in repo @relay.go:3; code occurrences below are inside package ./ and files that import it.";
         let (text, _) = run(h1_like(Confidence::Scoped, Some(graph)), 2_500);
         assert!(
-            text.contains("已全列：共 5 处 / 2 个文件，覆盖全仓（索引：定义所在包 + 全部导入方）"),
+            text.contains("Fully listed: 5 hits / 2 files, repo-wide (index: definition package + all importers)"),
             "{text}"
         );
         for (c, note) in [
@@ -452,28 +460,29 @@ mod tests {
                 Confidence::Syntactic,
                 Some("language server still indexing, results may be incomplete"),
             ),
-            (Confidence::Scoped, Some("[多处定义] merged")),
+            (Confidence::Scoped, Some("[multiple definitions] merged")),
             (Confidence::Scoped, None),
             (Confidence::Exact, Some("language server still indexing")),
         ] {
             let (text, json) = run(h1_like(c, note), 2_500);
-            assert!(!text.contains("已全列"), "{c:?} {note:?}: {text}");
+            assert!(!text.contains("Fully listed"), "{c:?} {note:?}: {text}");
             assert_eq!(json["complete"], false);
         }
         // TS index answer: complete, labelled with the re-export chain;
         // a truncated re-export walk is not complete.
-        let ts = "索引作答（未启动语言服务器）：`f` 全仓唯一定义 @a.ts:1；以下是定义文件、导入它的文件中的代码出现。";
+        let ts = "Index answer (language server not started): `f` unique definition in repo @a.ts:1; code occurrences below are in the definition file and files that import it.";
         let (text, _) = run(h1_like(Confidence::Scoped, Some(ts)), 2_500);
         assert!(
-            text.contains("（索引：定义文件 + 全部导入方及转导出链）"),
+            text.contains(" (index: definition file + all importers and re-export chain)"),
             "{text}"
         );
-        let cut = format!("{ts}转导出链超过跟踪上限，结果可能不全。");
+        let cut =
+            format!("{ts}re-export chain exceeded tracking limit; results may be incomplete.");
         let (text, _) = run(h1_like(Confidence::Scoped, Some(&cut)), 2_500);
-        assert!(!text.contains("已全列"), "{text}");
-        let receiver = format!("{graph}\n[接收者未核] 2 处");
+        assert!(!text.contains("Fully listed"), "{text}");
+        let receiver = format!("{graph}\n[receiver unchecked] 2 hits");
         let (text, _) = run(h1_like(Confidence::Scoped, Some(&receiver)), 2_500);
-        assert!(!text.contains("已全列"), "{text}");
+        assert!(!text.contains("Fully listed"), "{text}");
     }
 
     #[test]
@@ -483,7 +492,7 @@ mod tests {
             run(h1_like(Confidence::Exact, None), 60)
         });
         assert!(!text.contains("> line"), "{text}");
-        assert!(!text.contains("已全列"), "{text}");
+        assert!(!text.contains("Fully listed"), "{text}");
         assert_eq!(json["complete"], false);
         // More than CONTEXT_MAX_HITS production hits: no context.
         let n = CONTEXT_MAX_HITS + 1;
@@ -498,8 +507,8 @@ mod tests {
         let (text, json) = with_context(CONTEXT_MAX_HITS, || run(fake, 2_500));
         assert!(!text.contains("> line"), "{text}");
         assert_eq!(json["context_blocks"], 0);
-        assert!(!text.contains("非测试调用方"), "{text}");
-        assert!(text.contains("已全列：共 9 处"), "{text}");
+        assert!(!text.contains("Non-test callers"), "{text}");
+        assert!(text.contains("Fully listed: 9 hits / 1 file"), "{text}");
     }
 
     #[test]
@@ -520,12 +529,12 @@ mod tests {
         ];
         assert_eq!(
             caller_summary(&locs, &infos).unwrap(),
-            "非测试调用方（2 处 / 1 个函数；测试 3 处）：Run@a.go×2(L5,L7)。\n"
+            "Non-test callers (2 hits / 1 function; test 3 hits): Run@a.go×2(L5,L7).\n"
         );
         let only_tests: Vec<HitInfo> = (0..3).map(|_| hit(None, true)).collect();
         assert_eq!(
             caller_summary(&locs[2..], &only_tests).unwrap(),
-            "非测试调用方：0 处（3 处代码引用全在测试里）。\n"
+            "Non-test callers: 0 hits (3 code references are all in tests).\n"
         );
         // Production hits not outnumbered: no line.
         assert!(caller_summary(&locs[..3], &infos[..3]).is_none());
@@ -578,10 +587,13 @@ mod tests {
         assert!(text.contains("in Short[10-14]: callee(x)"), "{text}");
         assert!(text.contains("in Long[50-150]: callee(x)"), "{text}");
         assert!(
-            text.contains("非测试调用方（2 处 / 2 个函数；测试 3 处）"),
+            text.contains("Non-test callers (2 hits / 2 functions; test 3 hits)"),
             "{text}"
         );
-        assert!(text.trim_end().ends_with("无需再 grep 复核。"), "{text}");
+        assert!(
+            text.trim_end().ends_with("no need to re-check with grep."),
+            "{text}"
+        );
         assert_eq!(json["complete"], true);
     }
 

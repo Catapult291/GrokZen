@@ -200,16 +200,21 @@ impl RootDispatcher {
     /// If the set would exceed [`DispatcherConfig::resident_roots`], the
     /// least-recently-used root(s) are removed and returned. The caller must
     /// stop their watcher, yield the leader lock, and recycle any LSP for each
-    /// returned path. Unknown roots (not in [`Self::children`]) are ignored.
+    /// returned path. Roots not yet in [`Self::children`] are registered
+    /// (per-call `index_root` outside the startup set) and then activated.
     #[must_use = "evicted roots need watcher/lock/LSP teardown"]
     pub fn activate(&mut self, root: &Path, now: Instant) -> Vec<PathBuf> {
-        let Some(path) = self
+        let path = if let Some(existing) = self
             .children
             .iter()
             .find(|child| paths_eq(child, root))
             .cloned()
-        else {
-            return Vec::new();
+        {
+            existing
+        } else {
+            let path = root.to_path_buf();
+            self.children.push(path.clone());
+            path
         };
 
         if let Some(pos) = self.resident.iter().position(|p| paths_eq(p, &path)) {
@@ -583,18 +588,21 @@ mod tests {
         assert_eq!(d.route("anything"), None);
         assert_eq!(d.route("/abs/path/src.rs"), None);
         assert!(d.activate(Path::new("/x"), now).is_empty());
-        assert!(d.evict_idle(now + Duration::from_secs(10_000)).is_empty());
+        assert_eq!(d.resident(), &[PathBuf::from("/x")]);
+        assert!(d.children().iter().any(|c| c == Path::new("/x")));
+        let evicted = d.evict_idle(now + Duration::from_secs(10_000));
+        assert_eq!(evicted, vec![PathBuf::from("/x")]);
         assert!(d.resident().is_empty());
     }
 
     #[test]
-    fn activate_unknown_root_is_noop() {
+    fn activate_unknown_root_registers_and_resides() {
         let mut d = sample();
         let now = Instant::now();
-        assert!(d
-            .activate(Path::new("/Users/me/Project/missing"), now)
-            .is_empty());
-        assert!(d.resident().is_empty());
+        let missing = Path::new("/Users/me/Project/missing");
+        assert!(d.activate(missing, now).is_empty());
+        assert!(d.children().iter().any(|c| c == missing));
+        assert_eq!(d.resident(), &[PathBuf::from("/Users/me/Project/missing")]);
     }
 
     #[test]

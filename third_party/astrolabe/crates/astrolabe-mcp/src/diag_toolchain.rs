@@ -33,7 +33,7 @@ const OTHER_FILES_LISTED: usize = 3;
 /// Cap on one message (cargo/tsc can print long ones).
 const MESSAGE_MAX_CHARS: usize = 600;
 
-const LSP_HINT: &str = "要语言服务器诊断时传 lsp=true";
+const LSP_HINT: &str = "pass lsp=true for language-server diagnostics";
 
 /// `ASTROLABE_DIAGNOSTICS=lsp`: language server by default, as before.
 pub(crate) fn lsp_by_default() -> bool {
@@ -104,7 +104,7 @@ fn finish(
     let (mine, others): (Vec<Diagnostic>, Vec<Diagnostic>) =
         diags.into_iter().partition(|d| d.path == *rel);
     let mut note = format!(
-        "来源：{tool}（{scope}，{:.1} s），未启动语言服务器；{LSP_HINT}。",
+        "Source: {tool} ({scope}, {:.1} s); language server not started; {LSP_HINT}.",
         elapsed.as_secs_f64()
     );
     let other_errors: Vec<&Diagnostic> = others
@@ -117,15 +117,12 @@ fn finish(
             .take(OTHER_FILES_LISTED)
             .map(|d| format!("{}:{}", d.path.as_str(), d.range.start.line + 1))
             .collect();
+        let n = other_errors.len();
+        let noun = if n == 1 { "error" } else { "errors" };
         note.push_str(&format!(
-            "\n其他文件另有 {} 条错误（{}{}）。",
-            other_errors.len(),
-            listed.join("、"),
-            if other_errors.len() > OTHER_FILES_LISTED {
-                " 等"
-            } else {
-                ""
-            }
+            "\nOther files have {n} more {noun} ({}{}).",
+            listed.join(", "),
+            if n > OTHER_FILES_LISTED { " etc." } else { "" }
         ));
     }
     Precise {
@@ -145,7 +142,7 @@ fn syntax_only(
     let source = match astrolabe_core::text::read_source(&root.join(rel.as_str())) {
         Ok(s) => s,
         Err(e) => {
-            return Precise::unknown(Vec::new(), format!("无法读取 `{}`：{e}", rel.as_str()));
+            return Precise::unknown(Vec::new(), format!("Cannot read `{}`: {e}", rel.as_str()));
         }
     };
     let mut value = Vec::new();
@@ -162,12 +159,12 @@ fn syntax_only(
     let mut note = String::new();
     if !why.is_empty() {
         note.push_str(why);
-        if !why.ends_with(['。', '\n']) {
-            note.push('。');
+        if !why.ends_with(['.', '\n']) {
+            note.push('.');
         }
     }
     note.push_str(&format!(
-        "只做了语法检查（tree-sitter，只报第一处），没有类型检查；跑构建/测试，或{LSP_HINT}。"
+        "Syntax check only (tree-sitter, first error only); no type check — run build/tests, or {LSP_HINT}."
     ));
     Precise {
         confidence: Confidence::Syntactic,
@@ -287,9 +284,9 @@ fn kill_group(child: &mut std::process::Child) {
 
 fn skipped(tool: &str, error: RunError) -> Outcome {
     Outcome::Skipped(match error {
-        RunError::Missing => format!("找不到 {tool}"),
-        RunError::TimedOut(t) => format!("{tool} 超过 {} s 未完成，已终止", t.as_secs()),
-        RunError::Other(e) => format!("{tool} 无法运行：{e}"),
+        RunError::Missing => format!("{tool} not found"),
+        RunError::TimedOut(t) => format!("{tool} did not finish within {} s; killed", t.as_secs()),
+        RunError::Other(e) => format!("{tool} cannot run: {e}"),
     })
 }
 
@@ -376,7 +373,9 @@ fn go_check(root: &Path, rel: &RelPath) -> Outcome {
         return Outcome::Skipped(String::new());
     };
     let Some(mod_dir) = find_up(root, &dir, "go.mod") else {
-        return Outcome::Skipped("文件不在 Go 模块里（找不到 go.mod），没法用 go 编译检查".into());
+        return Outcome::Skipped(
+            "File is not in a Go module (no go.mod); cannot type-check with go".into(),
+        );
     };
     let timeout = timeout_for(30);
     let started = Instant::now();
@@ -390,7 +389,7 @@ fn go_check(root: &Path, rel: &RelPath) -> Outcome {
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| ".".into());
-    let scope = format!("包 {pkg}");
+    let scope = format!("package {pkg}");
     // 1. `go vet .`: type-checks the package with its tests and runs the
     //    analyzers, without linking (30-50 MiB, 0.1-0.8 s on a warm cache).
     let vet = match run_go(&["vet", "."], &dir, &mut work_off, timeout) {
@@ -403,7 +402,7 @@ fn go_check(root: &Path, rel: &RelPath) -> Outcome {
     }
     if vet.status == Some(0) {
         return Outcome::Ran {
-            tool: "go vet（含测试文件的类型检查）",
+            tool: "go vet (type-check including test files)",
             scope,
             diags: parse_go(root, &dir, rel, &vet_text, Severity::Warning),
         };
@@ -411,7 +410,7 @@ fn go_check(root: &Path, rel: &RelPath) -> Outcome {
     if !go_compile_trouble(&vet_text) {
         // Only analyzer findings.
         return Outcome::Ran {
-            tool: "go vet（含测试文件的类型检查）",
+            tool: "go vet (type-check including test files)",
             scope,
             diags: parse_go(root, &dir, rel, &vet_text, Severity::Warning),
         };
@@ -422,7 +421,7 @@ fn go_check(root: &Path, rel: &RelPath) -> Outcome {
     let left = timeout.saturating_sub(started.elapsed());
     if left.is_zero() {
         return Outcome::Ran {
-            tool: "go vet（只报第一处类型错误）",
+            tool: "go vet (first type error only)",
             scope,
             diags: vet_diags,
         };
@@ -454,7 +453,7 @@ fn go_check(root: &Path, rel: &RelPath) -> Outcome {
                 Severity::Error,
             );
             Outcome::Ran {
-                tool: "go 编译器（含测试文件，-gcflags=-e 列全部错误）",
+                tool: "go compiler (including test files; -gcflags=-e lists all errors)",
                 scope,
                 diags: if diags.is_empty() { vet_diags } else { diags },
             }
@@ -463,12 +462,12 @@ fn go_check(root: &Path, rel: &RelPath) -> Outcome {
         // for analyzer findings too) was not a build failure, so the located
         // findings are analyzer warnings.
         Ok(out) if out.status == Some(0) => Outcome::Ran {
-            tool: "go vet（含测试文件的类型检查）",
+            tool: "go vet (type-check including test files)",
             scope,
             diags: parse_go(root, &dir, rel, &vet_text, Severity::Warning),
         },
         _ => Outcome::Ran {
-            tool: "go vet（只报第一处类型错误）",
+            tool: "go vet (first type error only)",
             scope,
             diags: vet_diags,
         },
@@ -498,7 +497,7 @@ fn go_workspace_skip(text: &str) -> Outcome {
         .take(200)
         .collect::<String>();
     Outcome::Skipped(format!(
-        "go 工作区（go.work）不覆盖这个模块，GOWORK=off 也没能编译检查（{line}）"
+        "go workspace (go.work) does not cover this module; GOWORK=off also failed to type-check ({line})"
     ))
 }
 
@@ -727,7 +726,7 @@ fn rust_check(root: &Path, rel: &RelPath) -> Outcome {
         return Outcome::Skipped(String::new());
     };
     let Some(krate) = find_up(root, dir, "Cargo.toml") else {
-        return Outcome::Skipped("文件不在 Cargo 包里（找不到 Cargo.toml）".into());
+        return Outcome::Skipped("File is not in a Cargo package (no Cargo.toml)".into());
     };
     let in_targets = ["tests", "benches", "examples"]
         .iter()
@@ -756,7 +755,7 @@ fn rust_check(root: &Path, rel: &RelPath) -> Outcome {
         tool: if in_targets {
             "cargo check --all-targets"
         } else {
-            "cargo check（lib/bin，不含 #[cfg(test)]）"
+            "cargo check (lib/bin, excluding #[cfg(test)])"
         },
         scope: format!("crate {scope}"),
         diags,
@@ -861,7 +860,7 @@ fn ts_check(root: &Path, rel: &RelPath) -> Outcome {
         return Outcome::Skipped(String::new());
     };
     let Some(project) = find_up(root, dir, "tsconfig.json") else {
-        return Outcome::Skipped("找不到 tsconfig.json".into());
+        return Outcome::Skipped("tsconfig.json not found".into());
     };
     // The project's own TypeScript first: a global tsc may be another version.
     let local = {
@@ -991,7 +990,7 @@ fn python_check(root: &Path, rel: &RelPath) -> Outcome {
     };
     if out.status != Some(0) {
         return Outcome::Skipped(format!(
-            "python 语法检查失败：{}",
+            "python syntax check failed: {}",
             out.stderr.lines().last().unwrap_or("").trim()
         ));
     }
@@ -1014,8 +1013,8 @@ fn python_check(root: &Path, rel: &RelPath) -> Outcome {
         ));
     }
     Outcome::Ran {
-        tool: "python compile()（只查语法，没有类型检查）",
-        scope: "单文件".into(),
+        tool: "python compile() (syntax only, no type check)",
+        scope: "single file".into(),
         diags,
     }
 }
@@ -1223,7 +1222,7 @@ FAIL\tex.com/m/p [build failed]\n";
         let r = finish(
             &rel,
             "go",
-            "包 p",
+            "package p",
             vec![d("p/a.go", 1), d("p/b.go", 4), d("q/c.go", 9)],
             Duration::from_millis(420),
         );
@@ -1231,11 +1230,11 @@ FAIL\tex.com/m/p [build failed]\n";
         assert_eq!(r.value.len(), 1);
         let note = r.note.unwrap();
         assert!(
-            note.contains("未启动语言服务器") && note.contains("lsp=true"),
+            note.contains("language server not started") && note.contains("lsp=true"),
             "{note}"
         );
         assert!(
-            note.contains("其他文件另有 2 条错误（p/b.go:5、q/c.go:10）"),
+            note.contains("Other files have 2 more errors (p/b.go:5, q/c.go:10)"),
             "{note}"
         );
     }
@@ -1409,7 +1408,7 @@ FAIL\tex.com/m/p [build failed]\n";
         assert!(r
             .note
             .unwrap()
-            .contains("其他文件另有 1 条错误（src/a.ts:1）"));
+            .contains("Other files have 1 more error (src/a.ts:1)"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

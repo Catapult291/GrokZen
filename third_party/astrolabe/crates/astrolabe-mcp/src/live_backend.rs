@@ -198,10 +198,10 @@ impl LiveBackend {
         }
         let partners: BTreeSet<&str> = extra.iter().map(|l| l.path.as_str()).collect();
         let note = format!(
-            "{}语言服务器只给出了头文件里的声明；后面追加的 {} 处是配对源文件 {} 里的同名定义（syntactic：按头文件/源文件同名配对和符号名匹配）。",
+            "{}language server only returned declarations in the header; the following {} hits are same-name definitions in paired source {} (syntactic: header/source basename pairing and symbol-name match).",
             result.note.as_deref().map(|n| format!("{n} ")).unwrap_or_default(),
             extra.len(),
-            partners.into_iter().collect::<Vec<_>>().join("、")
+            partners.into_iter().collect::<Vec<_>>().join(", ")
         );
         let mut value = result.value;
         value.extend(extra);
@@ -318,7 +318,7 @@ impl LiveBackend {
                 if result.value.is_empty()
                     || (language == Language::Kotlin && result.value.len() <= 1) =>
             {
-                let reason = empty_note(language, "引用");
+                let reason = empty_note(language, "ref");
                 match text_fallback_references_in(&self.root, rel, target, &reason, files) {
                     Some(fallback) if fallback.value.len() > result.value.len().max(1) => fallback,
                     _ => result,
@@ -506,12 +506,12 @@ fn warming_unknown<T>(value: &[T], result: &Precise<Vec<T>>) -> bool {
 fn warming_note(language: Language, n: usize, what: &str) -> String {
     let server = astrolabe_core::lsp::router::primary_server_name(language);
     let head = format!(
-        "{server} 仍在导入项目 / 建立索引，精确结果稍后可用（首次导入大型 Gradle 项目可能需要十几分钟，之后有缓存）"
+        "{server} is still importing the project / building its index; precise results will be available shortly (first import of a large Gradle project may take 10+ minutes, then cached)"
     );
     if n == 0 {
         head
     } else {
-        format!("{head}。先给出 tree-sitter 语法索引里的{what} {n} 处（syntactic：按名字匹配，可能含同名的其他实体）。")
+        format!("{head}. Showing {n} {what} from the tree-sitter syntactic index first (syntactic: name match; may include other same-name entities).")
     }
 }
 
@@ -521,21 +521,21 @@ fn warming_note(language: Language, n: usize, what: &str) -> String {
 fn empty_note(language: Language, what: &str) -> String {
     let server = astrolabe_core::lsp::router::primary_server_name(language);
     let why = match language {
-        Language::Kotlin => "该文件可能不在它导入的项目模型里（例如 Kotlin 多平台 / Android 源集未被导入、未安装 Android SDK）",
-        Language::Java => "该文件可能不在它导入的 Maven / Gradle 项目里",
-        Language::Go => "该文件可能不在 go.mod 模块或当前构建标签里",
+        Language::Kotlin => "This file may be outside the imported project model (e.g. Kotlin multiplatform / Android source set not imported, Android SDK missing)",
+        Language::Java => "This file may be outside the imported Maven / Gradle project",
+        Language::Go => "This file may be outside the go.mod module or current build tags",
         Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Vue => {
-            "该文件可能不在 tsconfig / jsconfig 覆盖的范围里"
+            "This file may be outside tsconfig / jsconfig coverage"
         }
-        Language::Python => "该文件可能不在 pyright 的分析范围里（解释器 / 虚拟环境未配置）",
-        Language::Rust => "该文件可能不在 Cargo 工作区的 crate 里",
+        Language::Python => "This file may be outside pyright's analysis scope (interpreter / venv not configured)",
+        Language::Rust => "This file may be outside a crate in the Cargo workspace",
         Language::C | Language::Cpp | Language::ObjC | Language::ObjCpp => {
-            "该文件可能没有编译参数（缺 compile_commands.json）"
+            "This file may lack compile args (missing compile_commands.json)"
         }
-        Language::CSharp | Language::VisualBasic => "该文件可能不在已加载的 .csproj / .sln 里",
-        _ => "该文件可能不在它加载的项目里",
+        Language::CSharp | Language::VisualBasic => "This file may be outside the loaded .csproj / .sln",
+        _ => "This file may be outside the loaded project",
     };
-    format!("{server} 没有返回{what}：{why}，所以空结果不作为精确结论。")
+    format!("{server} returned no {what}: {why}, so an empty result is not a precise conclusion.")
 }
 
 /// Languages whose declarations can answer for each other (mixed projects).
@@ -546,16 +546,16 @@ fn same_family(a: Language, b: Language) -> bool {
 /// Note shown when a tool needs a path but was not given one.
 fn needs_path(what: &str) -> String {
     format!(
-        "无法确定语言：{what} 需要 `path` 来选择语言服务器。\
-         请补上仓库相对路径，例如 `crates/core/src/lib.rs`。"
+        "Cannot determine language: {what} needs `path` to pick a language server.
+         Add a repo-relative path, e.g. `crates/core/src/lib.rs`."
     )
 }
 
 /// Note when a path was given but its extension is not mapped to a language.
 fn unknown_language(what: &str, path: &str) -> String {
     format!(
-        "无法确定语言：路径 `{path}` 未映射到已知语言，{what} 无法选择语言服务器。\
-         请改用带已知扩展名的源文件（如 `.rs` / `.ts` / `.py`）。"
+        "Cannot determine language: path `{path}` maps to no known language, so {what} cannot pick a language server.
+         Use a source file with a known extension (e.g. `.rs` / `.ts` / `.py`)."
     )
 }
 
@@ -637,7 +637,10 @@ impl PreciseCapability for LiveBackend {
         character: Option<u32>,
     ) -> Precise<Vec<Location>> {
         let Some(language) = server_language(&self.root, path) else {
-            return Precise::unknown(Vec::new(), unknown_language("精确定义查询", path));
+            return Precise::unknown(
+                Vec::new(),
+                unknown_language("precise definition query", path),
+            );
         };
         let rel = RelPath::new(path);
         // The symbol wins over coordinates that disagree with it.
@@ -682,7 +685,7 @@ impl PreciseCapability for LiveBackend {
     fn diagnostics_with(&self, path: &str, lsp: bool) -> Precise<Vec<Diagnostic>> {
         let rel = RelPath::new(path);
         let Some(language) = server_language(&self.root, path) else {
-            return Precise::unknown(Vec::new(), unknown_language("诊断", path));
+            return Precise::unknown(Vec::new(), unknown_language("diagnostics", path));
         };
         let use_server = self.lsp_enabled
             && (lsp
@@ -696,7 +699,11 @@ impl PreciseCapability for LiveBackend {
             query_server(server, &rel, FetchOptions::default())
         }) {
             Ok(result) => result,
-            Err(error) => Precise::unknown(Vec::new(), error.to_string()),
+            // Distinguish missing LSP vs timeout the same way as query_server.
+            Err(error) => Precise::unknown(
+                Vec::new(),
+                astrolabe_core::lsp::diagnostics::error_note(&error, &rel),
+            ),
         }
     }
 
@@ -757,11 +764,14 @@ impl LiveBackend {
                 }
             }
         }
-        let language =
-            match server_language_from_opt_path(&self.root, path.as_deref(), "精确引用查询") {
-                Ok(lang) => lang,
-                Err(note) => return Precise::unknown(Vec::new(), note),
-            };
+        let language = match server_language_from_opt_path(
+            &self.root,
+            path.as_deref(),
+            "precise references query",
+        ) {
+            Ok(lang) => lang,
+            Err(note) => return Precise::unknown(Vec::new(), note),
+        };
         let rel = RelPath::new(path.as_deref().expect("language resolved"));
         // The symbol wins over coordinates that disagree with it.
         if let Some(pos) = position {
@@ -840,10 +850,7 @@ impl LiveBackend {
             (Some(line), Some(character), _) => SymbolAt::Position(Position { line, character }),
             (_, _, Some(name)) if !name.is_empty() => SymbolAt::Name(name),
             _ => {
-                return Precise::unknown(
-                    Vec::new(),
-                    "需要提供 symbol，或同时提供 line 与 character。",
-                );
+                return Precise::unknown(Vec::new(), "Provide symbol, or both line and character.");
             }
         };
         // Index first: the server starts only when the index cannot decide.
@@ -871,14 +878,14 @@ impl LiveBackend {
                 }
                 let note = if !result.value.is_empty() {
                     format!(
-                        "{}没能解析这个调用（只指回了调用处本身，常见于没有 compile_commands.json 或缺 include 路径）；先给出 tree-sitter 语法索引里的同名声明 {} 处，按头文件/源文件配对和 include 关系排在前面（syntactic：按名字匹配，可能含同名的其他实体）。",
+                        "{} could not resolve this call (only pointed back at the call site; common without compile_commands.json or include paths). Showing {1} same-name declarations from the tree-sitter syntactic index first, ordered by header/source pairing and includes (syntactic: name match; may include other same-name entities).",
                         primary_server_name(language),
                         hits.len()
                     )
                 } else if busy {
-                    warming_note(language, hits.len(), "同名声明")
+                    warming_note(language, hits.len(), "same-name declarations")
                 } else {
-                    format!("{}先给出 tree-sitter 语法索引里的同名声明 {} 处（syntactic：按名字匹配，可能含同名的其他实体）。", empty_note(language, "定义"), hits.len())
+                    format!("{}Showing {1} same-name declarations from the tree-sitter syntactic index first (syntactic: name match; may include other same-name entities).", empty_note(language, "def"), hits.len())
                 };
                 Precise {
                     confidence: Confidence::Syntactic,
@@ -952,7 +959,7 @@ impl LiveBackend {
                         &index,
                         &own,
                         name,
-                        "声明在该文件内",
+                        "declared in this file",
                     ));
                 }
                 if !own.is_empty() {
@@ -1003,8 +1010,15 @@ impl LiveBackend {
                 .into_iter()
                 .filter(|&i| !is_member(symbols[i].kind))
                 .collect();
-                (decls.len() == 1)
-                    .then(|| index_answer(&self.root, &index, &decls, &name, "同包唯一声明"))
+                (decls.len() == 1).then(|| {
+                    index_answer(
+                        &self.root,
+                        &index,
+                        &decls,
+                        &name,
+                        "unique declaration in the same package",
+                    )
+                })
             }
             Qualifier::Selector(base) => {
                 let dir = go_package_dir(&index, &self.root, rel, &lines, base)?;
@@ -1014,8 +1028,15 @@ impl LiveBackend {
                 .into_iter()
                 .filter(|&i| !is_member(symbols[i].kind))
                 .collect();
-                (decls.len() == 1)
-                    .then(|| index_answer(&self.root, &index, &decls, &name, "按导入包解析"))
+                (decls.len() == 1).then(|| {
+                    index_answer(
+                        &self.root,
+                        &index,
+                        &decls,
+                        &name,
+                        "resolved via imported package",
+                    )
+                })
             }
             // Member access: the receiver's type decides.
             Qualifier::Member => None,
@@ -1059,7 +1080,7 @@ impl LiveBackend {
         Some(Precise {
             confidence: Confidence::Syntactic,
             note: Some(format!(
-                "以下为索引结果（syntactic：同语言文件里 `{name}` 的全词匹配，可能含注释、字符串和同名的其他实体）。\n{hint}"
+                "Index results below (syntactic: whole-word `{name}` in same-language files; may include comments, strings, and other same-name entities).\n{hint}"
             )),
             value: text.value,
         })
@@ -1082,7 +1103,7 @@ impl LiveBackend {
         Some(Precise {
             confidence: Confidence::Syntactic,
             note: Some(format!(
-                "以下为索引里的同名声明 {} 处（syntactic：按名字匹配，本文件和 include/import 的文件排在前面）。\n{}",
+                "Index same-name declarations below ({} hits; syntactic: name match; this file and include/import files first).\n{}",
                 hits.len(),
                 missing_server_line(language, error)
             )),
@@ -1097,9 +1118,9 @@ impl LiveBackend {
 fn missing_server_line(language: Language, error: &LspError) -> String {
     let server = primary_server_name(language);
     let (what, detail) = match error {
-        LspError::Unavailable(_, hint) => ("未安装", hint.as_str()),
-        LspError::Startup(_, why) => ("启动失败", why.as_str()),
-        _ => ("没有应答", ""),
+        LspError::Unavailable(_, hint) => ("not installed", hint.as_str()),
+        LspError::Startup(_, why) => ("failed to start", why.as_str()),
+        _ => ("no response", ""),
     };
     let mut detail: String = detail
         .lines()
@@ -1117,9 +1138,13 @@ fn missing_server_line(language: Language, error: &LspError) -> String {
         detail = detail.replace(marker, "unavailable");
     }
     if detail.is_empty() {
-        format!("语言服务器 {server} {what}，精确结果需安装后重试。")
+        format!("{server} {what}; install & retry.")
     } else {
-        format!("语言服务器 {server} {what}，精确结果需安装后重试：{detail}")
+        // Cap detail so prefix + detail stays under HINT_CHARS + small slack.
+        let prefix = format!("{server} {what}: ");
+        let room = HINT_CHARS.saturating_sub(prefix.chars().count());
+        let detail: String = detail.chars().take(room).collect();
+        format!("{prefix}{detail}")
     }
 }
 
@@ -1296,7 +1321,9 @@ fn index_answer(
     }
     Precise {
         confidence: Confidence::Scoped,
-        note: Some(format!("索引解析（{why}），未启动语言服务器。")),
+        note: Some(format!(
+            "Index resolution ({why}); language server not started."
+        )),
         value,
     }
 }
@@ -2067,7 +2094,7 @@ mod recall_harness {
                     let note = r.as_ref().and_then(|r| r.note.clone()).unwrap_or_default();
                     match r {
                         None => site_none += 1,
-                        Some(_) if note.contains("已按定义分组") => site_group += 1,
+                        Some(_) if note.contains("grouped by definition") => site_group += 1,
                         Some(r) => {
                             let has_decl = r.value.iter().any(|h| {
                                 h.path.as_str() == path && h.range.start.line + 1 == *line1
@@ -2137,10 +2164,10 @@ mod graph_first_tests {
         assert_eq!(r.confidence, Confidence::Scoped, "{r:?}");
         let note = r.note.clone().unwrap();
         assert!(
-            note.contains("不存在") && note.contains("service/channel.go"),
+            note.contains("does not exist") && note.contains("service/channel.go"),
             "{note}"
         );
-        assert!(note.contains("未启动语言服务器"), "{note}");
+        assert!(note.contains("language server not started"), "{note}");
         assert!(!note.contains("Kotlin"), "{note}");
         let got: Vec<String> = r
             .value
@@ -2192,7 +2219,7 @@ mod graph_first_tests {
         assert_eq!(r.confidence, Confidence::Scoped, "{r:?}");
         let note = r.note.clone().unwrap();
         assert!(
-            note.contains("未启动语言服务器") && note.contains("转导出"),
+            note.contains("language server not started") && note.contains("re-export"),
             "{note}"
         );
         let got: Vec<String> = r
@@ -2211,24 +2238,24 @@ mod graph_first_tests {
         assert!(!backend.pool.is_resident(Language::TypeScript));
         assert_eq!(
             crate::refs_render::complete_source(r.confidence, r.note.as_deref()),
-            Some("索引：定义文件 + 全部导入方及转导出链")
+            Some("index: definition file + all importers and re-export chain")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn empty_note_mentions_kotlin_only_for_kotlin() {
-        assert!(empty_note(Language::Kotlin, "引用").contains("Android"));
+        assert!(empty_note(Language::Kotlin, "ref").contains("Android"));
         for lang in [
             Language::Go,
             Language::TypeScript,
             Language::Python,
             Language::Rust,
         ] {
-            let n = empty_note(lang, "引用");
+            let n = empty_note(lang, "ref");
             assert!(!n.contains("Kotlin") && !n.contains("Android"), "{n}");
         }
-        assert!(empty_note(Language::Go, "引用").contains("go.mod"));
+        assert!(empty_note(Language::Go, "ref").contains("go.mod"));
     }
 }
 
@@ -2302,7 +2329,11 @@ mod index_first_tests {
         let r = backend.definition("controller/relay.go", None, Some(11), Some(10));
         assert_eq!(r.confidence, Confidence::Scoped, "{r:?}");
         assert_eq!(at(&r), vec!["service/channel.go:4:5"]);
-        assert!(r.note.as_deref().unwrap().contains("未启动语言服务器"));
+        assert!(r
+            .note
+            .as_deref()
+            .unwrap()
+            .contains("language server not started"));
         // Same package, unqualified.
         let r = backend.definition("service/channel.go", None, Some(3), Some(44));
         assert_eq!(at(&r), vec!["service/channel.go:6:5"], "{r:?}");
@@ -2385,7 +2416,7 @@ mod index_first_tests {
         );
         let note = r.note.clone().unwrap();
         assert!(
-            note.contains("索引作答") && note.contains("jdtls 未安装"),
+            note.contains("Index answer") && note.contains("jdtls not installed"),
             "{note}"
         );
         assert_eq!(note.lines().count(), 2, "{note}");
@@ -2395,7 +2426,10 @@ mod index_first_tests {
         let r = backend.definition("src/b/Use.java", None, Some(7), Some(17));
         assert_eq!(r.confidence, Confidence::Syntactic, "{r:?}");
         assert_eq!(at(&r), vec!["src/a/Foo.java:4:0"]);
-        assert!(r.note.as_deref().unwrap().contains("未安装"), "{r:?}");
+        assert!(
+            r.note.as_deref().unwrap().contains("not installed"),
+            "{r:?}"
+        );
         // Index-first is Go only; without a server Java still gets the
         // same-name declarations, origin file first.
         let r = backend.definition("src/b/Use.java", None, Some(7), Some(25));

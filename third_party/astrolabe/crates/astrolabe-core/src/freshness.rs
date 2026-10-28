@@ -92,7 +92,7 @@ pub fn barrier_decision(
 #[must_use]
 pub fn staleness_note(suspects: usize) -> String {
     format!(
-        "索引可能过期：{suspects} 个疑点文件未内联修复，已触发后台重索引。本结果须按 stale 解读。confidence: unknown"
+        "Index may be stale: {suspects} suspect file(s) were not repaired inline; a background reindex was triggered. Treat this result as stale. confidence: unknown"
     )
 }
 
@@ -301,7 +301,7 @@ mod tests {
 
         let seven = staleness_note(7);
         assert!(seven.contains('7'), "{seven}");
-        assert!(seven.contains("7 个疑点"), "{seven}");
+        assert!(seven.contains("7 suspect"), "{seven}");
         assert!(seven.contains("confidence: unknown"), "{seven}");
     }
 }

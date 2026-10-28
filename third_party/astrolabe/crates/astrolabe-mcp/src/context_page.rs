@@ -23,7 +23,8 @@ const SYMBOLS_PER_FILE: usize = 4;
 const COMPACT_SYMBOLS: usize = 6;
 const NO_MATCH_FILES: usize = 5;
 /// Leads the one-line list of small-repo files that did not match the task.
-pub(crate) const PADDING_PREFIX: &str = "未匹配任务词的其余文件（小仓库，仅列路径）：";
+pub(crate) const PADDING_PREFIX: &str =
+    "Other files not matching task terms (small repo; paths only):";
 
 pub(crate) struct PageRequest<'a> {
     pub graph: &'a CodeGraph,
@@ -157,18 +158,18 @@ pub(crate) fn build_page(req: &PageRequest) -> Page {
     }
     if req.offset > total_listed {
         body.push_str(&format!(
-            "offset={} 超出总数 {total_listed}，本页为空；offset=0 重新开始。\n",
+            "offset={} beyond total {total_listed}; this page is empty; use offset=0 to restart.\n",
             req.offset
         ));
     }
     let scope = req
         .path_filter
         .filter(|p| !p.is_empty())
-        .map(|p| format!("（path_filter={p}）"))
+        .map(|p| format!("(path_filter={p})"))
         .unwrap_or_default();
     if !unmatched {
         body.push_str(&format!(
-            "匹配 {matched_count} 个文件{scope}，本页第 {}–{}，按相关度降序（任务点名的标识符/路径所在文件在前）。\n",
+            "Matched {matched_count} files{scope}; this page items {}–{}, ranked by relevance (files named by task identifiers/paths first).\n",
             if page.is_empty() { 0 } else { offset + 1 },
             end
         ));
@@ -196,7 +197,7 @@ pub(crate) fn build_page(req: &PageRequest) -> Page {
     }
     if !padding.is_empty() || padded_tests > 0 {
         let tests = if padded_tests > 0 {
-            format!("；另有测试文件 {padded_tests} 个")
+            format!("; plus {padded_tests} test files")
         } else {
             String::new()
         };
@@ -204,7 +205,7 @@ pub(crate) fn build_page(req: &PageRequest) -> Page {
     }
     if unmatched {
         body.push_str(&format!(
-            "未匹配到与任务相关的符号或文件{scope}：任务词没有命中任何文件名或符号名。上面 {} 个只是仓库里依赖关系最中心的文件，与任务无关，不要据此判断相关性。\n建议：字面量/文案用 search_code，已知名字用 find_symbol。\n",
+            "No task-related symbols or files matched{scope}: task terms hit no file or symbol names. The {} above are only the most central files by dependency, unrelated to the task — do not judge relevance from them.\nSuggestion: use search_code for literals/copy; use find_symbol for known names.\n",
             page.len()
         ));
     }
@@ -256,7 +257,7 @@ pub(crate) fn build_page(req: &PageRequest) -> Page {
         }
         if omitted > 0 {
             body.push_str(&format!(
-                "{omitted} 个符号因 budget_tokens 被省略（用 find_symbol 取指定符号）。\n"
+                "{omitted} symbols omitted due to budget_tokens (use find_symbol for specific symbols).\n"
             ));
         }
     }
@@ -281,7 +282,7 @@ fn decision_line(
     by_id: &HashMap<FileId, &CodeFile>,
 ) -> String {
     if end >= list.len() {
-        return "已到最后一页。\n".to_string();
+        return "Last page reached.\n".to_string();
     }
     let rest = list.len() - end;
     let mut dirs: BTreeMap<&str, usize> = BTreeMap::new();
@@ -297,9 +298,9 @@ fn decision_line(
         .take(3)
         .map(|(d, n)| format!("{d}/ ×{n}"))
         .collect::<Vec<_>>()
-        .join("、");
+        .join(", ");
     format!(
-        "还有 {rest} 个文件未显示；下一页（offset={end}）主要在 {dir_text}。选择：缩小范围——path_filter=目录 或在任务里写具体标识符；或翻页——offset={end}。\n"
+        "and {rest} more files not shown; next page (offset={end}) is mainly under {dir_text}. Options: narrow with path_filter=dir or name concrete identifiers in the task; or page with offset={end}.\n"
     )
 }
 
@@ -369,16 +370,16 @@ mod tests {
     fn padded(body: &str) -> Vec<String> {
         body.lines()
             .filter_map(|l| l.strip_prefix(PADDING_PREFIX))
-            .flat_map(|l| l.split('；').next().unwrap_or_default().split("  "))
+            .flat_map(|l| l.split(';').next().unwrap_or_default().split("  "))
             .filter(|p| !p.is_empty())
             .map(str::to_string)
             .collect()
     }
 
     fn next_offset(body: &str) -> Option<usize> {
-        let at = body.find("（offset=")?;
-        body[at + "（offset=".len()..]
-            .split('）')
+        let at = body.find("(offset=")?;
+        body[at + "(offset=".len()..]
+            .split(')')
             .next()?
             .parse()
             .ok()
@@ -394,9 +395,9 @@ mod tests {
         loop {
             let p = page(&g, task, offset, None);
             assert_eq!(p.total, 70, "{}", p.body);
-            assert!(p.body.contains("匹配 70 个文件"), "{}", p.body);
+            assert!(p.body.contains("Matched 70 files"), "{}", p.body);
             assert!(
-                p.body.contains(&format!("本页第 {}–", offset + 1)),
+                p.body.contains(&format!("this page items {}–", offset + 1)),
                 "{}",
                 p.body
             );
@@ -408,14 +409,14 @@ mod tests {
             pages += 1;
             match next_offset(&p.body) {
                 Some(next) => {
-                    assert!(p.body.contains("还有 "), "{}", p.body);
+                    assert!(p.body.contains("and "), "{}", p.body);
                     assert!(p.body.contains("path_filter"), "{}", p.body);
                     assert!(p.body.contains("dir"), "next-page dirs: {}", p.body);
                     assert_eq!(next, seen.len());
                     offset = next;
                 }
                 None => {
-                    assert!(p.body.contains("已到最后一页"), "{}", p.body);
+                    assert!(p.body.contains("Last page reached"), "{}", p.body);
                     break;
                 }
             }
@@ -427,7 +428,7 @@ mod tests {
         // Past the end: empty page that says so.
         let p = page(&g, task, 500, None);
         assert!(files(&p.body).is_empty());
-        assert!(p.body.contains("超出总数"), "{}", p.body);
+        assert!(p.body.contains("beyond total"), "{}", p.body);
     }
 
     #[test]
@@ -459,7 +460,7 @@ mod tests {
             assert!(at < boundary, "matched file{i} after padding");
         }
         assert!(!p.body.contains("zzz"), "padding files get no symbols");
-        assert!(p.body.contains("已到最后一页"), "{}", p.body);
+        assert!(p.body.contains("Last page reached"), "{}", p.body);
         // Files come before symbols in the budget.
         let last_file = p.body.rfind("\n@").unwrap();
         let first_sym = p.body.find("widget_handler_").unwrap();
@@ -479,7 +480,7 @@ mod tests {
         let g = repo(70, 10);
         let p = page(&g, "qqqq zzzzzz", 0, None);
         assert!(p.unmatched);
-        assert!(p.body.contains("未匹配到"), "{}", p.body);
+        assert!(p.body.contains("No task-related"), "{}", p.body);
         assert!(files(&p.body).len() <= NO_MATCH_FILES);
         assert!(next_offset(&p.body).is_none(), "{}", p.body);
     }

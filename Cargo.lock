@@ -363,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "astrolabe-core"
-version = "0.17.0"
+version = "0.17.2"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -404,6 +404,7 @@ dependencies = [
  "tree-sitter-lua",
  "tree-sitter-objc",
  "tree-sitter-php",
+ "tree-sitter-proto",
  "tree-sitter-python",
  "tree-sitter-ruby",
  "tree-sitter-rust",
@@ -417,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "astrolabe-mcp"
-version = "0.17.0"
+version = "0.17.2"
 dependencies = [
  "anyhow",
  "astrolabe-core",
@@ -11875,6 +11876,16 @@ name = "tree-sitter-php"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d8c17c3ab69052c5eeaa7ff5cd972dd1bc25d1b97ee779fec391ad3b5df5592"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-proto"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c93b6f1ed20de442e900eb636f2176af6063953dfaa9f76bf168dd3b490a3a1"
 dependencies = [
  "cc",
  "tree-sitter-language",

@@ -1,8 +1,8 @@
 # Vendored third-party workspace.
 #
-# Upstream:  Astrolabe 0.17.0 (MIT OR Apache-2.0)
-#            https://github.com/wojiushirencai/Astrolabe, tag v0.17.0,
-#            commit e0be387b27129d5f70d724fcd19f74255c3a5aea.
+# Upstream:  Astrolabe 0.17.2 (MIT OR Apache-2.0)
+#            https://github.com/wojiushirencai/Astrolabe, tag v0.17.2,
+#            commit 65ab6e91fdd0e2c4f24e3810156c8429db1969f0.
 # Source of truth: that tag. Re-vendoring means replacing `crates/` and this
 # manifest, then re-applying the patches below (they are small and listed).
 #
@@ -31,7 +31,8 @@
 #       always on; watcher, built-in LSP, persistence and `.gitignore` policy
 #       selectable) and `pub(crate)` accessors for index state, stats, leader
 #       lock, root and `native_note_edited()`;
-#     - `SearchParams.glob` (include glob) plus `build_include_set()` and the
+#     - `SearchParams.glob` (include glob; `#[schemars(skip)]` keeps it out of
+#       the MCP schema and its size budget) plus `build_include_set()` and the
 #       two candidate filters that consume it.
 #  5. `crates/astrolabe-mcp/src/session.rs`: `pub(crate) fn note_edited()`;
 #     `scan_options()` keeps the cold build, inline repair and watcher on one
@@ -45,6 +46,9 @@
 #     and `.ignore` (VCS pattern files); ripgrep hides dotfiles, so returning
 #     them made `search_code` and `grep` disagree on the same literal. Unit
 #     tests cover that and the `respect_gitignore = false` admitted set.
+#  9. `crates/astrolabe-mcp/src/native.rs`: v0.17.2's per-call `index_root`
+#     stays off the Grok tool contract; every native param builder passes
+#     `index_root: None`, so the engine keeps its single workspace root.
 # ============================================================================
 
 [workspace]
@@ -52,7 +56,7 @@ members = ["crates/astrolabe-core", "crates/astrolabe-mcp"]
 resolver = "2"
 
 [workspace.package]
-version = "0.17.0"
+version = "0.17.2"
 edition = "2021"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -113,6 +117,8 @@ tree-sitter-kotlin-ng = "1.1"
 tree-sitter-bash = "0.25"
 tree-sitter-ruby = "0.23"
 tree-sitter-lua = "0.5"
+# Protobuf IDL (LanguageFn / tree-sitter-language, host tree-sitter 0.27).
+tree-sitter-proto = "0.6.0"
 # astrolabe-mcp. Caret (not `=`) so patch releases still apply.
 # rmcp 3.4.0 is the floor because it implements MCP spec 2026-07-28
 # (initialize is optional; per-request `_meta` is the new lifecycle).

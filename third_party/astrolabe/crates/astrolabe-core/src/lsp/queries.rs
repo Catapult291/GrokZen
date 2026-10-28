@@ -311,8 +311,7 @@ fn guard_cold_index<T>(result: Precise<Vec<T>>, server: &dyn LanguageServer) -> 
         // let a caller treat this list as the complete set.
         return downgrade_incomplete(result);
     }
-    const COLD: &str = "语言服务器仍在建立索引，返回的空结果不可信。\
-         请在索引完成后重试。";
+    const COLD: &str = "Language server is still building its index; an empty result is not trustworthy.          Retry after indexing finishes.";
     // Preserve finalize_hits notes (e.g. all-external definitions) rather than
     // wholesale-replacing them when the empty result is also untrustworthy.
     let note = match result.note {
@@ -608,8 +607,7 @@ fn guard_cold_hover(
     }
     Precise::unknown(
         result.value,
-        "语言服务器仍在建立索引，返回的空结果不可信。\
-         请在索引完成后重试。",
+        "Language server is still building its index; an empty result is not trustworthy.          Retry after indexing finishes.",
     )
 }
 
@@ -904,8 +902,7 @@ fn external_note(in_repo: &[Location], external: &[String]) -> Option<String> {
     let shown = format_external_list(external);
     if in_repo.is_empty() {
         Some(format!(
-            "{} 条结果在仓库外（标准库或依赖），全部已省略；all {} result(s) sit outside the repository (stdlib or dependencies) and were omitted: {shown}",
-            external.len(),
+            "all {} result(s) sit outside the repository (stdlib or dependencies) and were omitted: {shown}",
             external.len()
         ))
     } else {
@@ -985,6 +982,7 @@ fn server_label(language: Language) -> &'static str {
         Language::Shell => "bash-language-server",
         Language::Ruby => "ruby-lsp",
         Language::Lua => "lua-language-server",
+        Language::Proto => "protobuf (graph-only)",
     }
 }
 
@@ -2280,7 +2278,7 @@ mod tests {
         );
         assert!(result.value.is_empty());
         let note = result.note.as_deref().expect("note required");
-        assert!(note.contains("1 条结果在仓库外"), "{note}");
+        assert!(note.contains("outside the repository"), "{note}");
     }
 
     #[test]
@@ -2301,7 +2299,7 @@ mod tests {
             "external note must be preserved, got: {note}"
         );
         assert!(
-            note.contains("索引") || note.contains("不可信"),
+            note.contains("index") || note.contains("not trustworthy") || note.contains("building"),
             "cold-index note must be merged in, got: {note}"
         );
     }

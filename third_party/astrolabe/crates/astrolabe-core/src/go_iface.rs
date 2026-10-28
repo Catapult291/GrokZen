@@ -424,8 +424,8 @@ pub fn is_test_double(path: &str, name: &str) -> bool {
         || ["mock", "fake", "stub"].iter().any(|p| n.starts_with(p))
 }
 
-/// One line per interface: `Go 隐式实现方（方法 N/N 全匹配…）：I @a.go:3 ← T
-/// @b.go:9；…`, production types first, test doubles tagged `[测试]`, at most
+/// One line per interface: `Go implicit implementors (methods N/N all match…): I @a.go:3 ← T
+/// @b.go:9; …`, production types first, test doubles tagged `[test]`, at most
 /// `max` implementors listed. Empty when the interface has none.
 pub fn render_implementors(g: &CodeGraph, iface: u32, impls: &[u32], max: usize) -> String {
     let sym = |id: u32| g.symbols.get(id as usize).filter(|s| s.id.0 == id);
@@ -463,27 +463,27 @@ pub fn render_implementors(g: &CodeGraph, iface: u32, impls: &[u32], max: usize)
         .iter()
         .take(max)
         .map(|(s, test)| {
-            let tag = if *test { " [测试]" } else { "" };
+            let tag = if *test { " [test]" } else { "" };
             format!("{} @{}:{}{tag}", s.name, path(s), s.start_line)
         })
         .collect();
     let more = ordered.len().saturating_sub(listed.len());
     let tail = if more > 0 {
-        format!("；另有 {more} 个")
+        format!("; +{more} more")
     } else {
         String::new()
     };
     let rule = match (methods, embeds) {
-        (0, _) => "方法集全匹配".to_string(),
-        (n, false) => format!("方法 {n}/{n} 全匹配"),
-        (n, true) => format!("方法 {n}/{n} 及内嵌接口全匹配"),
+        (0, _) => "full method set matched".to_string(),
+        (n, false) => format!("methods {n}/{n} all matched"),
+        (n, true) => format!("methods {n}/{n} plus embedded interfaces all matched"),
     };
     format!(
-        "Go 隐式实现方（{rule}，按方法名与参数个数）：{} @{}:{} ← {}{tail}\n",
+        "Go implicit implementors ({rule}, by method name and arity): {} @{}:{} ← {}{tail}\n",
         i.name,
         path(i),
         i.start_line,
-        listed.join("；")
+        listed.join("; ")
     )
 }
 
@@ -683,7 +683,7 @@ mod tests {
         let line = render_implementors(&g, provider, &by[&provider], 2);
         assert!(line.contains("Provider @oauth/provider.go:"), "{line}");
         assert!(line.contains("Ext @impls/ext.go:"), "{line}");
-        assert!(line.ends_with("另有 1 个\n"), "{line}");
+        assert!(line.ends_with("+1 more\n"), "{line}");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -719,10 +719,10 @@ mod tests {
             .0;
         let by = super::implementors_of(&g, &HashSet::from([provider]));
         let line = render_implementors(&g, provider, &by[&provider], 5);
-        assert!(line.contains("方法 3/3 全匹配"), "{line}");
-        assert!(!line.contains("误报"), "{line}");
+        assert!(line.contains("methods 3/3 all matched"), "{line}");
+        assert!(!line.contains("false positive"), "{line}");
         let gh = line.find("GitHub @p/zgithub.go:3").expect(&line);
-        let fake = line.find("aFake @p/a_test.go:3 [测试]").expect(&line);
+        let fake = line.find("aFake @p/a_test.go:3 [test]").expect(&line);
         assert!(gh < fake, "production first: {line}");
         assert!(is_test_double("mocks/x.go", "X"));
         assert!(is_test_double("a/b.go", "MockStore"));

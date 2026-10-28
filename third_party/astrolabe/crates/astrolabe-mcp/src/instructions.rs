@@ -15,14 +15,14 @@ pub fn connection_instructions(context_name: &str, root: &Path) -> String {
     let _ = context_name;
     format!(
         "CRITICAL: Prefer Astrolabe over Grep/Read for code. Tools: resolve_context, search_code, find_symbol, find_references, goto_definition, get_diagnostics, get_languages. All are read-only: batch independent calls in parallel in one turn.\n\n\
-         当前索引根 index_root: {}。结果里的 index_root 即该路径；\
-         若与你正在编辑的仓库不符，不要用这些路径读文件。\
-         结果末行写“已全列”时即完整，直接据此作答，不必再用 grep 复核或换词重查。\
-         统计/计数（每个目录有多少处调用）用 search_code aggregate=top|dir|file，可加 skip_comments、exclude，不必写脚本。任务不明确时可先用 resolve_context。\
-         scoped 来自 import 图，syntactic 来自名字匹配。\
-         改完代码后若已跑通构建或测试（如 go test、cargo test），就不必再调 get_diagnostics；它只在没法跑构建/测试时用。\
-         缺语言服务器时精确工具会注明并给出替代做法，不要为此自行安装（get_languages 可看状态）。\
-         其他语言源码文件不入索引：search_code/find_symbol 空结果不覆盖它们，请直接使用 Grep/Read。{}",
+         Current index root index_root: {}. The index_root in results is that path;\
+         if it is not the repo you are editing, do not Read those paths.\
+         When the last line says “Fully listed”, the listing is complete — answer from it; do not re-check with grep or re-query with other words.\
+         For counts (how many calls per directory) use search_code aggregate=top|dir|file, optionally skip_comments/exclude; no scripts. When the task is unclear, start with resolve_context.\
+         scoped comes from the import graph; syntactic from name matching.\
+         After edits, if build/tests already pass (e.g. go test, cargo test), skip get_diagnostics; use it only when you cannot run build/tests.\
+         When a language server is missing, precise tools say so and suggest alternatives — do not install one yourself (see get_languages).\
+         Source files in other languages are not indexed: empty search_code/find_symbol does not cover them — use Grep/Read.{}",
         root.display(),
         go_layout_hint(root).map(|h| format!("\n{h}")).unwrap_or_default()
     )
@@ -60,18 +60,18 @@ fn go_layout_hint(root: &Path) -> Option<String> {
         .take(4)
         .map(|d| format!("{d}/"))
         .collect::<Vec<_>>()
-        .join("、");
+        .join(", ");
     if mods.len() > 4 {
-        list.push_str(&format!(" 等 {} 个", mods.len()));
+        list.push_str(&format!(" and {} more", mods.len()));
     }
     let via = if from_work {
-        "（由根目录 go.work use）"
+        " (via root go.work use)"
     } else {
         ""
     };
     Some(format!(
-        "Go：仓库根没有 go.mod，模块根在 {list}{via}；在根目录跑 `go test ./...` 匹配不到任何包，会直接报错。\
-         请进模块目录对改动的包跑，如 `cd {first} && go test ./<包路径>/`。"
+        "Go: repo root has no go.mod; module root at {list}{via}. Running `go test ./...` at the root matches no packages and errors.\
+         cd into the module and test the changed package, e.g. `cd {first} && go test ./<package-path>/`."
     ))
 }
 
@@ -225,7 +225,7 @@ Most wasted turns are search_code → Read on the same file. Pick by what you ne
     → issue them as parallel Astrolabe calls in ONE turn, not one per turn. All
       Astrolabe tools are read-only, so the client runs them concurrently.
 - The definition / body of a function, method, class or type you can name
-    → find_symbol query=<name> include_body=true. It returns the whole body; no Read.
+    → find_symbol query=<name> (include_body defaults true). It returns the whole body; no Read.
 - Who calls / uses X (callers, implementations, every reference)
     → find_references (precise). Not search_code.
 - Where X is defined from a use site → goto_definition.
@@ -244,10 +244,9 @@ Most wasted turns are search_code → Read on the same file. Pick by what you ne
   tests, tagged assert/load, so you see every loader and assertion in one call.
 - Prefer these tools over Grep/Read for code: the goal is fewer tokens and less wall time.
 - search_code auto-groups wide hits (see above); few hits list every row and every
-  result ends with a "汇总" line saying whether the listing is complete — if it says
-  complete (已全列), answer from it: do not re-check with grep or re-query with other words. Counting / 统计 / 计数 (how many
-  calls per directory or file, 每个目录有多少处调用): search_code aggregate=top|dir|file gives
-  "N 处 / M 个文件" per row plus a total — add skip_comments=true to ignore comment/string
+  result ends with a "Summary" line saying whether the listing is complete — if it says
+  complete (fully listed), answer from it: do not re-check with grep or re-query with other words. Counting (how many calls per directory or file): search_code aggregate=top|dir|file gives
+  "N hits / M files" per row plus a total — add skip_comments=true to ignore comment/string
   hits and exclude=["_test.go","vendor"] to skip paths; count_only=true for totals only.
   Do not write a script for this. Batch rename: find_references symbol=<old> dry_run_rename=<new>
   returns a per-file edit checklist (read-only), then edit file by file.
@@ -257,7 +256,7 @@ Most wasted turns are search_code → Read on the same file. Pick by what you ne
 
 ## Supported languages & unindexed files
 
-Astrolabe indexes the following languages: python, go, java, rust, typescript, tsx, javascript, c, cpp, objc, objcpp, swift, php, vue, dart, csharp, vb, kotlin, shell, ruby, lua.
+Astrolabe indexes the following languages: python, go, java, rust, typescript, tsx, javascript, c, cpp, objc, objcpp, swift, php, vue, dart, csharp, vb, kotlin, shell, ruby, lua, proto.
 Source files in other languages are not indexed: empty results from `search_code` and `find_symbol` do not cover them. Use Grep/Read directly when searching or examining unsupported language files. `get_languages` summarises them by file type. Files of supported languages are indexed even with syntax errors (symbols in the broken region may be missing); `get_languages` lists up to 10 such files, or gives the path of a Markdown report with all of them.
 
 ## Language-server install (session-gated)
@@ -345,7 +344,7 @@ Most wasted turns are search_code → Read on the same file. Pick by what you ne
     → issue them as parallel Astrolabe calls in ONE turn, not one per turn. All
       Astrolabe tools are read-only, so the client runs them concurrently.
 - The definition / body of a function, method, class or type you can name
-    → find_symbol query=<name> include_body=true. It returns the whole body; no Read.
+    → find_symbol query=<name> (include_body defaults true). It returns the whole body; no Read.
 - Who calls / uses X (callers, implementations, every reference)
     → find_references (precise). Not search_code.
 - Where X is defined from a use site → goto_definition.
@@ -364,10 +363,9 @@ Most wasted turns are search_code → Read on the same file. Pick by what you ne
   tests, tagged assert/load, so you see every loader and assertion in one call.
 - Prefer these tools over Grep/Read for code: the goal is fewer tokens and less wall time.
 - search_code auto-groups wide hits (see above); few hits list every row and every
-  result ends with a "汇总" line saying whether the listing is complete — if it says
-  complete (已全列), answer from it: do not re-check with grep or re-query with other words. Counting / 统计 / 计数 (how many
-  calls per directory or file, 每个目录有多少处调用): search_code aggregate=top|dir|file gives
-  "N 处 / M 个文件" per row plus a total — add skip_comments=true to ignore comment/string
+  result ends with a "Summary" line saying whether the listing is complete — if it says
+  complete (fully listed), answer from it: do not re-check with grep or re-query with other words. Counting (how many calls per directory or file): search_code aggregate=top|dir|file gives
+  "N hits / M files" per row plus a total — add skip_comments=true to ignore comment/string
   hits and exclude=["_test.go","vendor"] to skip paths; count_only=true for totals only.
   Do not write a script for this. Batch rename: find_references symbol=<old> dry_run_rename=<new>
   returns a per-file edit checklist (read-only), then edit file by file.
@@ -377,7 +375,7 @@ Most wasted turns are search_code → Read on the same file. Pick by what you ne
 
 ## Supported languages & unindexed files
 
-Astrolabe indexes the following languages: python, go, java, rust, typescript, tsx, javascript, c, cpp, objc, objcpp, swift, php, vue, dart, csharp, vb, kotlin, shell, ruby, lua.
+Astrolabe indexes the following languages: python, go, java, rust, typescript, tsx, javascript, c, cpp, objc, objcpp, swift, php, vue, dart, csharp, vb, kotlin, shell, ruby, lua, proto.
 Source files in other languages are not indexed: empty results from `search_code` and `find_symbol` do not cover them. Use Grep/Read directly when searching or examining unsupported language files. `get_languages` summarises them by file type. Files of supported languages are indexed even with syntax errors (symbols in the broken region may be missing); `get_languages` lists up to 10 such files, or gives the path of a Markdown report with all of them.
 
 ## Language-server install (session-gated)
@@ -417,8 +415,8 @@ Consider whether an Astrolabe tool would be more precise and token-efficient.
 
 You have hereby read the 'Astrolabe Instructions Manual' and do not need to read it again."#;
 
-/// Claude Code `--system-prompt` 整体替换文本（Serena cc_system_prompt_override 同构）。
-/// 用法：claude --system-prompt="$(astrolabe print-cc-system-prompt-override)"
+/// Claude Code `--system-prompt` 整体替换文本(Serena cc_system_prompt_override 同构).
+/// 用法:claude --system-prompt="$(astrolabe print-cc-system-prompt-override)"
 pub fn cc_system_prompt_override() -> &'static str {
     CC_SYSTEM_PROMPT_OVERRIDE
 }
@@ -446,11 +444,11 @@ Task                                    Tool to use
 First context for a coding task         resolve_context
 Repo structure / language coverage      resolve_context / get_languages
 Locate a symbol by name                 find_symbol
-Read a symbol's body (no whole file)    find_symbol include_body=true (not search_code + Read)
+Read a symbol's body (no whole file)    find_symbol (include_body defaults true; not search_code + Read)
 Find references / callers (precise)     find_references
 Jump to a definition                    goto_definition
 Literal substring / explicit regex      search_code + path_filter (matches come with context; no follow-up Read)
-Count hits per dir/file (统计/计数)      search_code aggregate=top|dir|file (+ skip_comments, exclude, count_only)
+Count hits per dir/file      search_code aggregate=top|dir|file (+ skip_comments, exclude, count_only)
 Check a file after edits (no build/test) get_diagnostics (skip once tests pass)
 Language / LSP readiness                get_languages (Ready / needs_install / AST-only)
 
@@ -504,18 +502,18 @@ mod tests {
         assert!(instructions.contains("get_languages"));
         assert!(instructions.contains("parallel"));
         // Complete results need no grep re-check: said in the default-loaded tier.
-        assert!(instructions.contains("已全列"), "{instructions}");
+        assert!(instructions.contains("Fully listed"), "{instructions}");
         assert!(
-            instructions.contains("不必再用 grep 复核"),
+            instructions.contains("do not re-check with grep"),
             "{instructions}"
         );
         // Language servers are a fallback: never tell the model to install one.
         assert!(
-            !instructions.contains("安装对应语言服务器"),
+            !instructions.contains("install the corresponding language server"),
             "{instructions}"
         );
         assert!(
-            !instructions.contains("先调用 resolve_context"),
+            !instructions.contains("call resolve_context first"),
             "{instructions}"
         );
     }
@@ -543,7 +541,10 @@ mod tests {
             ],
         );
         let l1 = connection_instructions("claude-code", &d);
-        assert!(l1.contains("模块根在 src/（由根目录 go.work use）"), "{l1}");
+        assert!(
+            l1.contains("module root at src/ (via root go.work use)"),
+            "{l1}"
+        );
         assert!(l1.contains("cd src && go test"), "{l1}");
         assert!(!l1.contains("third_party"), "{l1}");
         let _ = std::fs::remove_dir_all(&d);
@@ -562,7 +563,7 @@ mod tests {
             ],
         );
         let h = go_layout_hint(&d).unwrap();
-        assert!(h.contains("svc/a/、tools/"), "{h}");
+        assert!(h.contains("svc/a/, tools/"), "{h}");
         assert!(
             !h.contains("inner") && !h.contains("node_modules") && !h.contains("hidden"),
             "{h}"
@@ -595,7 +596,7 @@ mod tests {
         // E1 (batch 7): get_diagnostics after `go test` already passed cost a
         // turn and a gopls start in 3 of the 4 runs7 runs that called it.
         let l1 = connection_instructions("claude-code", Path::new("/r"));
-        assert!(l1.contains("不必再调 get_diagnostics"), "{l1}");
+        assert!(l1.contains("skip get_diagnostics"), "{l1}");
         for name in ["claude-code", "default"] {
             let m = manual(name);
             assert!(

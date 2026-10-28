@@ -1312,7 +1312,7 @@ mod tests {
         .collect();
         assert_eq!(hits, want, "note: {note}");
         assert!(
-            note.contains("转导出模块") && note.contains("pkg/__init__.py"),
+            note.contains("re-export module") && note.contains("pkg/__init__.py"),
             "{note}"
         );
         assert!(note.contains("`S`") && note.contains("`Srv`"), "{note}");
@@ -1403,8 +1403,14 @@ mod tests {
             "{note}"
         );
         assert!(note.contains("`Base`"), "{note}");
-        assert!(note.contains("已排除 3 处其他类型"), "{note}");
-        assert!(note.contains("其中 2 处接收者类型无法从索引判定"), "{note}");
+        assert!(
+            note.contains("Excluded 3") && note.contains("other"),
+            "{note}"
+        );
+        assert!(
+            note.contains("2 hits have receiver type undetermined from the index"),
+            "{note}"
+        );
         // A function nested in a function is not a member: bare calls count.
         let (hits, _) = refs(&dir, "helper", "pkg/nested.py");
         assert_eq!(hits.len(), 2, "{hits:?}");
@@ -1503,7 +1509,7 @@ mod tests {
             .with_syntax_index(std::sync::Arc::new(move || Some(index.clone())));
         let r = backend.references("build", Some("pkg/core.py"), None, false);
         let note = r.note.clone().unwrap_or_default();
-        assert!(note.contains("未启动语言服务器"), "{note}");
+        assert!(note.contains("language server not started"), "{note}");
         let got: Vec<String> = r
             .value
             .iter()
@@ -1572,7 +1578,7 @@ mod tests {
         let (_, via) = python_scope(&index, &dir, index.file_id("m0.py").unwrap(), "Deep");
         assert!(via.truncated && via.len() == MAX_REEXPORT_DEPTH, "{via:?}");
         let (_, note) = refs(&dir, "Deep", "m0.py");
-        assert!(note.contains("可能不全"), "{note}");
+        assert!(note.contains("may be incomplete"), "{note}");
         assert!(crate::refs_render::complete_source(
             astrolabe_core::types::Confidence::Scoped,
             Some(&note)

@@ -16,7 +16,7 @@ It is a single Rust binary (`astrolabe`) that indexes your repo with tree-sitter
 | `tools/list` size | about 3.6 KB compact JSON (3,607 B measured on Linux for v0.16.0; not re-measured on macOS) |
 | Binary | one executable, no runtime; release archives are 7.4–9.1 MB, the unpacked Linux x64 binary is about 50 MB |
 | Platforms | macOS arm64/x64, Linux x64 (glibc/musl), Linux arm64, Windows x64 |
-| Languages | 17 matrix rows incl. Python, Go, Rust, Java, TypeScript/JavaScript, C/C++, Swift, Objective-C, PHP, Vue, Dart, C#, VB.NET, Kotlin, Shell, Ruby, Lua ([details](docs/REFERENCE.zh-CN.md)) |
+| Languages | 18 matrix rows incl. Python, Go, Rust, Java, TypeScript/JavaScript, C/C++, Swift, Objective-C, PHP, Vue, Dart, C#, VB.NET, Kotlin, Shell, Ruby, Lua, Protobuf |
 | Needs an API key / network? | No. Indexing and search do not call an LLM. (The model that reads the results still spends tokens.) |
 | Clients documented | Claude Code, Cursor, Codex, Windsurf/Cline/Roo Code/Continue, OpenCode, DeepSeek Harness, Codebuddy, Grok Build, Kimi Code, ZCode |
 | License | MIT OR Apache-2.0 |

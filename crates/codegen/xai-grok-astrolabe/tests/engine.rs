@@ -922,7 +922,7 @@ fn typescript_top_level_references_are_answered_by_the_index() {
         "unique TS declaration should be answered by the index: {}",
         out.output.text
     );
-    assert!(out.output.text.contains("1 处"), "{}", out.output.text);
+    assert!(out.output.text.contains("hits /"), "{}", out.output.text);
 }
 
 #[test]
@@ -938,7 +938,7 @@ fn python_module_level_references_are_answered_by_the_index() {
         "module-level Python name should be answered by the index: {}",
         out.output.text
     );
-    assert!(out.output.text.contains("1 处"), "{}", out.output.text);
+    assert!(out.output.text.contains("hits /"), "{}", out.output.text);
 }
 
 #[test]

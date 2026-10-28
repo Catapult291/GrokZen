@@ -375,6 +375,7 @@ fn declared_excludes(resolvers: &ResolverSet) -> Vec<String> {
         Language::Shell,
         Language::Ruby,
         Language::Lua,
+        Language::Proto,
     ]
     .iter()
     .filter_map(|lang| resolvers.meta_for(*lang))

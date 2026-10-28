@@ -71,10 +71,10 @@ impl PartialEntry {
 /// Body text of a zero-hit result (find_symbol, search_code,
 /// resolve_context): the coverage note is always relevant there.
 const EMPTY_RESULT_MARKERS: &[&str] = &[
-    "(未找到匹配的符号)",
-    "(未找到匹配的代码行)",
-    "没有匹配结果",
-    "未匹配到与任务相关的符号或文件",
+    "(no matching symbols)",
+    "(no matching code lines)",
+    "No matches",
+    "No task-related symbols or files matched",
 ];
 /// Error files named by the per-result note before it switches to a count.
 const CITED_NAMES_MAX: usize = 3;
@@ -135,13 +135,13 @@ impl RepoIndex {
         }
         let mut parts = Vec::new();
         if hard > 0 {
-            parts.push(format!("{hard} 个文件未进入索引"));
+            parts.push(format!("{hard} files not indexed"));
         }
         if partial > 0 {
-            parts.push(format!("{partial} 个文件有语法错误"));
+            parts.push(format!("{partial} files have syntax errors"));
         }
         Some(format!(
-            "注意：{}，结果可能遗漏；详见 get_languages。",
+            "Note: {}; results may be incomplete — see get_languages.",
             parts.join("，")
         ))
     }
@@ -202,13 +202,18 @@ impl RepoIndex {
                 .collect();
             let more = cited.len().saturating_sub(CITED_NAMES_MAX);
             let tail = if more > 0 {
-                format!(" 等 {} 个", cited.len())
+                format!(" and {more} more ({} total)", cited.len())
             } else {
                 String::new()
             };
+            let (label, verb) = if cited.len() == 1 {
+                ("hit file", "has")
+            } else {
+                ("hit file(s)", "have")
+            };
             lines.push(format!(
-                "注意：命中文件 {}{tail} 有语法错误，其符号可能不全；详见 get_languages。",
-                names.join("、")
+                "Note: {label} {}{tail} {verb} syntax errors; their symbols may be incomplete — see get_languages.",
+                names.join(", ")
             ));
         }
         (!lines.is_empty()).then(|| lines.join("\n"))
@@ -687,12 +692,12 @@ mod tests {
             .unwrap();
         assert!(!cited.contains(&full), "{cited}");
         assert!(
-            cited.contains("bad00.py、bad01.py、bad02.py 等 4 个"),
+            cited.contains("bad00.py, bad01.py, bad02.py and 1 more (4 total)"),
             "{cited}"
         );
         // Empty result: count note again.
         let empty = index
-            .query_coverage_note("(未找到匹配的符号)", &shown)
+            .query_coverage_note("(no matching symbols)", &shown)
             .unwrap();
         assert_eq!(empty, full);
         let _ = std::fs::remove_dir_all(&dir);
@@ -775,7 +780,7 @@ mod tests {
         );
         assert!(!detail.contains("NOT in the index"), "{detail}");
         let note = index.coverage_note().unwrap();
-        assert!(note.contains("3 个文件有语法错误"), "{note}");
+        assert!(note.contains("3 files have syntax errors"), "{note}");
         assert!(!note.contains("bad00"), "no paths in the note: {note}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -938,7 +943,7 @@ mod tests {
         assert!(detail.contains("a.py"), "{detail}");
         let note = index.coverage_note().unwrap();
         assert!(
-            note.contains("3 个文件未进入索引") && !note.contains("a.py"),
+            note.contains("3 files not indexed") && !note.contains("a.py"),
             "{note}"
         );
     }

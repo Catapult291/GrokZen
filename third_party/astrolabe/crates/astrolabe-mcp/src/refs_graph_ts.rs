@@ -1283,7 +1283,7 @@ mod tests {
             &astrolabe_core::types::RelPath::new("src/l0.ts"),
         )
         .expect("answer");
-        assert!(r.note.unwrap().contains("可能不全"));
+        assert!(r.note.unwrap().contains("may be incomplete"));
         // A short chain is complete.
         let dir2 = repo(&[
             ("src/l0.ts", "export function deep() {}\n"),
