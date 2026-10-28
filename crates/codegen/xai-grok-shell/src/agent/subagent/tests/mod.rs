@@ -275,7 +275,6 @@ fn wedged_child_handle() -> (
                 crate::session::plan_mode::PlanModeTracker::new(std::env::temp_dir()),
             ),
         ),
-        force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         permission_handle: xai_grok_workspace::permission::PermissionHandle::allow_all(),
         attribution_callback: None,
         agent_name: "grok-build".to_string(),
@@ -1378,7 +1377,7 @@ fn resume_vs_fork_helper_shapes_differ() {
             ConversationItem::user("prior subagent work"),
             ConversationItem::assistant("done"),
         ];
-    let resumed = resume_initial_context(resume_items.clone(), false);
+    let resumed = resume_initial_context(resume_items.clone());
     let forked = forked_initial_context(resume_items);
     assert_eq!(resumed.source, InitialContextSource::Resumed);
     assert_eq!(forked.source, InitialContextSource::Forked);
@@ -1696,7 +1695,6 @@ async fn bootstrap_in_place_resume_reads_existing_transcript() {
             "test-model",
             super::resume_window::ResumeWindowPolicy {
                 context_window: 128_000,
-                auto_compact_threshold_percent: 85,
             },
         )
         .await;
@@ -1727,7 +1725,6 @@ async fn bootstrap_no_fork_is_new() {
             "m",
             super::resume_window::ResumeWindowPolicy {
                 context_window: 128_000,
-                auto_compact_threshold_percent: 85,
             },
         )
         .await;
@@ -1759,7 +1756,6 @@ async fn bootstrap_fork_without_parent_fails_open() {
             "m",
             super::resume_window::ResumeWindowPolicy {
                 context_window: 128_000,
-                auto_compact_threshold_percent: 85,
             },
         )
         .await;
@@ -1802,7 +1798,6 @@ async fn bootstrap_fork_live_parent_chat_state_is_forked_with_marker() {
             "m",
             super::resume_window::ResumeWindowPolicy {
                 context_window: 128_000,
-                auto_compact_threshold_percent: 85,
             },
         )
         .await;

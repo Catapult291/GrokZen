@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::session::persistence::Summary;
-use crate::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT;
 
 // ── Session list ───────────────────────────────────────────────────────
 
@@ -475,11 +474,6 @@ pub struct ContextInfo {
     pub message_tokens: u64,
     pub free_tokens: u64,
     pub usage_pct: u8,
-    /// The resolved auto-compact threshold percent (0-100) for the active model at the time this snapshot was captured.
-    /// Comes from the 6-tier resolution (env > user per-model > user global > GB per-model > GB global > 85).
-    /// Used by the TUI `/context` view so the displayed “Auto-compact at X%” matches the actual trigger (e.g. 65 for grok-build in remote settings).
-    #[serde(default = "default_auto_compact_threshold")]
-    pub auto_compact_threshold_percent: u8,
     /// Itemized usage rows (skills, workflows, MCP servers, AGENTS.md).
     /// Empty on partial snapshots.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -495,15 +489,9 @@ impl ContextInfo {
             total,
             usage_pct: xai_token_estimation::usage_percentage_u8(used, total),
             free_tokens: xai_token_estimation::free_tokens(total, used),
-            auto_compact_threshold_percent: DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
             ..Self::default()
         }
     }
-}
-
-/// Serde default for the threshold field (keeps old snapshots and partials deserializing without error and gives the historical default of 85).
-fn default_auto_compact_threshold() -> u8 {
-    DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT
 }
 
 /// Unified session info data returned by GetSessionInfo.

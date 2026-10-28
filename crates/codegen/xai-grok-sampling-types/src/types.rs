@@ -1201,7 +1201,7 @@ pub struct SamplingConfig {
     /// Header name to environment variable; only the mapping persists, not the resolved secret.
     #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
     pub env_http_headers: indexmap::IndexMap<String, String>,
-    /// Total context window size in tokens; auto-compact thresholds derive from it.
+    /// Total context window size in tokens; context-usage percentages derive from it.
     pub context_window: NonZeroU64,
     /// Provider request-body cap, already defaulted from `api_backend` by model resolution; `None` budgets to 50 MiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]

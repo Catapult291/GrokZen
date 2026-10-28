@@ -4549,13 +4549,11 @@ impl MvpAgent {
         }
         let pins = crate::session::cursor_compaction_pins(
             self.cfg.borrow().resolve_compaction_mode(),
-            self.cfg.borrow().is_two_pass_compaction_enabled(),
             crate::session::is_cursor_user_template(
                 &agent_definition.user_message_template,
             ),
         );
         let compaction_mode = pins.mode;
-        let two_pass_enabled = pins.two_pass;
         let (session_model_id, mut sampling_config) = self
             .apply_agent_model_override(
                 pinned_model.as_ref(),
@@ -4563,21 +4561,14 @@ impl MvpAgent {
                 sampling_config,
                 origin_client.clone(),
             );
-        let (auto_compact_threshold_percent, system_prompt_label) = {
+        let system_prompt_label = {
             let cfg = self.cfg.borrow();
             let models = self.models_manager.models();
             let model = config::find_model_by_id(&models, &session_model_id.0);
-            (
-                crate::util::config::resolve_auto_compact_threshold_percent(
-                    &cfg,
-                    &session_model_id.0,
-                    model.map(|e| &e.info),
-                ),
-                crate::util::config::resolve_system_prompt_label(
-                    &cfg,
-                    &session_model_id.0,
-                    model.map(|e| &e.info),
-                ),
+            crate::util::config::resolve_system_prompt_label(
+                &cfg,
+                &session_model_id.0,
+                model.map(|e| &e.info),
             )
         };
         self.models_manager
@@ -4938,13 +4929,11 @@ impl MvpAgent {
                     initial_total_tokens,
                     startup_hints,
                     client_type,
-                    auto_compact_threshold_percent,
                     system_prompt_label,
                     compaction_mode,
                     compaction_verbatim_input,
                     long_reasoning_reminder,
                     compaction_tool_choice,
-                    two_pass_enabled,
                     buffering_settings,
                     origin_client.clone(),
                     self.codebase_indexes.clone(),

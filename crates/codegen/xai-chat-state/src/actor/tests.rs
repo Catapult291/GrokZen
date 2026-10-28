@@ -1345,20 +1345,6 @@ async fn empty_conversation_queries_return_defaults() {
     assert!(h.handle.get_agent_edited_paths().await.is_empty());
 }
 
-#[tokio::test]
-async fn check_auto_compact_triggers_at_threshold() {
-    let h = TestHarness::with_context_window(10000);
-    h.handle.record_token_usage(8600);
-    let _ = h.handle.get_total_tokens().await;
-
-    let trigger = h.handle.check_auto_compact_needed(85).await;
-    assert!(trigger.is_some());
-    let t = trigger.unwrap();
-    assert_eq!(t.total_tokens, 8600);
-    assert_eq!(t.context_window.get(), 10000);
-    assert_eq!(t.utilization_percent, 86);
-}
-
 // ============================================================================
 // Edge-case / integration tests
 // ============================================================================
@@ -1596,16 +1582,6 @@ async fn snapshot_restore_preserves_all_fields() {
         restored_snap.last_compaction_prompt_index,
         snapshot.last_compaction_prompt_index
     );
-}
-
-#[tokio::test]
-async fn auto_compact_does_not_trigger_below_threshold() {
-    let h = TestHarness::with_context_window(10000);
-    h.handle.record_token_usage(8400);
-    let _ = h.handle.get_total_tokens().await;
-
-    let trigger = h.handle.check_auto_compact_needed(85).await;
-    assert!(trigger.is_none());
 }
 
 #[tokio::test]
@@ -4636,10 +4612,10 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
     );
 }
 
-/// A context_window downgrade via `update_sampling_config` must fire auto-compact when usage already exceeds the new window.
+/// A context_window downgrade via `update_sampling_config` must overwrite the window and leave the model facts intact.
 /// The actor accepts any value; the session layer blocks response-header downgrades, so this is mainly model switches.
 #[tokio::test]
-async fn context_window_downgrade_triggers_auto_compact() {
+async fn context_window_downgrade_overwrites_window() {
     use xai_grok_sampling_types::ApiBackend;
 
     // Initial config: 500k context, Responses backend (matches grok-4.5)
@@ -4655,18 +4631,8 @@ async fn context_window_downgrade_triggers_auto_compact() {
 
     let h = TestHarness::with_config(vec![], config);
 
-    // Simulate 217k tokens of conversation (matching turn 587's total_tokens)
-    h.handle.record_token_usage(217_000);
-
-    // Pre-downgrade: 217k / 500k = 43% — well under auto-compact threshold
     let pre = h.handle.get_sampling_config().await.unwrap();
     assert_eq!(pre.context_window.get(), 500_000);
-
-    let trigger = h.handle.check_auto_compact_needed(85).await;
-    assert!(
-        trigger.is_none(),
-        "should NOT trigger auto-compact at 43% (217k/500k)"
-    );
 
     // Simulate a context_window downgrade (e.g. model switch, response
     // header from cli-chat-proxy, or stale prefetched model list).
@@ -4674,7 +4640,7 @@ async fn context_window_downgrade_triggers_auto_compact() {
     downgraded.context_window = NonZeroU64::new(128_000).unwrap();
     h.handle.update_sampling_config(downgraded);
 
-    // Post-downgrade: 217k / 128k = 170% — massively over capacity
+    // Post-downgrade window is the new one; model facts are untouched.
     let post = h.handle.get_sampling_config().await.unwrap();
     assert_eq!(
         post.context_window.get(),
@@ -4686,22 +4652,6 @@ async fn context_window_downgrade_triggers_auto_compact() {
         post.api_backend,
         ApiBackend::Responses,
         "api_backend must not change"
-    );
-
-    // Now auto-compact sees the 128k window and fires
-    let trigger = h.handle.check_auto_compact_needed(85).await;
-    assert!(
-        trigger.is_some(),
-        "MUST trigger auto-compact at 170% (217k/128k) — this is the bug!"
-    );
-    let info = trigger.unwrap();
-    assert_eq!(info.context_window, NonZeroU64::new(128_000).unwrap());
-    assert_eq!(info.total_tokens, 217_000);
-    // utilization_percent is u8 so it caps at 255, but we just need >85
-    assert!(
-        info.utilization_percent > 85,
-        "utilization should be well above threshold but got {}%",
-        info.utilization_percent
     );
 }
 

@@ -490,13 +490,11 @@ impl SessionActor {
         MemoryPromptSync::Applied
     }
 
-    /// After a prompt swap on the agent: drop the stale prefire cache, persist the prompt
-    /// artifacts, and align the conversation head. The head swap is atomic in the chat-state
-    /// actor and serializes with turn pushes, so it is safe even if a turn started meanwhile.
+    /// After a prompt swap on the agent: persist the prompt artifacts and align the conversation head.
+    /// The head swap is atomic in the chat-state actor and serializes with turn pushes, so it is safe even if a turn started meanwhile.
     /// An injected manifest block on the head is kept only while memory is on; turning memory
     /// off must also take the remembered notes out of context, as resume does.
     async fn publish_agent_prompt(&self) {
-        self.abort_and_clear_prefire().await;
         let (system_prompt, persisted_context, memory_v2_enabled) = {
             let agent = self.agent.borrow();
             let mut persisted_context = agent.prompt_context().clone();

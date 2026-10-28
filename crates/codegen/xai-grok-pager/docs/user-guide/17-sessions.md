@@ -183,9 +183,9 @@ Reaching conversation-only or files-only requires the setting to be on: with it 
 /compact
 ```
 
-### Auto-Compact
+### When to Compact
 
-Grok automatically compacts the conversation when the context window approaches its limit. You will see a notification when auto-compact triggers. The `context_window` setting on your model configuration controls when this threshold is reached.
+Grok does not compact automatically. When the context window is getting full, run `/compact` yourself.
 
 ---
 

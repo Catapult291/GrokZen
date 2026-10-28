@@ -81,13 +81,11 @@ telemetry = false                      # 匿名使用遥测
 feedback = true                        # 反馈系统（默认：true）
 lsp_tools = false                      # 暴露 lsp 工具
 codebase_indexing = true               # 代码图索引（默认：true）
-two_pass_compaction = false            # 预先执行两阶段压缩（默认：false，选择启用）
 remote_fetch = true                    # 允许可选的在线模型目录获取（默认：true；
                                        # 防火墙/气隙部署可设为 false；后台
                                        # 托管配置同步有独立开关：managed_config）
 
 [session]
-auto_compact_threshold_percent = 85    # 在上下文窗口达到此百分比时自动压缩（默认：85）
 load_envrc = true                      # 加载 .envrc 环境变量
 
 [tools]
@@ -263,7 +261,7 @@ env_key = "XAI_API_KEY"               # 保存 API 密钥的环境变量；字�
 temperature = 0.7                     # 采样温度（0.0-2.0）
 top_p = 0.95                          # nucleus 采样参数
 max_completion_tokens = 8192          # 每次响应的最大 token 数
-context_window = 128000               # 上下文窗口大小（用于自动压缩）
+context_window = 128000               # 上下文窗口大小（用于 /context 展示与压缩预算）
 query_params = { api-version = "2026-07-22" } # 追加到每个请求 URL 的查询参数
 env_http_headers = { "X-Tenant" = "TENANT_TOKEN" }    # 从环境变量读取的请求标头，在客户端构建时解析
 ```

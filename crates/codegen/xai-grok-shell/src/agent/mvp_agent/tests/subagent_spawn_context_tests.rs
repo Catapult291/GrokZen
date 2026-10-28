@@ -413,41 +413,34 @@ fn run_shell_child_passes_parent_compaction_pins_into_spawn() {
     let mut ctx = crate::test_support::lsp_runtime::ctx_with_toggle(Default::default());
     ctx.parent_compaction = CompactionPins {
         mode: CompactionMode::default(),
-        two_pass: true,
     };
     assert_eq!(
         ctx.compaction_pins_for_child(&default_child),
         CompactionPins {
             mode: CompactionMode::default(),
-            two_pass: true,
         },
     );
     ctx.parent_compaction = CompactionPins {
         mode: CompactionMode::Summary,
-        two_pass: false,
     };
     assert_eq!(
         ctx.compaction_pins_for_child(&default_child),
         CompactionPins {
             mode: CompactionMode::Summary,
-            two_pass: false,
         },
     );
     ctx.parent_compaction = CompactionPins {
         mode: CompactionMode::default(),
-        two_pass: true,
     };
     assert_eq!(
         SubagentSpawnContext::snapshot_parent_compaction_pins(
             CompactionMode::default(),
-            true,
             Some("grok-build"),
             Some("grok-build"),
             std::env::temp_dir().as_path(),
         ),
         CompactionPins {
             mode: CompactionMode::default(),
-            two_pass: true,
         },
     );
     let spawn_src = include_str!("../../subagent/handle_request.rs");
@@ -456,16 +449,7 @@ fn run_shell_child_passes_parent_compaction_pins_into_spawn() {
         "run_shell_child must pass compaction_pins_for_child into spawn"
     );
     assert!(
-        spawn_src.contains("pins.two_pass"),
-        "run_shell_child must pass pins.two_pass into spawn_session_on_thread"
-    );
-    assert!(
         !spawn_src.contains("CompactionMode::Summary"),
         "run_shell_child must not hard-pin Summary at the spawn site"
-    );
-    assert!(
-        !spawn_src.contains("two_pass_enabled = false")
-            && !spawn_src.contains("false, // two_pass"),
-        "run_shell_child must not hard-pin two-pass off at the spawn site"
     );
 }

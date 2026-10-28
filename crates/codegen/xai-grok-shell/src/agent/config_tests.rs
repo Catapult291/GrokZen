@@ -1968,23 +1968,6 @@ fn user_override_parses_compactions_remaining_from_toml() {
     );
 }
 #[test]
-fn default_auto_compact_threshold_is_none() {
-    let cfg = Config::default();
-    assert_eq!(cfg.session.auto_compact_threshold_percent, None);
-}
-#[test]
-fn parses_auto_compact_threshold_percent() {
-    let raw_config: toml::Value = toml::from_str(
-        r#"
-            [session]
-            auto_compact_threshold_percent = 75
-            "#,
-    )
-    .unwrap();
-    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-    assert_eq!(cfg.session.auto_compact_threshold_percent, Some(75));
-}
-#[test]
 fn compaction_mode_precedence_env_over_config_over_remote_over_default() {
     use xai_chat_state::CompactionMode;
     assert_eq!(
@@ -2021,18 +2004,6 @@ fn compaction_detail_resolves_remote_settings_and_verbose_default() {
         resolve_compaction_detail_from(Some("garbage"), None, None),
         CompactionDetail::Verbose
     );
-}
-#[test]
-fn auto_compact_threshold_percent_defaults_when_not_specified() {
-    let raw_config: toml::Value = toml::from_str(
-        r#"
-            [toolset.bash]
-            timeout_secs = 123
-            "#,
-    )
-    .unwrap();
-    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-    assert_eq!(cfg.session.auto_compact_threshold_percent, None);
 }
 #[test]
 fn parses_repo_changes_dedup_config() {
@@ -6212,7 +6183,7 @@ fn config_accepts_all_known_sections() {
             theme = "dark"
             approval_mode = "ask"
             [session]
-            auto_compact_threshold_percent = 85
+            load_envrc = true
             [telemetry]
             enabled = true
             trace_upload = true

@@ -286,8 +286,6 @@ impl MvpAgent {
             media_gen_batch_limits: self.cfg.borrow().media_gen_batch_limits,
             inference_idle_timeout_secs,
             parent_compaction: crate::session::CompactionPins::default(),
-            auto_compact_threshold_tiers:
-                crate::agent::subagent::AutoCompactThresholdTiers::capture(&self.cfg.borrow()),
             hunk_tracker_handle,
             hunk_tracking_enabled,
             fs,
@@ -427,7 +425,6 @@ impl MvpAgent {
         ctx.parent_compaction =
             crate::agent::subagent::SubagentSpawnContext::snapshot_parent_compaction_pins(
                 ctx.resolve_compaction_mode(),
-                ctx.resolve_feature(crate::agent::config::Feature::TwoPassCompaction),
                 ctx.parent_agent_name.as_deref(),
                 ctx.parent_model_agent_type.as_deref(),
                 &ctx.parent_cwd,

@@ -93,7 +93,6 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         media_gen_batch_limits: xai_grok_tools::media_gen_limits::MediaGenBatchLimits::default(),
         inference_idle_timeout_secs: 600,
         parent_compaction: crate::session::CompactionPins::default(),
-        auto_compact_threshold_tiers: crate::agent::subagent::AutoCompactThresholdTiers::default(),
         permission_handle: None,
         worktree_type: crate::util::config::WorktreeType::Linked,
         api_key_provider: None,

@@ -1362,7 +1362,6 @@ lsp_tools = false                      # expose the lsp tool (see LSP Servers be
 codebase_indexing = true               # code graph indexing (true, false, or glob patterns)
 
 [session]
-auto_compact_threshold_percent = 85    # auto-compact at this % of context window
 load_envrc = true                      # load .envrc environment variables into bash commands
 
 [tools]
@@ -1853,12 +1852,12 @@ auth_provider = "corp-gateway"        # Named credential helper for rotating tok
 temperature = 0.7                     # Sampling temperature (0.0-2.0)
 top_p = 0.95                          # Nucleus sampling parameter
 max_completion_tokens = 8192          # Max tokens per response
-context_window = 256000               # Total context window in tokens (for auto-compact)
+context_window = 256000               # Total context window in tokens (for usage reporting and /compact)
 ```
 
 **Credential resolution order:** `api_key` → `env_key` → cached `auth_provider` token (terminal: a cache miss resolves to no credential, never the session token) → session token → `XAI_API_KEY`. See [Per-Model Auth Providers](#per-model-auth-providers).
 
-The `context_window` parameter is used to calculate when auto-compact should trigger. If not specified, Grok falls back to built-in defaults for known models. To offer a choice of windows, set `context_windows = [256000, 500000]`. `context_window` stays the default (the first listed window when unset), and older clients ignore the list.
+The `context_window` parameter is used to report context usage and to size manual `/compact`. If not specified, Grok falls back to built-in defaults for known models. To offer a choice of windows, set `context_windows = [256000, 500000]`. `context_window` stays the default (the first listed window when unset), and older clients ignore the list.
 
 ### Overriding Built-in Models
 
@@ -2436,7 +2435,7 @@ Sessions are stored under `~/.grok/sessions/`, organized by URL-encoded working 
   rewind_points.jsonl     # file snapshots for /rewind undo
   signals.json            # session signals (turn count, token usage)
   feedback.jsonl          # user feedback and ratings
-  compaction_checkpoints/ # saved state from auto-compact
+  compaction_checkpoints/ # saved state from manual /compact
   subagents/              # child session directories (when subagents are enabled)
 ```
 
@@ -2703,12 +2702,7 @@ wc -l ~/.grok/sessions/<encoded-cwd>/<session-id>/chat_history.jsonl
 
 ### Context window full
 
-If auto-compact triggers too often, lower the threshold to compact earlier and preserve more headroom:
-
-```toml
-[session]
-auto_compact_threshold_percent = 70    # default is 85
-```
+Grok does not compact automatically. Run `/compact` when the context window is getting full.
 
 ---
 

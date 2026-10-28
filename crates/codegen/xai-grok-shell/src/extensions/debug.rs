@@ -4,7 +4,6 @@
 //! Client engineers can exercise a notification and its response without real experiments, real sessions, or real model inference.
 //!
 //! - `trigger_feedback`: fire a synthetic `FeedbackRequestNotification`.
-//! - `arm_auto_compact`: make the next turn trigger auto-compaction unconditionally, regardless of context window usage.
 //! - `agent`: agent-process diagnostics (registry counts).
 
 use agent_client_protocol as acp;
@@ -20,7 +19,6 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             tracing::info!("debug: triggering test feedback request");
             handle_trigger_feedback(agent, args).await
         }
-        "x.ai/debug/arm_auto_compact" => handle_arm_auto_compact(agent, args),
         "x.ai/debug/agent" => handle_agent(agent).await,
         _ => Err(acp::Error::method_not_found()),
     }
@@ -95,33 +93,4 @@ async fn handle_trigger_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> Ex
     rx.await
         .map_err(|_| acp::Error::internal_error().data("session failed to respond"))?
         .map_err(|e| acp::Error::internal_error().data(format!("Internal error: {e:?}")))
-}
-
-fn handle_arm_auto_compact(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct ArmAutoCompactParams {
-        #[serde(alias = "session_id")]
-        session_id: String,
-    }
-
-    let params: ArmAutoCompactParams = parse_params(args)?;
-    let session_id = acp::SessionId::new(params.session_id.clone());
-
-    let handle = agent
-        .resident_handle(&session_id)
-        .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
-
-    handle
-        .force_compact
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-
-    tracing::info!(
-        session_id = %params.session_id,
-        "debug: armed auto-compact for next turn"
-    );
-
-    ExtMethodResult::success(serde_json::json!({ "armed": true }))
-        .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }

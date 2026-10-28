@@ -22,8 +22,8 @@ A few worth knowing on day one:
 Two of those deserve a second look:
 
 - **`/compact`** compresses the conversation history to free up context.
-  Check context usage anytime with `/context` — Grok also auto-compacts
-  when the window fills up.
+  Check context usage anytime with `/context` — run `/compact`
+yourself when the window fills up.
 - **`/rewind`** rewinds an earlier turn, dropping later turns; the
   confirmation picks whether the files that turn touched go back too.
   **`/undo`** always drops just the conversation.

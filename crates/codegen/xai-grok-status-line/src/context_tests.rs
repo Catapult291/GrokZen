@@ -63,7 +63,6 @@ fn every_field_survives_a_round_trip_through_the_shared_fixture() {
             }),
             used_percentage: Some(8),
             remaining_percentage: Some(92),
-            auto_compact_threshold_percent: Some(80),
         },
         effort: Some(StatusLineEffort {
             level: "high".into(),

@@ -953,9 +953,8 @@ fn resume_initial_context_preserves_head_only() {
         conversation.push(ConversationItem::assistant(format!("a{i}")));
     }
     let original_len = conversation.len();
-    let ctx = resume_initial_context(conversation, false);
+    let ctx = resume_initial_context(conversation);
     assert_eq!(ctx.source, InitialContextSource::Resumed);
-    assert!(!ctx.force_compact);
     assert!(ctx.copy_error.is_none());
     assert_eq!(
             ctx.prefix_len,

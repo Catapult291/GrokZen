@@ -747,7 +747,6 @@ mod tests {
             context_window: Some(200_000),
             context_windows: None,
             max_request_bytes: None,
-            auto_compact_threshold_percent: Some(80),
             system_prompt_label: Some("label".into()),
             use_concise: Some(true),
             agent_type: Some("agent".into()),

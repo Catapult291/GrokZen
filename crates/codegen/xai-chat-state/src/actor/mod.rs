@@ -403,12 +403,6 @@ impl ChatStateActor {
                 // when the live turn that triggered them is undone.
                 let _ = reply.send(());
             }
-            ChatStateCommand::CheckAutoCompactNeeded {
-                threshold_percent,
-                reply,
-            } => {
-                let _ = reply.send(self.check_auto_compact_needed(threshold_percent));
-            }
             ChatStateCommand::GetCredentials { reply } => {
                 let _ = reply.send(self.state.credentials.clone());
             }

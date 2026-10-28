@@ -629,10 +629,8 @@ async fn preserve_switch_applies_the_live_selection_while_supported() {
                             ..xai_grok_sampler::SamplerConfig::default()
                         },
                         use_concise: false,
-                        is_family_switch: false,
                         apply_prompt_override: false,
                         skip_prompt_rewrite: true,
-                        auto_compact_threshold_percent: 85,
                         system_prompt_label: xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_owned(),
                         context_window_selection: crate::session::SwitchContextWindow::Preserve,
                         supported_context_windows: supported,

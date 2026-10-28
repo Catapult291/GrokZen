@@ -1,6 +1,3 @@
-/// Default auto-compact threshold (% of context window) when no source sets it.
-pub const DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT: u8 = 85;
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CompactionToolChoice {
     #[default]
@@ -31,61 +28,6 @@ pub(crate) fn resolve_compaction_tool_choice_from(
         .or_else(|| config.and_then(|s| s.parse().ok()))
         .or_else(|| remote.and_then(|s| s.parse().ok()))
         .unwrap_or_default()
-}
-
-pub(crate) const ENV_AUTO_COMPACT_THRESHOLD_PERCENT: &str = "GROK_AUTO_COMPACT_THRESHOLD_PERCENT";
-
-/// Precedence (highest first): env `GROK_AUTO_COMPACT_THRESHOLD_PERCENT` user TOML `[model.<id>].auto_compact_threshold_percent` (`cfg.config_models`, the merge of user and managed `[model.<id>]` sections) user TOML `[session].auto_compact_threshold_percent` remote settings per-model `ModelInfo.auto_compact_threshold_percent` (kept out of `ConfigModelOverride::apply` so the user and remote per-model tiers stay distinct) remote settings global `RemoteSettings.auto_compact_threshold_percent` default `DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT`
-pub(crate) fn resolve_auto_compact_threshold_percent(
-    cfg: &crate::agent::config::Config,
-    model_id: &str,
-    model: Option<&crate::agent::config::ModelInfo>,
-) -> u8 {
-    resolve_auto_compact_threshold_percent_from_tiers(
-        cfg.config_models
-            .get(model_id)
-            .and_then(|m| m.auto_compact_threshold_percent),
-        cfg.session.auto_compact_threshold_percent,
-        model.and_then(|m| m.auto_compact_threshold_percent),
-        cfg.remote_settings
-            .as_ref()
-            .and_then(|r| r.auto_compact_threshold_percent),
-    )
-}
-
-/// [`resolve_auto_compact_threshold_percent`] for callers without a `Config`, e.g. subagent spawn paths that pass the parent's tiers explicitly.
-/// There the per-model tier uses the subagent's resolved model id, not the parent's.
-pub(crate) fn resolve_auto_compact_threshold_percent_from_tiers(
-    user_per_model: Option<u8>,
-    user_global: Option<u8>,
-    gb_per_model: Option<u8>,
-    gb_global: Option<u8>,
-) -> u8 {
-    fn clamp_env(raw: i64) -> Option<u8> {
-        if (0..=100).contains(&raw) {
-            Some(raw as u8)
-        } else {
-            tracing::debug!(
-                source = "env",
-                value = raw,
-                "auto_compact_threshold_percent out of range 0..=100; ignoring"
-            );
-            None
-        }
-    }
-    let from_env = || -> Option<u8> {
-        std::env::var(ENV_AUTO_COMPACT_THRESHOLD_PERCENT)
-            .ok()
-            .and_then(|s| s.parse::<i64>().ok())
-            .and_then(clamp_env)
-    };
-
-    from_env()
-        .or(user_per_model)
-        .or(user_global)
-        .or(gb_per_model)
-        .or(gb_global)
-        .unwrap_or(DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT)
 }
 
 /// Fleet p99 of successful compactions is ~181s (≈225s at 400K+ input).

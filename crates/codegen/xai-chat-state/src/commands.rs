@@ -9,8 +9,7 @@ use xai_grok_sampling_types::{
 };
 
 use crate::types::{
-    AutoCompactTrigger, ChatStateSnapshot, ConversationCounts, Credentials, NotificationMeta,
-    TurnCapture,
+    ChatStateSnapshot, ConversationCounts, Credentials, NotificationMeta, TurnCapture,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -297,12 +296,6 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<()>,
     },
 
-    /// Check if auto-compact is needed (returns token info).
-    CheckAutoCompactNeeded {
-        threshold_percent: u8,
-        reply: oneshot::Sender<Option<AutoCompactTrigger>>,
-    },
-
     /// Get credential secrets.
     GetCredentials { reply: oneshot::Sender<Credentials> },
 
@@ -510,12 +503,6 @@ mod tests {
         let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::TruncateToPromptIndex {
             target_prompt_index: 0,
-            reply: tx,
-        };
-
-        let (tx, _rx) = oneshot::channel();
-        let _ = ChatStateCommand::CheckAutoCompactNeeded {
-            threshold_percent: 85,
             reply: tx,
         };
 

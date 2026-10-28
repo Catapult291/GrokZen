@@ -365,7 +365,6 @@ mod tests {
                 message_tokens: 2_000,
                 free_tokens: 960_000,
                 usage_pct: 4,
-                auto_compact_threshold_percent: 85,
                 usage_categories: vec![],
             },
         }

@@ -477,39 +477,6 @@ impl ContextInfoBlock {
         }
         lines.push(Line::from(""));
 
-        // `threshold_tokens` uses `div_ceil` rather than truncating integer division. Without `div_ceil`, tiny totals
-        // could produce `remaining == 0` while `usage_pct < threshold_percent`. That would show `~0 tokens remaining` for
-        // a context window that isn't actually at the threshold.
-        if total > 0 {
-            let threshold_percent = snapshot.auto_compact_threshold_percent;
-            let threshold_tokens = total.saturating_mul(threshold_percent as u64).div_ceil(100);
-            let remaining = threshold_tokens.saturating_sub(used);
-            let (text, style) = if usage_pct >= threshold_percent {
-                (
-                    text(
-                        "context.auto_compact_triggers",
-                        "Auto-compact triggers next turn (at {percent}%)",
-                    )
-                    .replace("{percent}", &threshold_percent.to_string()),
-                    Style::default().fg(quantize(theme.warning)),
-                )
-            } else {
-                // Use `fmt_tok_big` (same as the header) so the remaining count rolls over to `m` for wide context windows
-                // A 4m window at 60% reads `~1.0m tokens remaining`, not `~1000k tokens remaining`
-                (
-                    text(
-                        "context.auto_compact_remaining",
-                        "Auto-compact at {percent}% \u{00b7} ~{tokens} tokens remaining",
-                    )
-                    .replace("{percent}", &threshold_percent.to_string())
-                    .replace("{tokens}", &fmt_tok_big(remaining)),
-                    muted,
-                )
-            };
-            lines.push(Line::from(Span::styled(text, style)));
-            lines.push(Line::from(""));
-        }
-
         // Footer stats
         lines.push(Line::from(Span::styled(
             text(
@@ -522,10 +489,8 @@ impl ContextInfoBlock {
             muted,
         )));
 
-        // The tip about approaching auto-compact only shows in the gap between the "getting close" mark (80%) and the
-        // actual auto-compact threshold. A second warning-styled tip suggesting a manual `/compact` would just stack
-        // visually and contradict itself.
-        if (80..snapshot.auto_compact_threshold_percent).contains(&usage_pct) {
+        // Suggest a manual compaction once the window is mostly full.
+        if usage_pct >= 80 {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 text(
@@ -697,7 +662,6 @@ mod tests {
             message_tokens: 29_900,
             free_tokens: 963_300,
             usage_pct: 4,
-            auto_compact_threshold_percent: 85,
             usage_categories: vec![],
         }
     }
@@ -760,7 +724,6 @@ mod tests {
             "MCP 服务器",
             "21 个技能",
             "2 个服务器",
-            "在 85% 时自动压缩",
             "轮次：5",
             "工具调用：12",
             "压缩次数：0",
@@ -828,58 +791,13 @@ mod tests {
     }
 
     #[test]
-    fn build_lines_omits_tip_at_or_above_threshold() {
-        // At/above the auto-compact threshold the "triggers next turn" line already says everything the tip would
-        // The tip is suppressed to avoid stacking two contradicting warning-styled lines (manual /compact vs. auto-compact about to fire).
+    fn build_lines_shows_tip_at_or_above_threshold() {
         let mut snap = snapshot();
-        snap.usage_pct = 85; // the historical default (and value in snapshot() helper)
+        snap.usage_pct = 85;
         let block = ContextInfoBlock::new(snap, "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
-        assert!(!all_text(&lines).contains("/compact"));
-    }
-
-    #[test]
-    fn build_lines_shows_auto_compact_estimate_below_threshold() {
-        let block = ContextInfoBlock::new(snapshot(), "grok-4");
-        let theme = test_theme();
-        let lines = block.build_lines(&theme, BarLayout::WIDE);
-        let all = all_text(&lines);
-        assert!(
-            all.contains("Auto-compact at 85%") && all.contains("tokens remaining"),
-            "expected `Auto-compact at 85% · ~X tokens remaining` line, got:\n{all}"
-        );
-    }
-
-    #[test]
-    fn build_lines_auto_compact_eta_uses_millions_for_wide_windows() {
-        // 4M window at 0% used: remaining = ceil(4_000_000 * 85 / 100) = 3_400_000.
-        // Renders via fmt_tok_big as "3.4m", not "3400k"
-        let mut snap = snapshot();
-        snap.total = 4_000_000;
-        snap.used = 0;
-        snap.usage_pct = 0;
-        let block = ContextInfoBlock::new(snap, "grok-4");
-        let theme = test_theme();
-        let lines = block.build_lines(&theme, BarLayout::WIDE);
-        let all = all_text(&lines);
-        assert!(
-            all.contains("~3.4m tokens remaining"),
-            "expected ETA to use millions, got:\n{all}"
-        );
-    }
-
-    #[test]
-    fn build_lines_auto_compact_eta_arithmetic_at_known_snapshot() {
-        // 1M window, 36_700 used: ceil(850_000) - 36_700 = 813_300, rendered as "813k"
-        let block = ContextInfoBlock::new(snapshot(), "grok-4");
-        let theme = test_theme();
-        let lines = block.build_lines(&theme, BarLayout::WIDE);
-        let all = all_text(&lines);
-        assert!(
-            all.contains("~813k tokens remaining"),
-            "expected `~813k tokens remaining`, got:\n{all}"
-        );
+        assert!(all_text(&lines).contains("/compact"));
     }
 
     #[test]
@@ -918,20 +836,6 @@ mod tests {
         assert!(
             l2.contains("/ 2.0m tokens"),
             "expected `/ 2.0m tokens` in summary line, got {l2:?}"
-        );
-    }
-
-    #[test]
-    fn build_lines_shows_imminent_auto_compact_at_threshold() {
-        let mut snap = snapshot();
-        snap.usage_pct = 85;
-        let block = ContextInfoBlock::new(snap, "grok-4");
-        let theme = test_theme();
-        let lines = block.build_lines(&theme, BarLayout::WIDE);
-        let all = all_text(&lines);
-        assert!(
-            all.contains("Auto-compact triggers next turn"),
-            "expected `Auto-compact triggers next turn` line, got:\n{all}"
         );
     }
 
@@ -1123,7 +1027,6 @@ mod tests {
             message_tokens: 25_000,
             free_tokens: 400_000,
             usage_pct: 20,
-            auto_compact_threshold_percent: 65,
             usage_categories: vec![],
         };
         let block = ContextInfoBlock::new(snap, "grok-build");

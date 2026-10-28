@@ -2018,12 +2018,6 @@ impl SessionActor {
         salvage: &mut super::length_salvage::LengthSalvage,
         turn_sampling: &mut TurnSampling,
     ) -> Result<TurnOutcome, acp::Error> {
-        let _ = self.compaction.auto_compact_suppressed.compare_exchange(
-            crate::session::compaction_config::SUPPRESS_TURN,
-            crate::session::compaction_config::SUPPRESS_NONE,
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-        );
         let agent_ref = self.agent.borrow();
         let completion_req = match agent_ref.completion_requirement() {
             Some(req) => req,
@@ -2669,7 +2663,6 @@ impl SessionActor {
         let turn_phases = self.turn_phases.clone();
         turn_phases.start();
         self.maybe_refresh_model_metadata_on_resume().await;
-        self.maybe_compact_on_model_switch().await?;
         self.chat_state_handle
             .record_turn_start(chrono::Utc::now().timestamp_millis());
         {
@@ -2734,7 +2727,6 @@ impl SessionActor {
                 .await;
             });
         }
-        self.record_turn_model().await;
         let mut metrics_drop_guard = TurnMetrics::new();
         let mut turn_tools_called: Vec<String> = Vec::new();
         let mut tool_turn_count: usize = 1;
@@ -2893,32 +2885,8 @@ impl SessionActor {
             } else {
                 TurnParkState::Fresh
             };
-            if self.tool_context.task_output_token_budget.is_none()
-                && !turn_parked.is_parked()
-                && self.two_pass_active()
-                && !self.compaction.prefire.has_cache()
-                && self.should_prefire_two_pass().await
-                && self.compaction.prefire.try_begin()
-            {
-                let actor = std::sync::Arc::clone(self);
-                let handle = tokio::task::spawn_local(async move {
-                    actor.run_prefire_pass1().await;
-                });
-                self.compaction.prefire.set_handle(handle);
-            }
             if self.tool_context.task_output_token_budget.is_none() && !turn_parked.is_parked() {
                 self.refresh_token_if_expired().await;
-            }
-            if self.tool_context.task_output_token_budget.is_none()
-                && !turn_parked.is_parked()
-                && !salvage.awaiting_continuation()
-                && let Some(trigger_info) = self.check_auto_compact_needed().await
-                && let Err(e) = self.run_compact_only(trigger_info, false).await
-            {
-                tracing::error!(error = %e, "Pre-sampling auto-compaction failed");
-                if Self::is_auth_compact_error(&e) {
-                    return Err(self.surface_compact_auth_failure(e).await);
-                }
             }
             let due_reminder = {
                 let mut state = self.long_reasoning_turn_state.lock();
@@ -3229,12 +3197,6 @@ impl SessionActor {
                     turn_phases.record_sampling_retries(1);
                     continue;
                 }
-                Ok(SamplerTurnOutcome::CompactAndResubmit) => {
-                    auth_retry_schedule.reset_on_success();
-                    transient_retry_attempts = 0;
-                    turn_phases.record_sampling_retries(1);
-                    continue;
-                }
                 Ok(SamplerTurnOutcome::TurnCancelledByRepetitionGuard { trip }) => {
                     // Visible transcript note (handoff §5.3.2) and a model-visible reminder
                     // (§5.3.3) so the next call does not blindly continue the poisoned output.
@@ -3470,13 +3432,6 @@ impl SessionActor {
                     .await;
             }
             turn_span_totals.record(&tracing::Span::current(), &response);
-            let _ = self.compaction.auto_compact_suppressed.compare_exchange(
-                crate::session::compaction_config::SUPPRESS_UNTIL_SUCCESS,
-                crate::session::compaction_config::SUPPRESS_NONE,
-                std::sync::atomic::Ordering::Relaxed,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            self.clear_auth_compact_suppression();
             let model_duration_ms = model_timer.elapsed().as_millis() as u64;
             {
                 let model_id = self.current_model_id().await;
@@ -4031,17 +3986,6 @@ impl SessionActor {
                 return Ok(TurnOutcome::MaxTurnsReached { limit });
             }
             tool_turn_count = next_turn;
-            if self.tool_context.task_output_token_budget.is_none()
-                && let Some(trigger_info) = self.check_preflight_overflow().await
-            {
-                if let Err(e) = self.run_compact_only(trigger_info, false).await {
-                    tracing::error!(error = %e, "Preflight overflow compaction failed");
-                    if Self::is_auth_compact_error(&e) {
-                        return Err(self.surface_compact_auth_failure(e).await);
-                    }
-                }
-                continue;
-            }
         }
     }
 }

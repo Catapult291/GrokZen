@@ -683,7 +683,6 @@ impl SessionActor {
                 message_tokens,
                 free_tokens,
                 usage_pct,
-                auto_compact_threshold_percent: self.compaction.threshold_percent.get(),
                 usage_categories,
             },
         }

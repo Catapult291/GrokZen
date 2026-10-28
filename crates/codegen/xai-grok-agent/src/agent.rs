@@ -159,22 +159,6 @@ impl Agent {
         self.tool_bridge.tool_definitions_builtins_only().await
     }
 
-    /// Whether auto-compact should trigger given current token usage.
-    ///
-    /// `context_window` comes from the session's SamplingConfig (model-provided).
-    pub fn should_auto_compact(
-        &self,
-        total_tokens: u64,
-        context_window: std::num::NonZeroU64,
-    ) -> bool {
-        let cw = context_window.get();
-        xai_token_estimation::exceeds_threshold(
-            total_tokens,
-            cw,
-            self.compaction_policy.auto_compact_threshold_percent as u8,
-        )
-    }
-
     /// Update completion and retry policies from a new definition.
     /// Does not rebuild the tool registry or re-render prompts. Used for mid-session mode switching.
     pub async fn update_policies_from_definition(&self, _def: &AgentDefinition) {

@@ -30,7 +30,7 @@ Not `/config-agents` (alias `/agents`), which manages agent *definitions* and pe
 
 Compress conversation history to reclaim context-window space.
 
-Grok also auto-compacts once the context window hits 85% (tune it with `[session] auto_compact_threshold_percent`).
+Grok does not compact automatically; run `/compact` when the context window is getting full.
 
 ### `/context`
 
@@ -120,7 +120,7 @@ Set reasoning effort on the **current** model without reselecting it. Levels are
 
 ### `/context-window <size>`
 
-Set the context window for the current model. The command is listed only when the model supports more than one size. It accepts the short label or the raw token count. The choice lasts for the session. It carries over to a new model that supports the same size. A size smaller than the current usage starts an auto-compact.
+Set the context window for the current model. The command is listed only when the model supports more than one size. It accepts the short label or the raw token count. The choice lasts for the session. It carries over to a new model that supports the same size. A size smaller than the current usage only changes the reported window; run `/compact` if you need to free context.
 
 ```
 /context-window 500k

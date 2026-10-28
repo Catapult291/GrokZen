@@ -101,13 +101,11 @@ telemetry = false                      # anonymous usage telemetry
 feedback = true                        # feedback system (default: true)
 lsp_tools = false                      # expose the lsp tool
 codebase_indexing = true               # code graph indexing (default: true)
-two_pass_compaction = true             # prefire two-pass compaction (default: true)
 remote_fetch = true                    # allow optional online model-catalog fetches (default: true;
                                        # set false for firewalled/air-gapped deployments; background
                                        # managed-config sync has its own switch: managed_config)
 
 [session]
-auto_compact_threshold_percent = 85    # auto-compact at this % of context window (default: 85)
 load_envrc = true                      # load .envrc environment variables
 
 [tools]
@@ -304,7 +302,7 @@ env_key = "XAI_API_KEY"               # env var(s) holding the API key; string o
 temperature = 0.7                     # sampling temperature (0.0-2.0)
 top_p = 0.95                          # nucleus sampling parameter
 max_completion_tokens = 8192          # max tokens per response
-context_window = 128000               # context window size (for auto-compact)
+context_window = 128000               # context window size (for usage reporting and /compact)
 query_params = { api-version = "2026-07-22" } # query params appended to every request URL
 env_http_headers = { "X-Tenant" = "TENANT_TOKEN" }    # request headers from env vars, resolved at client build
 ```

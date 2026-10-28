@@ -8,7 +8,6 @@ fn context() -> StatusLineContext {
     ctx.model.display_name = Some("Grok Build".into());
     ctx.cost.total_cost_usd = Some(0.3745);
     ctx.context_window.used_percentage = Some(42);
-    ctx.context_window.auto_compact_threshold_percent = Some(80);
     ctx
 }
 
@@ -111,10 +110,6 @@ fn context_segment_warns_near_compaction() {
     assert_eq!(tone(&ctx), SegmentTone::Warn);
     ctx.context_window.used_percentage = Some(50);
     assert_eq!(tone(&ctx), SegmentTone::Dim);
-
-    ctx.context_window.auto_compact_threshold_percent = Some(65);
-    ctx.context_window.used_percentage = Some(70);
-    assert_eq!(tone(&ctx), SegmentTone::Warn);
 }
 
 fn turn_timer(secs: u64) -> String {

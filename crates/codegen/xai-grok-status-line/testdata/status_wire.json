@@ -39,8 +39,7 @@
       "cache_read_input_tokens": 40000
     },
     "used_percentage": 8,
-    "remaining_percentage": 92,
-    "auto_compact_threshold_percent": 80
+    "remaining_percentage": 92
   },
   "effort": {
     "level": "high"

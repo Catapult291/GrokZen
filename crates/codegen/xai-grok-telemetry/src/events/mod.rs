@@ -166,14 +166,12 @@ telemetry_event!(
     "permission_decision",
     external = crate::external::schema::map_tool_decision
 );
-telemetry_event!(AutoCompactFired, "auto_compact_fired");
 telemetry_event!(CompactionTriggered, "compaction_triggered");
 telemetry_event!(
     CompactionCompleted,
     "compaction_completed",
     external = crate::external::schema::map_compaction
 );
-telemetry_event!(AutoCompactSuppressed, "auto_compact_suppressed");
 telemetry_event!(CompactionRetryDegraded, "compaction_retry_degraded");
 telemetry_event!(
     SubagentLaunched,
@@ -1843,7 +1841,6 @@ mod tests {
             model_id: "grok-4".into(),
             compaction_id: "cid-1".into(),
             compaction_mode: CompactionModeLabel::Segments,
-            two_pass_enabled: true,
             is_subagent: false,
         })
         .unwrap();
@@ -1857,7 +1854,6 @@ mod tests {
                 "model_id": "grok-4",
                 "compaction_id": "cid-1",
                 "compaction_mode": "segments",
-                "two_pass_enabled": true,
                 "is_subagent": false,
             })
         );
@@ -1870,7 +1866,6 @@ mod tests {
             model_id: "grok-4".into(),
             compaction_id: "cid-2".into(),
             compaction_mode: CompactionModeLabel::Summary,
-            two_pass_enabled: false,
             is_subagent: false,
         })
         .unwrap();
@@ -1884,7 +1879,6 @@ mod tests {
                 "model_id": "grok-4",
                 "compaction_id": "cid-2",
                 "compaction_mode": "summary",
-                "two_pass_enabled": false,
                 "is_subagent": false,
             })
         );
@@ -1900,7 +1894,6 @@ mod tests {
             model_id: Some("grok-4".into()),
             compaction_id: "cid-1".into(),
             compaction_mode: CompactionModeLabel::Summary,
-            two_pass: TwoPassOutcome::TwoPass,
             segments_queued: 0,
             degenerate_retries: 1,
             input_overflow_retries: 2,
@@ -1919,7 +1912,6 @@ mod tests {
                 "model_id": "grok-4",
                 "compaction_id": "cid-1",
                 "compaction_mode": "summary",
-                "two_pass": "two_pass",
                 "segments_queued": 0,
                 "degenerate_retries": 1,
                 "input_overflow_retries": 2,
@@ -1934,7 +1926,6 @@ mod tests {
             model_id: None,
             compaction_id: "cid-2".into(),
             compaction_mode: CompactionModeLabel::Transcript,
-            two_pass: TwoPassOutcome::Disabled,
             segments_queued: 0,
             degenerate_retries: 0,
             input_overflow_retries: 0,
@@ -1952,7 +1943,6 @@ mod tests {
                 "tokens_after": 1,
                 "compaction_id": "cid-2",
                 "compaction_mode": "transcript",
-                "two_pass": "disabled",
                 "segments_queued": 0,
                 "degenerate_retries": 0,
                 "input_overflow_retries": 0,
@@ -1967,7 +1957,6 @@ mod tests {
             model_id: None,
             compaction_id: "cid-3".into(),
             compaction_mode: CompactionModeLabel::Segments,
-            two_pass: TwoPassOutcome::SinglePass,
             segments_queued: 1,
             degenerate_retries: 0,
             input_overflow_retries: 0,
@@ -1985,7 +1974,6 @@ mod tests {
                 "tokens_after": 2,
                 "compaction_id": "cid-3",
                 "compaction_mode": "segments",
-                "two_pass": "single_pass",
                 "segments_queued": 1,
                 "degenerate_retries": 0,
                 "input_overflow_retries": 0,

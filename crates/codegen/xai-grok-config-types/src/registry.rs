@@ -35,8 +35,6 @@ pub enum Feature {
     CancelRewind,
     /// Summarize the verbatim conversation rather than a shortened copy of it.
     CompactionVerbatimInput,
-    /// Summarize the earlier part of a long conversation in the background, before compaction.
-    TwoPassCompaction,
     /// Server-side execution of `web_search` and `x_search`.
     BackendTools,
     /// Continue the conversation as soon as a background task or subagent finishes.
@@ -251,15 +249,6 @@ pub const FEATURES: &[FeatureSpec] = &[
         env: "GROK_COMPACTION_VERBATIM_INPUT",
         default_enabled: true,
         remote: Some(|settings| settings.compaction_verbatim_input),
-        capability: None,
-    },
-    FeatureSpec {
-        id: Feature::TwoPassCompaction,
-        key: "two_pass_compaction",
-        path: "features.two_pass_compaction",
-        env: "GROK_TWO_PASS_COMPACTION",
-        default_enabled: true,
-        remote: Some(|settings| settings.two_pass_compaction_enabled),
         capability: None,
     },
     FeatureSpec {
