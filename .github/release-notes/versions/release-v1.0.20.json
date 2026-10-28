@@ -5,7 +5,7 @@
   "previous_tag": "release-v1.0.19",
   "community": [
     {
-      "text": "跨会话区只保留带 detach 标记的任务；跨会话行可终止、可清除；面板随开随刷新。",
+      "text": "跨会话区只保留带 detach 标记的任务；跨会话行可终止、可清除，面板随开随刷新。",
       "commits": [
         "6281de5995567fac463bbaebec2ad16108f404c7",
         "6fe876e75d3c556c7ad76ed88481cea16132f677",
@@ -13,7 +13,7 @@
       ]
     },
     {
-      "text": "detach 确认卡收窄为 allow once / reject once；模型截断的工具参数不再拖垮整轮；Responses 流缺 arguments 可回填。",
+      "text": "detach 确认卡收窄为单次允许 / 单次拒绝；工具参数被截断时不再拖垮整轮，Responses 流缺 arguments 可自动回填。",
       "commits": [
         "6281de5995567fac463bbaebec2ad16108f404c7",
         "6fe876e75d3c556c7ad76ed88481cea16132f677",
