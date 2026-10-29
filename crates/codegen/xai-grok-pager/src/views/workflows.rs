@@ -740,14 +740,7 @@ fn render_list(
                 .replace("{done}", &done_phases.to_string())
                 .replace("{total}", &run.phases.len().to_string())
         };
-        let agent_progress =
-            workflow_text(locale, "workflows.agent_progress", "{done}/{total} agents")
-                .replace("{done}", &run.done_agents().to_string())
-                .replace("{total}", &run.agents.len().to_string());
-        let meta = format!(
-            "{phase_part} · {agent_progress} · {}",
-            format_elapsed(run.live_elapsed_ms())
-        );
+        let meta = format!("{phase_part} · {}", format_elapsed(run.live_elapsed_ms()));
         let label = format!(
             "{} · {}",
             strip_control(&run.name),

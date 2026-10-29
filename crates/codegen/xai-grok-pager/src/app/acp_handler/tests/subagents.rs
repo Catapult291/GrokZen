@@ -2322,7 +2322,7 @@
         ))
         .unwrap();
         for (sender, target, expected_header) in [
-            ("child-a", "child-b", "Message sent to Subagent \u{201c}index docs/\u{201d}"),
+            ("child-a", "child-b", "Message sent to Explore \u{201c}index docs/\u{201d}"),
             ("child-b", "child-a", "Message sent to Scout \u{201c}recheck the callers\u{201d}"),
         ] {
             let send = acp::ToolCall::new(

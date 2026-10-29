@@ -2959,7 +2959,7 @@ mod tests {
         assert!(matches!(pane_entry(&pane, 1), TaskEntry::Agent { .. }));
     }
     #[test]
-    fn nameless_explore_and_plan_type_labels_are_subagent() {
+    fn nameless_explore_and_plan_type_labels_are_their_types() {
         let mut pane = TasksPane::new();
         let mut subagents = HashMap::new();
         let mut plan = make_info();
@@ -2985,10 +2985,10 @@ mod tests {
                 _ => panic!("expected Agent"),
             })
             .collect();
-        assert_eq!(types, vec!["Subagent", "Subagent"]);
+        assert_eq!(types, vec!["Explore", "Plan"]);
     }
     #[test]
-    fn display_label_sort_orders_reviewer_before_subagent() {
+    fn display_label_sort_orders_by_display_label() {
         let mut pane = TasksPane::new();
         let mut subagents = HashMap::new();
         let mut reviewer = make_info();
@@ -3016,7 +3016,7 @@ mod tests {
                 _ => panic!("expected Agent"),
             })
             .collect();
-        assert_eq!(vec!["Reviewer", "Subagent"], types);
+        assert_eq!(vec!["Explore", "Reviewer"], types);
     }
     #[test]
     fn entry_label_includes_type_badge() {
@@ -3027,7 +3027,7 @@ mod tests {
             _ => panic!("expected Agent variant"),
         };
         assert!(
-            label.starts_with("Subagent "),
+            label.starts_with("Explore "),
             "label should start with capitalized display label: {label}",
         );
     }
@@ -3058,7 +3058,7 @@ mod tests {
             TaskEntry::Agent { label, .. } => label.as_str(),
             _ => panic!("expected Agent variant"),
         };
-        assert_eq!(label, "Subagent Find API endpoints");
+        assert_eq!(label, "Explore Find API endpoints");
     }
     #[test]
     fn zh_localization_task_entry_preserves_dynamic_description() {

@@ -1744,9 +1744,18 @@ mod tests {
     }
 
     #[test]
-    fn reauth_required_message_points_at_login() {
+    fn reauth_required_message_points_at_the_remedy() {
         let msg = SessionEvent::ReAuthRequired.message();
-        assert!(msg.contains("/login"), "must tell the user to run /login");
+        if xai_grok_config::Distribution::current()
+            .allows(xai_grok_config::Capability::AccountLogin)
+        {
+            assert!(msg.contains("/login"), "must tell the user to run /login");
+        } else {
+            assert!(
+                msg.contains("credential") && msg.contains("key"),
+                "a build without account login must point at the API key: {msg}"
+            );
+        }
         assert!(
             msg.to_lowercase().contains("authentication")
                 || msg.to_lowercase().contains("credentials"),
