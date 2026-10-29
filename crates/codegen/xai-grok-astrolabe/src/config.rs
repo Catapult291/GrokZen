@@ -124,6 +124,12 @@ pub struct AstrolabeToolsetConfig {
     pub max_files: u64,
     pub watch: bool,
     /// `"repo"` (default) or `"none"`.
+    ///
+    /// `"session"` (index cache under the session directory, repository left
+    /// untouched) is accepted but falls back to `"none"` with a warning: the
+    /// vendored Astrolabe 0.17.2 has no `store_dir` parameter. Track the
+    /// upstream knob in `astrolabe-open-items.md` item 6; do not patch the
+    /// store path locally.
     pub persist: String,
     /// Default `.gitignore` policy for the index. The session's
     /// `RespectGitignore` resource wins when present; this value is the
@@ -168,9 +174,22 @@ pub struct AstrolabeConfig {
     /// How long the first query waits for the index to become ready.
     pub ready_timeout: Duration,
     /// Start indexing when the engine is created instead of on the first query.
+    ///
+    /// Worth enabling when one long-lived session owns the process: the cold
+    /// build moves off the first query. With several sessions sharing the
+    /// process, engines are cached per root and only the first one pays the
+    /// build either way; prewarming adds the full RSS of the index before
+    /// anyone asks (about 400–460 MB on a 4k-file repo) and can evict a root
+    /// another session is still using. Default `false`.
     pub prewarm: bool,
     /// Watch the tree for changes. Off means queries only see host-applied
     /// edits and the query-time freshness barrier.
+    ///
+    /// Leaving this on is the fast path for both edits and new files. The
+    /// engine also runs a bounded query-time discovery walk (directory mtimes
+    /// newer than the last walk) so a create event the watcher missed still
+    /// becomes searchable; with the watcher off, that walk is the only way a
+    /// file created after the cold build enters the index.
     pub watch: bool,
     /// Language-server backend for `find_references` / `goto_definition` /
     /// `get_diagnostics` when the index alone cannot answer.

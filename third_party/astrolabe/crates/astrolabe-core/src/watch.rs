@@ -38,7 +38,10 @@
 //!    stampede.
 //! 6. **Automatic polling fallback**: If the OS notification system fails
 //!    to initialize or errors at runtime, the watcher logs a warning and
-//!    polls at [`WatchConfig::poll_interval`] (default 10 s).
+//!    polls at [`WatchConfig::poll_interval`] (default 2 s on Windows, 10 s
+//!    elsewhere: a fallback is expected to be shorter-lived than the safety
+//!    scan, and the old 10 s cycle kept a new file invisible for a full
+//!    cycle).
 //!
 //! ## Cost model
 //!
@@ -113,6 +116,15 @@ const EVENT_SAFETY_INTERVAL: Duration = Duration::from_secs(1800);
 /// within this cap rather than waiting out [`WatchConfig::safety_interval`].
 const DISTRUST_SAFETY_INTERVAL: Duration = Duration::from_secs(60);
 const DEFAULT_STORM_PATHS: usize = 5000;
+/// Default polling cadence for the fallback watcher. Windows keeps it short:
+/// its event backend is the one most likely to be unavailable (network
+/// shares, filter drivers), and a 10 s cycle let a new file stay invisible
+/// for a full cycle.
+const DEFAULT_POLL_INTERVAL: Duration = if cfg!(windows) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_secs(10)
+};
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x100_0000_01b3;
 
@@ -144,7 +156,7 @@ pub struct WatchConfig {
 impl Default for WatchConfig {
     fn default() -> Self {
         WatchConfig {
-            poll_interval: Duration::from_secs(10),
+            poll_interval: DEFAULT_POLL_INTERVAL,
             debounce: Duration::from_millis(500),
             safety_interval: EVENT_SAFETY_INTERVAL,
             safety_jitter: true,
@@ -1047,6 +1059,11 @@ trait EventFeed {
 struct NotifyFeed {
     rx: Receiver<Result<notify::Event, notify::Error>>,
     overflow: Arc<AtomicBool>,
+    /// Non-selective backends (Windows ReadDirectoryChangesW, macOS FSEvents)
+    /// keep the watcher here: dropping it drops the callback sender, and the
+    /// feed then reports `Disconnected` and falls back to polling on every
+    /// start.
+    watcher: Option<notify::RecommendedWatcher>,
     /// Present only in selective (per-directory) mode; owns the watcher so
     /// new directories can be registered from the consumer thread.
     selective: Option<Selective>,
@@ -1137,7 +1154,10 @@ impl EventFeed for NotifyFeed {
                 }
                 Ok(FeedWake::Events { paths, overflow })
             }
-            Ok(Err(_)) => Ok(FeedWake::Error),
+            Ok(Err(e)) => {
+                tracing::warn!(%e, "watch backend error; falling back to polling");
+                Ok(FeedWake::Error)
+            }
             Err(e) => {
                 if self.overflow.swap(false, Ordering::SeqCst) {
                     Ok(FeedWake::Events {
@@ -1200,6 +1220,7 @@ fn init_notify(root: &Path, scan: &ScanOptions, selective: bool) -> Option<(Noti
             NotifyFeed {
                 rx,
                 overflow,
+                watcher: Some(watcher),
                 selective: None,
             },
             (),
@@ -1225,6 +1246,7 @@ fn init_notify(root: &Path, scan: &ScanOptions, selective: bool) -> Option<(Noti
         NotifyFeed {
             rx,
             overflow,
+            watcher: None,
             selective: Some(sel),
         },
         (),
@@ -3700,6 +3722,44 @@ mod tests {
             took < Duration::from_secs(2),
             "stop took {took:?}; it must not wait out the 5 s scan"
         );
+    }
+
+    #[test]
+    fn non_selective_feed_keeps_the_os_watcher_alive() {
+        let dir = TestDir::new();
+        dir.write("a.rs", "fn a() {}");
+        let (mut feed, ()) =
+            init_notify(dir.path(), &ScanOptions::default(), false).expect("notify backend");
+        // Drain whatever the registration itself produced.
+        let drain_until = Instant::now() + Duration::from_millis(150);
+        while Instant::now() < drain_until {
+            let _ = feed.recv_timeout(Duration::from_millis(20));
+        }
+
+        dir.write("b.rs", "fn b() {}");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match feed.recv_timeout(Duration::from_millis(100)) {
+                Ok(FeedWake::Events { paths, .. }) if paths.iter().any(|p| p.ends_with("b.rs")) => {
+                    break;
+                }
+                Ok(_) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    panic!("feed disconnected: the non-selective watcher must be retained")
+                }
+            }
+            assert!(Instant::now() < deadline, "no event for b.rs");
+        }
+    }
+
+    #[test]
+    fn default_poll_interval_is_shorter_on_windows() {
+        let expected = if cfg!(windows) {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_secs(10)
+        };
+        assert_eq!(WatchConfig::default().poll_interval, expected);
     }
 
     #[test]

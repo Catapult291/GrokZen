@@ -11,6 +11,23 @@
 //! [`AstrolabeEngine::shutdown`] stops the watcher. The process-wide registry
 //! keeps engines alive across sessions: re-opening a root is cheap and the
 //! index stays warm.
+//!
+//! ## Coexistence with a standalone `astrolabe` MCP server
+//!
+//! The write side is decided per root by `<root>/.astrolabe/indexer.lock`.
+//! Whichever process wins that lock is the leader and the only writer of
+//! `index.redb`; every other process (another engine with a different
+//! `.gitignore`/deny policy, or a user-started `astrolabe.exe`) is a follower:
+//! it reads the leader's parse cache, keeps its own in-memory graph and never
+//! writes the store. Grok Build itself never spawns `astrolabe.exe` — the
+//! facade is in-process — so the only way two processes share one root is a
+//! user running the upstream binary side by side.
+//!
+//! Session teardown stops that session's watcher and drops its indexer lock;
+//! the store files stay on disk for the next process. Engines are shared by
+//! every session and subagent that agree on root, `.gitignore` policy and deny
+//! set, so an individual session does not shut an engine down:
+//! [`shutdown_all`] runs at process exit (and in tests).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

@@ -319,6 +319,79 @@ fn classify_candidate(
     }
 }
 
+/// More candidates than the caller allowed for an inline repair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiscoveryOverflow {
+    /// Candidates found before the walk stopped (always above the limit).
+    pub found: usize,
+}
+
+/// Files that are on disk but not in `known`, without stat'ing the whole tree.
+///
+/// Walks directories with the same exclusion rules as [`scan`] and lists the
+/// entries of directories whose mtime is newer than `since`: creating,
+/// renaming, or deleting a file updates its parent directory's mtime, so a
+/// directory that did not change cannot be hiding a new file. Each candidate
+/// then replays [`path_admission`] before it is returned.
+///
+/// This complements the watcher: it is the backstop for a create event that
+/// the watcher never delivered (polling fallback, a network mount, an
+/// overflowed event queue). It finds additions only; content edits and
+/// deletions stay with the event stream.
+///
+/// `Err(DiscoveryOverflow)` means more than `limit` candidates exist; the
+/// caller should rebuild instead of repairing an unbounded batch inline.
+pub fn discover_new_files<F>(
+    root: &Path,
+    opts: &ScanOptions,
+    since: SystemTime,
+    limit: usize,
+    known: F,
+) -> Result<Vec<RelPath>, DiscoveryOverflow>
+where
+    F: Fn(&RelPath) -> bool,
+{
+    let excludes = Arc::new(ExcludeMatcher::new(&opts.extra_excludes));
+    let walker = configured_walker(root, opts.respect_gitignore, excludes);
+    let mut found: Vec<RelPath> = Vec::new();
+    for entry in walker.build() {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        if !entry.file_type().is_some_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(mtime) = metadata.modified() else {
+            continue;
+        };
+        if mtime <= since {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(entry.path()) else {
+            continue;
+        };
+        for child in entries.flatten() {
+            let path = child.path();
+            let rel = RelPath::new(path_to_rel(root, &path));
+            if known(&rel) {
+                continue;
+            }
+            if path_admission(root, &rel, opts) == PathAdmission::Indexed {
+                found.push(rel);
+                if found.len() > limit {
+                    return Err(DiscoveryOverflow { found: found.len() });
+                }
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    Ok(found)
+}
+
 /// Replay the scan gates for one path without walking the whole tree.
 ///
 /// The root→path `.gitignore` chain is rebuilt with
@@ -986,6 +1059,39 @@ mod tests {
 
     fn has_skip(result: &ScanResult, path: &str, reason: SkipReason) -> bool {
         result.skipped.contains(&(RelPath::new(path), reason))
+    }
+
+    #[test]
+    fn discover_new_files_finds_only_the_unknown_ones() {
+        let dir = TestDir::new();
+        dir.write(".gitignore", "hidden.rs\n");
+        dir.write("src/a.rs", "fn a() {}");
+        let opts = ScanOptions::default();
+        let known: BTreeSet<RelPath> = scan(dir.path(), &opts).files.into_iter().collect();
+        // A second of slack keeps coarse filesystems from hiding the write.
+        let since = SystemTime::now() - Duration::from_secs(1);
+
+        dir.write("src/b.rs", "fn b() {}");
+        dir.write("hidden.rs", "fn hidden() {}");
+
+        let found =
+            discover_new_files(dir.path(), &opts, since, 8, |rel| known.contains(rel)).unwrap();
+        assert_eq!(found, vec![RelPath::new("src/b.rs")]);
+    }
+
+    #[test]
+    fn discover_new_files_reports_overflow_past_the_limit() {
+        let dir = TestDir::new();
+        dir.write("a.rs", "fn a() {}");
+        let opts = ScanOptions::default();
+        let known: BTreeSet<RelPath> = scan(dir.path(), &opts).files.into_iter().collect();
+        let since = SystemTime::now() - Duration::from_secs(1);
+
+        dir.write("b.rs", "fn b() {}");
+        dir.write("c.rs", "fn c() {}");
+        let overflow =
+            discover_new_files(dir.path(), &opts, since, 1, |rel| known.contains(rel)).unwrap_err();
+        assert_eq!(overflow.found, 2);
     }
 
     fn list_all_regular_files(root: &Path) -> Vec<RelPath> {
