@@ -183,7 +183,10 @@ mod tests {
     fn omits_session_id_when_none() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("env.txt");
-        let command = format!("env > {}", sh_display(&out));
+        let command = format!(
+            "printf '%s' \"${{GROK_SESSION_ID+set}}\" > {}",
+            sh_display(&out)
+        );
 
         execute_hook(
             &command,
@@ -195,7 +198,7 @@ mod tests {
 
         let content = std::fs::read_to_string(&out).unwrap();
         assert!(
-            !content.contains("GROK_SESSION_ID"),
+            content.is_empty(),
             "GROK_SESSION_ID should not be set: {content}"
         );
     }

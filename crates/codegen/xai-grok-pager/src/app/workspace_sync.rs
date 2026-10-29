@@ -219,10 +219,13 @@ fn truncate(value: Option<String>, max_bytes: usize) -> Option<String> {
 mod tests {
     use super::*;
     use agent_client_protocol as acp;
+    fn workspace_cwd() -> std::path::PathBuf {
+        std::env::temp_dir().join("workspace-sync")
+    }
     fn eligible_agent() -> AgentView {
         let mut agent = crate::app::agent_view::test_fixtures::make_agent();
         agent.session.session_id = Some(acp::SessionId::new("saved"));
-        agent.session.cwd = "/tmp/workspace-sync".into();
+        agent.session.cwd = workspace_cwd();
         agent.display_name = Some("Saved session".into());
         agent
     }
@@ -236,7 +239,10 @@ mod tests {
         assert_eq!(member.key.session_id.as_ref(), "saved");
         assert!(matches!(member.key.kind, MemberKind::Build));
         assert!(matches!(member.origin, MemberOrigin::Local));
-        assert_eq!(member.metadata.cwd.as_deref(), Some("/tmp/workspace-sync"));
+        assert_eq!(
+            member.metadata.cwd.as_deref(),
+            Some(workspace_cwd().display().to_string().as_str())
+        );
         assert_eq!(member.metadata.title.as_deref(), Some("Saved title"));
         assert_eq!(
             member.metadata.last_turn_summary.as_deref(),
@@ -247,7 +253,7 @@ mod tests {
     #[test]
     fn skips_unbound_conversation_and_relative_cwd_agents() {
         let mut agent = crate::app::agent_view::test_fixtures::make_agent();
-        agent.session.cwd = "/tmp/workspace-sync".into();
+        agent.session.cwd = workspace_cwd();
         assert!(agent_to_new_member(&agent).is_none());
         agent.session.session_id = Some(acp::SessionId::new("saved"));
         agent.conversation_entry = true;
@@ -267,7 +273,7 @@ mod tests {
     fn provisional_ids_cover_unbound_dispatch_but_not_hidden_or_ineligible_agents() {
         let mut agents = IndexMap::new();
         let mut dispatched = crate::app::agent_view::test_fixtures::make_agent();
-        dispatched.session.cwd = "/tmp/workspace-sync".into();
+        dispatched.session.cwd = workspace_cwd();
         dispatched.session.enqueue_prompt("fix the bug".into());
         assert!(dispatched.session.session_id.is_none());
         agents.insert(AgentId(1), dispatched);
