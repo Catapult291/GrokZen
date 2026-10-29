@@ -96,6 +96,12 @@ impl AgentView {
             });
     }
 
+    /// Test-only entry to the always-on Tab arm: the key path that reaches it is POSIX-gated, the landing it arms is not.
+    #[cfg(test)]
+    pub(crate) fn arm_shell_tab_completion_for_test(&mut self) {
+        self.request_shell_tab_completion(true);
+    }
+
     /// Refresh the candidate set after an accept or a prefix fill changed the draft.
     /// It goes through the debounced as-you-type pipeline when that is enabled, and otherwise fires a direct deterministic fetch.
     /// Either way the refreshed items land silently and the NEXT Tab consumes them.

@@ -1047,7 +1047,7 @@ fn new_named_findings_extend_json_without_schema_changes() {
     assert_eq!(
         json.pointer("/facts/clipboard/fix")
             .and_then(serde_json::Value::as_str),
-        Some("grok wrap <ssh command> or /minimal")
+        Some("grok-zh wrap <ssh command> or /minimal")
     );
     assert_eq!(
         json.pointer("/findings/0/id")

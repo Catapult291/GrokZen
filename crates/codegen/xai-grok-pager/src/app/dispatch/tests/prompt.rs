@@ -5344,7 +5344,6 @@ fn tab_fetch_landing_insta_accepts_single_candidate_always_on() {
     use crate::views::suggestion_controller::{
         CompletionItemParsed, SuggestResponseParsed, SuggestionSource as ShellSuggestionSource,
     };
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -5354,7 +5353,8 @@ fn tab_fetch_landing_insta_accepts_single_candidate_always_on() {
         agent.prompt.suggestions.enabled = false;
         agent.prompt.textarea.insert_str("cat no");
 
-        let _ = agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        // The Tab keystroke is POSIX-gated; the arm and the landing it drives are not.
+        agent.arm_shell_tab_completion_for_test();
         let generation = agent
             .pending_effects
             .iter()
@@ -5423,7 +5423,6 @@ fn tab_fetch_landing_opens_dropdown_for_ambiguous_set_always_on() {
         CompletionItemParsed, GhostSuggestionParsed, SuggestResponseParsed,
         SuggestionSource as ShellSuggestionSource,
     };
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -5432,9 +5431,11 @@ fn tab_fetch_landing_opens_dropdown_for_ambiguous_set_always_on() {
         agent.prompt_input_mode = crate::app::agent_view::PromptInputMode::Bash;
         agent.prompt.suggestions.enabled = false;
         agent.prompt.textarea.insert_str("git st");
-        let _ = agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        // The Tab keystroke is POSIX-gated; the arm and the landing it drives are not.
+        agent.arm_shell_tab_completion_for_test();
+        let generation = agent.prompt.suggestions.generation();
         agent.pending_effects.clear();
-        agent.prompt.suggestions.generation()
+        generation
     };
 
     let history_item = |line: &str| CompletionItemParsed {

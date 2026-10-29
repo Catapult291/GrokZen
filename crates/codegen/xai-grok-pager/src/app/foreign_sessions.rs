@@ -554,7 +554,7 @@ mod tests {
     #[tokio::test]
     async fn async_gate_supports_bundled_and_user_skill_locations() {
         let enabled = gated_sources_async_with(compat_all(), Path::new("/grok"), |path| {
-            let path = path.to_string_lossy();
+            let path = path.to_string_lossy().replace('\\', "/");
             std::future::ready(
                 path.contains("bundled/skills/resume-claude")
                     || path.contains("skills/resume-codex")
