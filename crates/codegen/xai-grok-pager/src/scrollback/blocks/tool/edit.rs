@@ -1681,7 +1681,7 @@ mod tests {
         assert_eq!(text, "Editing workflow cc-deep-research");
         assert!(
             block
-                .path_link_target(Some(Path::new("/repo")))
+                .path_link_target(Some(&std::env::temp_dir()))
                 .and_then(|target| crate::render::osc8::resolve_link_target(&target))
                 .and_then(|resolved| resolved.osc8_url)
                 .is_some_and(|u| u.contains("cc-deep-research.rhai")),
@@ -1852,21 +1852,25 @@ mod tests {
 
     #[test]
     fn header_link_target_is_absolute_file_for_all_surfaces() {
-        let abs = "/Users/me/project/src/foo.rs";
-        let cwd = Path::new("/Users/me/project");
+        // A Unix-shaped fixture is not absolute on Windows, so the file URL would never resolve.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let abs_path = cwd.join("src").join("foo.rs");
+        let abs = abs_path.to_str().unwrap();
         let block = EditToolCallBlock::new(abs, vec![]);
         let target = block.path_link_target(Some(cwd)).expect("file target");
         assert_eq!(
             target,
-            crate::render::osc8::LinkTarget::File(Arc::from(Path::new(abs)))
+            crate::render::osc8::LinkTarget::File(Arc::from(abs_path.as_path()))
         );
+        let expected_url = url::Url::from_file_path(&abs_path).expect("file url");
         assert_eq!(
             crate::render::osc8::resolve_link_target(&target)
                 .unwrap()
                 .osc8_url
                 .unwrap()
                 .as_ref(),
-            "file:///Users/me/project/src/foo.rs"
+            expected_url.as_str()
         );
 
         let mut ctx = test_ctx();

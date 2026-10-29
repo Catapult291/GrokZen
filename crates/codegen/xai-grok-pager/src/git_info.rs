@@ -295,10 +295,11 @@ fn collapse_home_path(path: &Path, home: Option<&Path>) -> String {
             if rest.as_os_str().is_empty() {
                 "~".to_string()
             } else {
-                format!("~/{}", rest.display())
+                // Display always uses `/`, whether the path came from git2 or a marker file.
+                format!("~/{}", rest.to_string_lossy().replace('\\', "/"))
             }
         })
-        .unwrap_or_else(|_| path.display().to_string())
+        .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"))
 }
 
 /// Branch glyph for the git display, cached for process lifetime. The Powerline glyph (`\u{e0a0}`) is a Nerd

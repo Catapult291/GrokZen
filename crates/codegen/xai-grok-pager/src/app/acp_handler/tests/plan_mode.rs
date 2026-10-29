@@ -651,8 +651,14 @@
             agent.post_turn_plan_review = true;
             agent.plan_mode_active = true;
         }
+        // Build the plan URIs from real platform paths; `file:///tmp/...` has no Windows drive and never resolves.
+        let dir = tempfile::tempdir().unwrap();
+        let first_path = dir.path().join("first.plan.md");
+        let second_path = dir.path().join("second.plan.md");
+        let first_uri = url::Url::from_file_path(&first_path).unwrap().to_string();
+        let second_uri = url::Url::from_file_path(&second_path).unwrap().to_string();
         let _ = handle(
-            plan_kept_msg("sess-plan", "file:///tmp/first.plan.md", "# First body\n"),
+            plan_kept_msg("sess-plan", &first_uri, "# First body\n"),
             &mut app,
         );
         app.agents
@@ -660,7 +666,7 @@
             .unwrap()
             .open_post_turn_plan_review();
         let _ = handle(
-            plan_kept_msg("sess-plan", "file:///tmp/second.plan.md", "# Second body\n"),
+            plan_kept_msg("sess-plan", &second_uri, "# Second body\n"),
             &mut app,
         );
         let agent = test_agent(&app, AgentId(0));
@@ -671,10 +677,7 @@
                 .and_then(|pav| pav.plan_content.as_deref()),
             Some("# Second body\n"),
         );
-        assert_eq!(
-            agent.kept_plan.path(),
-            Some(std::path::Path::new("/tmp/second.plan.md")),
-        );
+        assert_eq!(agent.kept_plan.path(), Some(second_path.as_path()));
     }
 
     #[test]

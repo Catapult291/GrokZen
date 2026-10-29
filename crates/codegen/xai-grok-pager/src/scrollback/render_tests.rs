@@ -2760,7 +2760,8 @@ fn official_vscode_remote_tool_headers_delegate_only_self_resolving_paint() {
     let cwd = test_home_path("grok-render-tests/worktree");
     let relative = std::path::Path::new("src").join("nested").join("main.rs");
     let target = cwd.join(&relative);
-    let relative_paint = relative.to_string_lossy();
+    // Headers paint `/` on every platform.
+    let relative_paint = relative.to_string_lossy().replace('\\', "/");
     let terminal = official_vscode_remote_context();
 
     for (name, block) in [

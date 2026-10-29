@@ -973,7 +973,13 @@ mod tests {
     #[test]
     fn done_state_scans_file_paths_like_scrollback() {
         // Absolute path text (not a markdown hyperlink) should still become a file:// overlay via scan_lines_for_url_overlays
-        let path = "/Users/test/project/src/main.rs";
+        // Build it from the platform temp root and render it with `/`, the form the scanner links on every platform.
+        let path = std::env::temp_dir()
+            .join("project")
+            .join("src")
+            .join("main.rs")
+            .to_string_lossy()
+            .replace('\\', "/");
         let state = BtwOverlayState::done("q".to_string(), format!("See {path} for details."));
         let (_model, overlay) = render_with_links(&state, 80, 8);
         let urls: Vec<_> = overlay

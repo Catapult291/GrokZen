@@ -63,13 +63,14 @@ pub(crate) fn resolve_tool_path_target_with_home(
     })
 }
 
+/// User-facing tool paths always render `/`, so one header reads the same on every platform.
+fn display_slash(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 fn non_empty_rel(rel: &Path) -> Option<String> {
-    let value = rel.to_string_lossy();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.into_owned())
-    }
+    let value = display_slash(rel);
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn home_dir() -> Option<&'static Path> {
@@ -102,9 +103,10 @@ fn resolve_tool_path_with_home(
         // Windows even though the paths are the same filesystem location;
         // compare case-insensitively as a fallback.
         if rel.is_none() && cfg!(windows) {
-            let a = display_path.to_string_lossy();
-            let b = cwd.to_string_lossy();
-            if a.len() > b.len()
+            let a = display_slash(&display_path);
+            let b = display_slash(&cwd);
+            if b.len() < a.len()
+                && a.is_char_boundary(b.len())
                 && a[..b.len()].eq_ignore_ascii_case(&b)
                 && a.as_bytes().get(b.len()) == Some(&b'/')
             {
@@ -124,17 +126,14 @@ fn resolve_tool_path(path: &str, cwd: Option<&Path>) -> ResolvedToolPath {
 }
 
 fn path_for_fullscreen_header(path: &str, cwd: Option<&Path>) -> String {
-    resolve_tool_path(path, cwd)
-        .display_path
-        .to_string_lossy()
-        .into_owned()
+    display_slash(&resolve_tool_path(path, cwd).display_path)
 }
 
 fn path_for_expanded_header(path: &str, cwd: Option<&Path>) -> String {
     let resolved = resolve_tool_path(path, cwd);
     resolved
         .relative_to_cwd
-        .unwrap_or_else(|| resolved.display_path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| display_slash(&resolved.display_path))
 }
 
 /// Shorten a file path to fit within `budget` display columns using fish-style component shortening.
