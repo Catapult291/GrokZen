@@ -11,7 +11,7 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use astrolabe_core::cache::{CacheConfig, FileCache};
 use astrolabe_core::freshness::{barrier_decision, staleness_note, BarrierDecision, FRESH_WINDOW};
@@ -67,6 +67,32 @@ pub(crate) struct ApplyHealth {
 const INLINE_RETRY_GAP: Duration = Duration::from_secs(2);
 /// Gap before another background rebuild after one failed.
 const REBUILD_BACKOFF: Duration = Duration::from_secs(60);
+
+/// Query-time discovery bookkeeping.
+///
+/// `since` is captured *before* each walk, so a file created while the walk
+/// ran still lands in the next one. The small backward slack covers
+/// filesystems whose directory timestamps are coarser than `SystemTime::now`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DiscoveryState {
+    pub since: SystemTime,
+}
+
+impl Default for DiscoveryState {
+    fn default() -> Self {
+        Self {
+            since: SystemTime::now(),
+        }
+    }
+}
+
+impl DiscoveryState {
+    fn walk_since(&self) -> SystemTime {
+        self.since
+            .checked_sub(Duration::from_secs(2))
+            .unwrap_or(SystemTime::UNIX_EPOCH)
+    }
+}
 
 /// Serving snapshot for one index root.
 #[derive(Debug)]
@@ -128,6 +154,9 @@ pub(crate) struct RootSession {
     pub coverage_note_shown: Arc<Mutex<Option<String>>>,
     /// Failed incremental updates awaiting retry / rebuild.
     pub apply_health: Arc<Mutex<ApplyHealth>>,
+    /// Backstop for create events the watcher never delivered: the last
+    /// completed query-time discovery and the mtime boundary it covers.
+    pub discovery: Arc<Mutex<DiscoveryState>>,
     pub knobs: McpKnobs,
     /// Test hook: the next N incremental applies fail as if the engine
     /// panicked.
@@ -185,6 +214,7 @@ impl RootSession {
             builds_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             coverage_note_shown: Arc::new(Mutex::new(None)),
             apply_health: Arc::new(Mutex::new(ApplyHealth::default())),
+            discovery: Arc::new(Mutex::new(DiscoveryState::default())),
             knobs,
             #[cfg(test)]
             fail_applies: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -665,13 +695,113 @@ pub(crate) enum BarrierEffect {
     StaleNote(String),
 }
 
+/// What the query-time discovery pass did.
+enum Discovery {
+    Nothing,
+    /// New files were found and applied to the live index before answering.
+    Applied,
+    /// More new files than the inline cap: the caller must degrade.
+    Overflow(usize),
+}
+
+/// Backstop for create events the watcher never delivered: list files that
+/// exist on disk but not in the live index, and apply them inline.
+///
+/// The watcher is the fast path; this covers the polling window, dropped
+/// notifications and network mounts, where a new file would otherwise answer
+/// a false zero. Only additions are found here (a directory mtime changed);
+/// content edits and deletions stay with the event stream.
+fn discover_new_paths(session: &RootSession) -> Discovery {
+    let index = match &*session.state.read().unwrap_or_else(|e| e.into_inner()) {
+        IndexState::Ready(index) => Arc::clone(index),
+        _ => return Discovery::Nothing,
+    };
+    // Applying additions also retries `unapplied`; the retry gap exists to
+    // throttle that, and the barrier reports those paths as stale instead.
+    // Do not let discovery bypass it.
+    if !session.apply_health.lock_or_recover().unapplied.is_empty() {
+        return Discovery::Nothing;
+    }
+    let mut guard = match session.discovery.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        // Another query is already walking; it applies before it answers.
+        Err(std::sync::TryLockError::WouldBlock) => return Discovery::Nothing,
+    };
+    let opts = scan_options(&session.knobs);
+    let found = match astrolabe_core::scan::discover_new_files(
+        &session.root,
+        &opts,
+        guard.walk_since(),
+        session.knobs.barrier_max,
+        |rel| index.admitted_paths().binary_search(rel).is_ok(),
+    ) {
+        Ok(found) => found,
+        Err(overflow) => return Discovery::Overflow(overflow.found),
+    };
+    // Captured before the walk (plus slack) so a file created while we were
+    // walking is caught next time instead of being sealed over.
+    guard.since = SystemTime::now();
+    if found.is_empty() {
+        return Discovery::Nothing;
+    }
+    let changes = crate::reindex::filter_changeset(
+        &session.root,
+        ChangeSet {
+            added: found,
+            ..ChangeSet::default()
+        },
+    );
+    if changes.is_empty() {
+        return Discovery::Nothing;
+    }
+    if let Some(log) = session.freshness.lock_or_recover().clone() {
+        let touched: Vec<RelPath> = changes.iter().map(|(_, p)| p.clone()).collect();
+        log.note_repaired(&touched);
+    }
+    let mut pending = session.pending.lock_or_recover();
+    pending.merge(changes);
+    apply_pending(session, &mut pending);
+    Discovery::Applied
+}
+
+fn discovery_overflow_note(found: usize) -> String {
+    format!(
+        "Index may be stale: {found} file(s) appeared on disk since the index was built and were not indexed inline; a background rebuild was triggered. Treat this result as stale. confidence: unknown"
+    )
+}
+
+fn merge_effect(effect: BarrierEffect, note: String) -> BarrierEffect {
+    match effect {
+        BarrierEffect::None => BarrierEffect::StaleNote(note),
+        BarrierEffect::StaleNote(first) => BarrierEffect::StaleNote(format!("{first}\n{note}")),
+    }
+}
+
+fn discovery_effect(
+    session: &Arc<RootSession>,
+    discovery: Discovery,
+    effect: BarrierEffect,
+) -> BarrierEffect {
+    match discovery {
+        Discovery::Nothing | Discovery::Applied => effect,
+        Discovery::Overflow(found) => {
+            trigger_background_rebuild_arc(session);
+            merge_effect(effect, discovery_overflow_note(found))
+        }
+    }
+}
+
 /// Query-time freshness barrier. No-ops when watching is disabled (no log).
 pub(crate) fn run_barrier(session: &Arc<RootSession>) -> BarrierEffect {
+    // Runs without a watcher too: with `watch = false` this is the only way a
+    // file created after the cold build becomes searchable.
+    let discovery = discover_new_paths(session);
     let log = {
         let g = session.freshness.lock_or_recover();
         match g.as_ref() {
             Some(log) => Arc::clone(log),
-            None => return BarrierEffect::None,
+            None => return discovery_effect(session, discovery, BarrierEffect::None),
         }
     };
 
@@ -735,7 +865,10 @@ pub(crate) fn run_barrier(session: &Arc<RootSession>) -> BarrierEffect {
     };
     // A repair (or an earlier watcher batch) whose apply failed is tracked
     // in `apply_health`, not lost: retry it, and say so while it is missing.
-    match (effect, settle_unapplied(session)) {
+    match (
+        discovery_effect(session, discovery, effect),
+        settle_unapplied(session),
+    ) {
         (effect, None) => effect,
         (BarrierEffect::None, Some(note)) => BarrierEffect::StaleNote(note),
         (BarrierEffect::StaleNote(first), Some(note)) => {
@@ -1347,6 +1480,49 @@ mod tests {
         let _ = run_barrier(&session);
         assert!(has_symbol(&session, "late_fn"), "barrier must repair it");
         handle.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn barrier_discovers_a_file_the_watcher_never_saw() {
+        let dir = unique_temp_dir();
+        std::fs::write(dir.join("a.py"), "def alpha():\n    return 1\n").unwrap();
+        // An hour-long poll cycle: only query-time discovery can see b.py.
+        let (session, handle) = session_with_log(&dir);
+        std::fs::write(dir.join("b.py"), "def beta():\n    return 2\n").unwrap();
+        assert!(!has_symbol(&session, "beta"), "the watcher cannot have run");
+        assert_eq!(barrier_note(&session), None);
+        assert!(
+            has_symbol(&session, "beta"),
+            "discovery must index a file no event announced"
+        );
+        handle.stop();
+        session.teardown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discovery_overflow_degrades_instead_of_repairing_inline() {
+        let dir = unique_temp_dir();
+        std::fs::write(dir.join("a.py"), "def alpha():\n    return 1\n").unwrap();
+        let knobs = McpKnobs {
+            watch_mode: None,
+            barrier_max: 1,
+            parse_cache_bytes: DEFAULT_PARSE_CACHE_BYTES,
+            ..McpKnobs::default()
+        };
+        let session = RootSession::new(dir.clone(), knobs, 8 * 1024 * 1024);
+        let persist = session.persist_enabled();
+        let cold = build_index(&session.root, persist, session.knobs.parse_cache_bytes);
+        assert!(matches!(cold, IndexState::Ready(_)));
+        *session.state.write().unwrap() = cold;
+
+        std::fs::write(dir.join("b.py"), "def beta():\n    return 2\n").unwrap();
+        std::fs::write(dir.join("c.py"), "def gamma():\n    return 3\n").unwrap();
+        let note = barrier_note(&session).expect("overflow must be reported, not repaired");
+        assert!(note.contains("appeared on disk"), "{note}");
+        assert!(note.contains("confidence: unknown"), "{note}");
+        session.teardown();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

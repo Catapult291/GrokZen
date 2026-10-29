@@ -272,6 +272,17 @@ impl RepoIndex {
         }
     }
 
+    /// Admitted files in this snapshot: repo-relative, sorted. Query-time
+    /// discovery diffs the disk against this list; the static test index
+    /// keeps no admitted set.
+    pub(crate) fn admitted_paths(&self) -> &[RelPath] {
+        match &self.inner {
+            InnerIndex::Incremental(inc) => inc.admitted_paths(),
+            #[cfg(test)]
+            InnerIndex::Static { .. } => &[],
+        }
+    }
+
     pub fn file(&self, id: FileId) -> Option<&CodeFile> {
         // `.rev()` above makes the first file with this id win, as `find` did.
         let pos = *self.names().file_pos.get(&id)?;

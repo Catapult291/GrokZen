@@ -140,6 +140,29 @@ fn gitignored_files_follow_the_session_policy() {
     assert!(text.contains("ignored.rs"), "{text}");
 }
 
+/// The watcher is off here, so only the query-time discovery walk can see a
+/// file created after the cold build. That is the backstop for create events
+/// the watcher misses (polling fallback, dropped notification).
+#[test]
+fn a_new_file_is_searchable_on_the_next_query() {
+    let fixture = Fixture::new();
+    let engine = fixture.engine();
+    let map = fixture.map(&fixture.root);
+    assert!(!search(&engine, &map, "fresh_only_marker").contains("fresh.rs"));
+
+    fs::write(
+        fixture.root.join("fresh.rs"),
+        "pub fn fresh_only_marker() {}\n",
+    )
+    .unwrap();
+
+    let text = search(&engine, &map, "fresh_only_marker");
+    assert!(
+        text.contains("fresh.rs"),
+        "query-time discovery must index a new file: {text}"
+    );
+}
+
 /// Two engines for one root with opposite `.gitignore` policies share a store
 /// path. The store is a per-file parse cache (content-hash keyed), not the
 /// graph itself: each engine scans under its own policy, the exclusive

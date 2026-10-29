@@ -49,6 +49,24 @@
 #  9. `crates/astrolabe-mcp/src/native.rs`: v0.17.2's per-call `index_root`
 #     stays off the Grok tool contract; every native param builder passes
 #     `index_root: None`, so the engine keeps its single workspace root.
+# 10. `crates/astrolabe-core/src/scan.rs`: `discover_new_files()` — bounded
+#     query-time walk of directories whose mtime changed since the last walk,
+#     diffed against the live index's admitted set (additions only).
+#     `crates/astrolabe-mcp/src/index.rs` exposes `RepoIndex::admitted_paths`;
+#     `session.rs` runs the walk in `run_barrier()` and applies the additions
+#     inline, degrading to a stale note + background rebuild past
+#     `ASTROLABE_BARRIER_MAX`. This is the backstop for create events the
+#     watcher never delivered (polling window, network mount).
+# 11. `crates/astrolabe-core/src/watch.rs`: `NotifyFeed` retains the
+#     non-selective OS watcher (`watcher: Some(..)`). Upstream dropped it at
+#     the end of `init_notify`, which dropped the callback sender and made the
+#     feed report `Disconnected` on the first drain — so Windows/macOS always
+#     fell back to polling (measured: every barrier test that needs an event
+#     within 120 ms failed). Linux registers per-directory (`Selective`), which
+#     owns the watcher, so upstream CI never saw it.
+# 12. `crates/astrolabe-core/src/watch.rs`: default `poll_interval` is 2 s on
+#     Windows (10 s elsewhere) for the remaining real fallbacks; a 10 s cycle
+#     kept a new file invisible for a full cycle.
 # ============================================================================
 
 [workspace]
