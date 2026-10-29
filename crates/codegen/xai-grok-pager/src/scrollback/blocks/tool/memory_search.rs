@@ -318,18 +318,23 @@ impl BlockContent for MemorySearchToolCallBlock {
     }
 }
 
-fn shorten_path(path: &str) -> &str {
+fn shorten_path(path: &str) -> String {
     let memory_root = xai_grok_config::grok_home().join("memory");
-    let memory_prefix = memory_root.display().to_string();
-    if let Some(rest) = path.strip_prefix(&memory_prefix) {
-        let rest = rest.strip_prefix('/').unwrap_or(rest);
+    let memory_prefix = memory_root.to_string_lossy().replace('\\', "/");
+    let normalized = path.replace('\\', "/");
+    if let Some(rest) = normalized.strip_prefix(&memory_prefix) {
+        let rest = rest.trim_start_matches('/');
         if let Some(after_slash) = rest.find('/') {
-            return rest.get(after_slash + 1..).unwrap_or(rest);
+            return rest.get(after_slash + 1..).unwrap_or(rest).to_string();
         }
-        return rest;
+        return rest.to_string();
     }
     // Fallback: strip to filename
-    path.rsplit('/').next().unwrap_or(path)
+    normalized
+        .rsplit('/')
+        .next()
+        .unwrap_or(&normalized)
+        .to_string()
 }
 
 pub fn parse_memory_results(output: &str) -> Vec<MemoryResult> {

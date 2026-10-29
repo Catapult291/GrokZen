@@ -2016,14 +2016,7 @@ mod tests {
                 |source| source(line.block_line_idx),
             )
             .flatten();
-        assert_eq!(
-            source_text.as_deref(),
-            Some(if cfg!(windows) {
-                "src\\lib.rs"
-            } else {
-                "src/lib.rs"
-            })
-        );
+        assert_eq!(source_text.as_deref(), Some("src/lib.rs"));
         {
             let child = parent.subagent_views.get(&child_id).expect("active child");
             let entry = child.scrollback.get(0).expect("child Read entry");
@@ -2035,11 +2028,7 @@ mod tests {
                         .get(line.block_line_idx)
                         .unwrap_or_else(|| panic!("missing index"))
                 ),
-                if cfg!(windows) {
-                    "src\\lib.rs"
-                } else {
-                    "src/lib.rs"
-                },
+                "src/lib.rs",
                 "copy helper must not rebuild the child cache against parent cwd"
             );
         }
@@ -2066,14 +2055,7 @@ mod tests {
         };
         assert_eq!(
             parent.reconstruct_drag_copy(&drag),
-            Some((
-                if cfg!(windows) {
-                    "src\\lib.rs".to_string()
-                } else {
-                    "src/lib.rs".to_string()
-                },
-                SelectionKind::Linear
-            ))
+            Some(("src/lib.rs".to_string(), SelectionKind::Linear))
         );
     }
 

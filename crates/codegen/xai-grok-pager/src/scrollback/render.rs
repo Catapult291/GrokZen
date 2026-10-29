@@ -3766,11 +3766,7 @@ mod tests_inline {
                 (
                     DisplayMode::Expanded,
                     80,
-                    if cfg!(windows) {
-                        "src\\nested\\main.rs"
-                    } else {
-                        "src/nested/main.rs"
-                    },
+                    "src/nested/main.rs",
                     LinkPresentation::SelfResolvingPath,
                 ),
             ] {

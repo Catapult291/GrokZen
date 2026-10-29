@@ -662,27 +662,30 @@ mod tests {
 
     #[test]
     fn header_link_target_is_absolute_file_for_collapsed_and_expanded() {
-        let abs = "/Users/me/project/src/main.rs";
+        // A Unix-shaped fixture is not absolute on Windows, so the file URL would never resolve.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let abs_path = cwd.join("src").join("main.rs");
+        let abs = abs_path.to_str().unwrap();
         let block = ReadToolCallBlock::new(abs);
         let mut ctx = make_ctx();
-        ctx.cwd = Some(std::path::PathBuf::from("/Users/me/project"));
+        ctx.cwd = Some(cwd.to_path_buf());
 
         let collapsed = block.output(&ctx);
         let collapsed_header = first_line(&collapsed);
         let target = collapsed_header.link_target.as_ref().expect("link target");
         assert_eq!(
             target,
-            &crate::render::osc8::LinkTarget::File(
-                std::sync::Arc::from(std::path::Path::new(abs),)
-            )
+            &crate::render::osc8::LinkTarget::File(std::sync::Arc::from(abs_path.as_path()))
         );
+        let expected_url = url::Url::from_file_path(&abs_path).expect("file url");
         assert_eq!(
             crate::render::osc8::resolve_link_target(target)
                 .unwrap()
                 .osc8_url
                 .unwrap()
                 .as_ref(),
-            "file:///Users/me/project/src/main.rs"
+            expected_url.as_str()
         );
         assert_eq!(span_text(collapsed_header, 1), "main.rs");
 

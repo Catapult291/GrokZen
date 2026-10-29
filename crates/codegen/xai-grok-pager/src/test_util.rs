@@ -280,9 +280,9 @@ pub fn collapsed_path_display(path: &Path) -> String {
     match home {
         Some(h) => path
             .strip_prefix(&h)
-            .map(|rest| format!("~/{}", rest.display()))
-            .unwrap_or_else(|_| path.display().to_string()),
-        None => path.display().to_string(),
+            .map(|rest| format!("~/{}", rest.to_string_lossy().replace('\\', "/")))
+            .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/")),
+        None => path.to_string_lossy().replace('\\', "/"),
     }
 }
 pub fn init_git_repo_on_branch(path: &Path, branch: &str) {

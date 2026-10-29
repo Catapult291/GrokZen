@@ -2036,10 +2036,10 @@ pub fn tab_complete_path(partial: &str) -> Option<String> {
     // Expand ~ to home directory.
     let expanded = if let Some(rest) = partial.strip_prefix('~') {
         let home = xai_dirs::home_dir()?;
-        if rest.is_empty() || rest == "/" {
-            home.to_string_lossy().to_string() + "/"
+        if rest.is_empty() || rest == "/" || rest == "\\" {
+            format!("{}{}", home.to_string_lossy(), std::path::MAIN_SEPARATOR)
         } else {
-            home.join(rest.strip_prefix('/').unwrap_or(rest))
+            home.join(rest.trim_start_matches(['/', '\\']))
                 .to_string_lossy()
                 .to_string()
         }
@@ -2049,8 +2049,8 @@ pub fn tab_complete_path(partial: &str) -> Option<String> {
 
     let path = Path::new(&expanded);
 
-    // If path is an existing directory (ends with /), list its contents.
-    if path.is_dir() && expanded.ends_with('/') {
+    // If path is an existing directory (ends with a separator), list its contents.
+    if path.is_dir() && expanded.ends_with(['/', '\\']) {
         let mut entries: Vec<String> = std::fs::read_dir(path)
             .ok()?
             .filter_map(|e| e.ok())
@@ -2093,14 +2093,11 @@ pub fn tab_complete_path(partial: &str) -> Option<String> {
         .map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
             let full = parent.join(&name);
-            let parent_str = if expanded.contains('/') {
-                expanded
-                    .rsplit_once('/')
-                    .map(|(p, _)| format!("{p}/"))
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
+            // Keep the separator style the user typed instead of assuming `/`.
+            let parent_str = expanded
+                .rfind(['/', '\\'])
+                .map(|idx| &expanded[..=idx])
+                .unwrap_or("");
             if full.is_dir() {
                 format!("{parent_str}{name}/")
             } else {
