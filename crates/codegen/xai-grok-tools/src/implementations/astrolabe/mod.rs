@@ -31,9 +31,9 @@ use crate::types::resources::{
 use crate::types::tool::{ToolKind, ToolNamespace};
 use crate::types::tool_metadata::{ToolMetadata, resolve_cwd, shared_resources};
 
-pub const SEARCH_CODE_DESC: &str = r#"Exhaustive literal/regex search over the indexed workspace. Hits include the enclosing function/type body — often no read_file needed. Limit paths/file types with glob. Wide results summarize per file; page with offset; aggregate for counts. Respects .gitignore and the workspace read policy. Newlines unsupported — read the file or search each line. Paths outside the root: use read_file. Code-map: resolve_context first."#;
+pub const SEARCH_CODE_DESC: &str = r#"Exhaustive literal/regex search over the indexed workspace. Hits include the enclosing function/type body — often no read_file needed. Limit paths/file types with glob. Wide results summarize per file; page with offset; aggregate for counts. Respects .gitignore and the workspace read policy. Newlines unsupported — read the file or search each line. Outside root: use read_file. Code-map: resolve_context; call sites: find_references."#;
 
-pub const FIND_SYMBOL_DESC: &str = r#"Locate a symbol by name, prefix, `Class/method` path, or file outline; returns its signature and path:line."#;
+pub const FIND_SYMBOL_DESC: &str = r#"Locate a symbol by name, prefix, `Class/method` path, or file outline; returns its signature and path:line. For full type information use lsp."#;
 
 // Task-start routing: match the eval phrasings ("which files and symbols",
 // "which parts implement", "map of the code") and force the first call.
@@ -41,7 +41,7 @@ pub const RESOLVE_CONTEXT_DESC: &str = r#"First when asked which files/symbols a
 
 pub const GET_LANGUAGES_DESC: &str = r#"Indexed languages, file and LOC counts, index gaps, language-server readiness, and which languages answer precise queries from the index."#;
 
-pub const FIND_REFERENCES_DESC: &str = r#"Precise references for a symbol: callers, usages, and rename impact. Index-first for Go and unique top-level TypeScript/TSX/Python names; otherwise the workspace language server answers. `dry_run_rename=NewName` returns a read-only per-file checklist. Lines are 1-based."#;
+pub const FIND_REFERENCES_DESC: &str = r#"Precise references for a known symbol: callers, usages, rename impact. Call sites → this first, not search_code. Index-first for Go and unique top-level TypeScript/TSX/Python names; otherwise the workspace language server answers. `dry_run_rename=NewName` returns a read-only per-file checklist. Lines are 1-based."#;
 
 pub const GOTO_DEFINITION_DESC: &str = r#"Resolve a symbol's definition from a file and line, or by name; index-first for Go, language server for other languages. Lines are 1-based."#;
 

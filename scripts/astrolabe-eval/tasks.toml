@@ -160,23 +160,27 @@ prompt = "Search across line boundaries: a line containing fn main() followed im
 expect = "grep"
 accept = ["grep", "run_terminal_command"]
 
-# hover_symbol expects the model-visible `lsp` tool. That tool needs a
-# non-empty lsp.json plus GROK_LSP_TOOLS=1; the runner prepares both via the
-# isolated-home fixture (`--lsp-fixture`, default on). Without a fixture these
-# tasks are environment-gated and the summary marks the category `no-lsp`.
+# hover_symbol: `expect` stays `lsp` (the type/hover path when the host LSP
+# is registered). Auto-arm majority is consistently `find_symbol` — already in
+# `accept`, so the category scores acceptable; strict needs a routing change
+# (E3), not an expect rewrite to chase green. `FIND_SYMBOL_DESC` now points
+# signature-only hits at lsp for full type information.
+# The runner prepares both via the isolated-home fixture (`--lsp-fixture`,
+# default on). Without a fixture these tasks are environment-gated and the
+# summary marks the category `no-lsp`.
 [[task]]
 id = "hover_precise_references"
 category = "hover_symbol"
 prompt = "Show the type signature of precise_references in the LspBackend trait."
 expect = "lsp"
-accept = ["lsp", "read_file", "find_symbol", "search_code"]
+accept = ["lsp", "find_symbol", "read_file", "search_code"]
 
 [[task]]
 id = "impl_lsp_backend"
 category = "hover_symbol"
 prompt = "List the implementations of the LspBackend trait."
 expect = "lsp"
-accept = ["lsp", "grep", "search_code", "find_symbol"]
+accept = ["lsp", "find_symbol", "search_code", "grep"]
 
 [[task]]
 id = "workspace_symbol_search_code"
