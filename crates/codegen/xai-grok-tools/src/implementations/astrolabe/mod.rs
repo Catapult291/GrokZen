@@ -1909,8 +1909,13 @@ mod tests {
             AstrolabeMode::Auto,
             "GrokBuild:find_references"
         ));
+        // Phase D: `all` is a synonym of `auto` — both register all seven.
         assert!(listing_enabled_for(
             AstrolabeMode::All,
+            "GrokBuild:get_diagnostics"
+        ));
+        assert!(listing_enabled_for(
+            AstrolabeMode::Auto,
             "GrokBuild:get_diagnostics"
         ));
         assert!(!listing_enabled_for(

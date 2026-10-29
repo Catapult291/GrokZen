@@ -6,14 +6,19 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 /// Which of the seven tools the toolset registers.
+///
+/// `auto` and `all` are synonyms: both register every index and precise tool.
+/// They only differ as config vocabulary (`auto` is the default; `all` exists
+/// so an explicit "everything" name still parses). `index` drops the precise
+/// tools; `off` registers nothing from this pack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AstrolabeMode {
-    /// Four index tools, plus the precise tools that answer from the index in
-    /// practice. `get_diagnostics` stays off until Phase 2.
+    /// All seven tools: the four index tools plus `find_references`,
+    /// `goto_definition` and `get_diagnostics`. Same set as [`Self::All`].
     Auto,
     /// Only the four index tools.
     Index,
-    /// All seven tools (Phase 2 completes the precise ones).
+    /// All seven tools — a synonym of [`Self::Auto`] kept for config clarity.
     All,
     /// Register nothing; only the non-index tools remain.
     Off,
@@ -118,6 +123,13 @@ impl IndexPersist {
 pub struct AstrolabeToolsetConfig {
     /// `false` is the same as `mode = "off"`.
     pub enabled: bool,
+    /// `"auto"` (default) or `"index"` / `"off"`. `"all"` is a synonym of
+    /// `"auto"`: since Phase D both names register the same seven tools.
+    ///
+    /// Installed process-wide at the first session that opens an agent
+    /// (`install_config`); later sessions in the same process inherit it and
+    /// cannot flip tools out from under the first. Restart Grok Build to
+    /// pick up a different mode.
     pub mode: String,
     pub index_root: String,
     /// Refuse to index a root with more regular files than this.
@@ -360,8 +372,18 @@ mod tests {
         assert_eq!(AstrolabeMode::parse("off"), Some(AstrolabeMode::Off));
         assert_eq!(AstrolabeMode::parse("false"), Some(AstrolabeMode::Off));
         assert_eq!(AstrolabeMode::parse("all"), Some(AstrolabeMode::All));
+        assert_eq!(AstrolabeMode::parse("auto"), Some(AstrolabeMode::Auto));
         assert_eq!(AstrolabeMode::parse(""), Some(AstrolabeMode::Auto));
         assert_eq!(AstrolabeMode::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn all_and_auto_register_the_same_seven_tools() {
+        // Phase D: `all` no longer means something different from `auto`.
+        for mode in [AstrolabeMode::Auto, AstrolabeMode::All] {
+            assert!(mode.index_tools());
+            assert!(mode.precise_tools());
+        }
     }
 
     #[test]

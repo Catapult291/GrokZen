@@ -57,9 +57,15 @@ pub enum EngineError {
     Path(#[from] PathError),
     #[error("astrolabe index unavailable for {root}: {message}")]
     IndexFailed { root: String, message: String },
+    /// Too many files under `root`. Three knobs, all in
+    /// `[toolset.astrolabe]`: narrow `index_root` (or set
+    /// `index_root = "cwd"` so each monorepo subdirectory indexes only
+    /// its own tree), raise `max_files`, or keep the default cap and
+    /// query with an explicit `path` / `read_file` instead of a full-root
+    /// cold build.
     #[error(
         "astrolabe refuses to index {root}: more than {limit} files. \
-         Narrow index_root to a subdirectory or raise [toolset.astrolabe].max_files. \
+         Narrow index_root (index_root = \"cwd\" in a monorepo) or raise [toolset.astrolabe].max_files. \
          Until then, use search_code with an explicit path under a smaller subdirectory, \
          or read_file known files directly."
     )]
@@ -70,6 +76,16 @@ pub enum EngineError {
 /// that disagree about `.gitignore` or `DenyReadGlobs` get separate indexes:
 /// the admitted file set is fixed at build time, so serving both from one
 /// engine would answer one of them wrong.
+///
+/// Sharing model (item 10 / Phase D): the on-disk parse store (`index.redb`)
+/// is content-hash keyed and shared across policies — one leader writes it,
+/// every follower reads it. Each engine keeps its own in-memory graph
+/// (~400–460 MB RSS per warm 4k-file root); different policies therefore
+/// cost one graph each, not one store each. Merging graphs across policies
+/// is not planned: gitignore/deny change the admitted set, and a shared
+/// graph would either leak denied paths or blind a permissive session.
+/// If multi-policy RSS ever becomes the bottleneck, the next step is a
+/// process-level LRU on warm graphs, not a graph merge.
 pub struct AstrolabeEngine {
     root: PathBuf,
     server: Arc<AstrolabeServer>,
@@ -99,7 +115,8 @@ struct EngineKey {
     root: PathBuf,
     respect_gitignore: bool,
     /// Normalized deny excludes (sorted, deduplicated); equal policies map
-    /// to one engine, differing policies to separate indexes.
+    /// to one engine, differing policies to separate indexes. The redb store
+    /// is still shared (content-hash keys); only the in-memory graph splits.
     deny_excludes: Vec<String>,
 }
 
@@ -108,16 +125,30 @@ static ENGINES: LazyLock<Mutex<HashMap<EngineKey, Arc<AstrolabeEngine>>>> =
 
 static CONFIG: OnceLock<AstrolabeConfig> = OnceLock::new();
 
-/// Process-wide engine configuration: `[toolset.astrolabe]` installed by the
-/// session at startup, or the environment when nothing was installed.
+/// Engine knobs for every session in this process.
+///
+/// The first `install_config` wins; later calls return `false` and leave the
+/// installed value alone. That is intentional: the tool registry and
+/// `by_kind` slots are process-wide, so flipping `mode` mid-process would
+/// remove tools from under sessions that already finalized their toolset.
+/// Sessions that need a different mode must restart Grok Build (or set
+/// `GROK_ASTROLABE*` before the first session starts).
+///
+/// Per-root knobs (`max_files`, `budget_tokens`, `persist`, `watch`,
+/// `prewarm`, `lsp_fallback`, `ready_timeout`) are *also* frozen at the
+/// first open of each `EngineKey`; a second session with a different
+/// `max_files` for the same root reuses the first engine and therefore the
+/// first value. Only a different root or a different gitignore/deny policy
+/// opens a fresh engine with its own knobs.
 pub fn process_config() -> &'static AstrolabeConfig {
     CONFIG.get_or_init(AstrolabeConfig::from_env)
 }
 
 /// Install the session's `[toolset.astrolabe]` configuration. The first
-/// install wins: the registry and `by_kind` are process-wide, so a later
-/// session with a different file cannot flip tools out from under the first.
-/// Returns `false` when a configuration was already installed.
+/// install wins (see [`process_config`]): the registry and `by_kind` are
+/// process-wide, so a later session with a different file cannot flip tools
+/// out from under the first. Returns `false` when a configuration was
+/// already installed.
 pub fn install_config(cfg: AstrolabeConfig) -> bool {
     if CONFIG.get().is_some() {
         return false;
@@ -145,6 +176,12 @@ pub fn note_edited_on_disk(paths: &[PathBuf]) {
 /// Engine for `root`, creating it on first use. The root must already be
 /// canonical (see [`root_for_cwd`]). No read-deny policy: see
 /// [`engine_for_session`].
+///
+/// Engines are cached per [`EngineKey`]. The first opener of a key freezes
+/// the [`AstrolabeConfig`] (budgets, `max_files`, `persist`, `watch`, …)
+/// for that root; a later session with different knobs reuses the same
+/// engine and therefore the first value. To get different knobs, change
+/// root / gitignore / deny policy, or restart the process.
 pub fn engine_for(root: &Path, cfg: &AstrolabeConfig) -> Result<Arc<AstrolabeEngine>, EngineError> {
     engine_for_session(root, cfg, cfg.respect_gitignore, &DenyPolicy::default())
 }
@@ -268,6 +305,8 @@ impl AstrolabeEngine {
         self.server.native_is_leader()
     }
 
+    /// The config this engine was opened with (frozen at first open of the
+    /// [`EngineKey`]; later sessions with different knobs reuse it).
     pub fn config(&self) -> &AstrolabeConfig {
         &self.cfg
     }

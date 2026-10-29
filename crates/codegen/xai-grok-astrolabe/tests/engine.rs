@@ -257,6 +257,57 @@ fn concurrent_gitignore_policies_share_one_store_without_cross_talk() {
 }
 
 #[test]
+fn second_session_with_different_knobs_reuses_the_first_engine_config() {
+    // Phase D / D1: the registry and by_kind are process-wide, so the first
+    // open of an EngineKey freezes max_files/budget/persist for that root.
+    // A later session that asks for a different max_files must get the
+    // first engine back (same Arc), not a second index with its own knobs.
+    let fixture = Fixture::new();
+    let root = root_for_cwd(&fixture.root, &fixture.cfg());
+
+    let first_cfg = AstrolabeConfig {
+        max_files: 1_000,
+        ..fixture.cfg()
+    };
+    let second_cfg = AstrolabeConfig {
+        max_files: 50_000,
+        ..fixture.cfg()
+    };
+    let first = engine_for(&root, &first_cfg).expect("first engine");
+    let second = engine_for(&root, &second_cfg).expect("second engine");
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "same (root, gitignore, deny) must share one engine"
+    );
+    assert_eq!(
+        first.config().max_files,
+        1_000,
+        "second session's max_files must not overwrite the first open"
+    );
+    assert_eq!(second.config().max_files, 1_000);
+
+    // A different deny set is a different EngineKey: it may open a fresh
+    // engine with its own config (item 10 dual-policy behavior).
+    let deny = DenyPolicy::new(&["*.secret".to_string()]);
+    let other = engine_for_session(
+        &root,
+        &second_cfg,
+        first_cfg.respect_gitignore,
+        &deny,
+    )
+    .expect("deny-keyed engine");
+    assert!(
+        !Arc::ptr_eq(&first, &other),
+        "a different deny set must not reuse the first engine"
+    );
+    assert_eq!(
+        other.config().max_files,
+        50_000,
+        "a fresh EngineKey takes the second session's knobs"
+    );
+}
+
+#[test]
 fn search_code_glob_limits_candidates() {
     let fixture = Fixture::new();
     let engine = fixture.engine();
