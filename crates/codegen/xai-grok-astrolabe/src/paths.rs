@@ -3,7 +3,7 @@
 //!
 //! Three bases (see the plan, §7.2):
 //! - `R` (root): the index root, a git root when there is one;
-//! - `C` (cwd): the session working directory that `read_file`/`grep` use;
+//! - `C` (cwd): the session working directory that `read_file` uses;
 //! - `D` (display): what the model sees when it differs from `C` (forked
 //!   sessions and worktrees).
 //!
@@ -18,8 +18,9 @@ use std::path::{Component, Path, PathBuf};
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum PathError {
     #[error(
-        "`{0}` is outside the indexed workspace root ({1}); use grep for paths outside the \
-         workspace"
+        "`{0}` is outside the indexed workspace root ({1}); the index cannot search \
+         outside the workspace — read the file with read_file, or narrow path to a \
+         location under the root"
     )]
     OutsideRoot(String, String),
     #[error("empty path")]
@@ -537,6 +538,10 @@ mod tests {
     fn engine_rel_rejects_paths_outside_the_root() {
         let err = map().engine_rel("../../../etc/passwd").unwrap_err();
         assert!(matches!(err, PathError::OutsideRoot(..)));
+        // The message must not send the model after a removed tool.
+        let text = err.to_string();
+        assert!(text.contains("read_file"), "{text}");
+        assert!(!text.contains("grep"), "{text}");
     }
 
     #[test]

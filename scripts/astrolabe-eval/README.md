@@ -44,8 +44,9 @@ states that the category does not participate in the strict two-arm
 comparison.
 
 Optional extra arms for a later pass: `GROK_ASTROLABE_INDEX=1` for
-`mode=index`, and `GROK_ASTROLABE_REPLACE_GREP=0` for the grep-first Search
-slot (`mode` and `replace_grep` are honored by the same environment layer).
+`mode=index` (`mode` is honored by the same environment layer). The
+`GROK_ASTROLABE_REPLACE_GREP` arm is gone: `grep` is no longer listed, so
+the Search slot is always `search_code`.
 
 ## Running
 

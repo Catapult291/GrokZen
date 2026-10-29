@@ -15,7 +15,7 @@ pub enum AstrolabeMode {
     Index,
     /// All seven tools (Phase 2 completes the precise ones).
     All,
-    /// Register nothing; `grep`/`lsp` only.
+    /// Register nothing; only the non-index tools remain.
     Off,
 }
 
@@ -134,9 +134,6 @@ pub struct AstrolabeToolsetConfig {
     pub budget_tokens: usize,
     /// How long the first query waits for the index; `0` means do not wait.
     pub ready_timeout_ms: u64,
-    /// Keep `search_code` ahead of `grep` in the Search slot. `false` puts
-    /// `grep` first, for sessions that want the old default back.
-    pub replace_grep: bool,
     pub prewarm: bool,
 }
 
@@ -153,7 +150,6 @@ impl Default for AstrolabeToolsetConfig {
             lsp_fallback: "grok".to_string(),
             budget_tokens: 2_500,
             ready_timeout_ms: 20_000,
-            replace_grep: true,
             prewarm: false,
         }
     }
@@ -188,8 +184,6 @@ pub struct AstrolabeConfig {
     /// Whether scans and watcher admissions honor `.gitignore`. The session's
     /// `RespectGitignore` resource overrides this at query time.
     pub respect_gitignore: bool,
-    /// Keep `search_code` ahead of `grep` in the Search slot.
-    pub replace_grep: bool,
 }
 
 impl Default for AstrolabeConfig {
@@ -206,7 +200,6 @@ impl Default for AstrolabeConfig {
             max_files: 20_000,
             persist: IndexPersist::Repo,
             respect_gitignore: true,
-            replace_grep: true,
         }
     }
 }
@@ -248,7 +241,6 @@ impl AstrolabeConfig {
         cfg.max_files = toolset.max_files.max(1);
         cfg.watch = toolset.watch;
         cfg.prewarm = toolset.prewarm;
-        cfg.replace_grep = toolset.replace_grep;
         cfg.respect_gitignore = toolset.respect_gitignore;
         cfg.budget_tokens = toolset.budget_tokens.clamp(1_000, 8_000);
         cfg.ready_timeout = Duration::from_millis(toolset.ready_timeout_ms);
@@ -316,12 +308,6 @@ impl AstrolabeConfig {
         if let Some(value) = parse_usize("GROK_ASTROLABE_MAX_FILES", 1) {
             self.max_files = value as u64;
         }
-        if let Ok(raw) = std::env::var("GROK_ASTROLABE_REPLACE_GREP") {
-            self.replace_grep = !matches!(
-                raw.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "no" | "off"
-            );
-        }
         if let Ok(raw) = std::env::var("GROK_ASTROLABE_RESPECT_GITIGNORE") {
             self.respect_gitignore = !matches!(
                 raw.trim().to_ascii_lowercase().as_str(),
@@ -383,7 +369,6 @@ respect_gitignore = false
 lsp_fallback = "astrolabe"
 budget_tokens = 4000
 ready_timeout_ms = 1500
-replace_grep = false
 prewarm = true
 "#,
         )
@@ -398,7 +383,6 @@ prewarm = true
         assert_eq!(cfg.lsp_fallback, LspFallback::Astrolabe);
         assert_eq!(cfg.budget_tokens, 4000);
         assert_eq!(cfg.ready_timeout, Duration::from_millis(1500));
-        assert!(!cfg.replace_grep);
         assert!(cfg.prewarm);
     }
 

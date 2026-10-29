@@ -1063,9 +1063,6 @@ impl ToolRegistryBuilder {
             .into_iter()
             .filter(|tool| crate::implementations::astrolabe::listed(&tool.id, local_fs))
             .collect();
-        if !xai_grok_astrolabe::process_config().replace_grep {
-            crate::implementations::astrolabe::demote_search_code(&mut tools);
-        }
         let config = ToolServerConfig {
             tools,
             behavior_preset: config.behavior_preset,

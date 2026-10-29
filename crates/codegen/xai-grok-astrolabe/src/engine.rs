@@ -42,8 +42,9 @@ pub enum EngineError {
     IndexFailed { root: String, message: String },
     #[error(
         "astrolabe refuses to index {root}: more than {limit} files. \
-         Narrow index_root to a subdirectory, raise [toolset.astrolabe].max_files, \
-         or use grep for this workspace."
+         Narrow index_root to a subdirectory or raise [toolset.astrolabe].max_files. \
+         Until then, use search_code with an explicit path under a smaller subdirectory, \
+         or read_file known files directly."
     )]
     TooManyFiles { root: String, limit: u64 },
 }

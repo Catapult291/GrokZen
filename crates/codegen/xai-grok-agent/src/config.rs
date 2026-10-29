@@ -265,11 +265,13 @@ fn grok_build_core_toolset_with(
     include_send_feedback: bool,
 ) -> ToolServerConfig {
     let mut tools = vec![
-        // Index-layer tools come first: `by_kind.search` is first-come, so
-        // `resolve_context` leads (task-start map questions) and `search_code`
-        // is the content-search tool. `grep` is removed from Grok Build.
-        (&astrolabe::ResolveContextTool).into(),
+        // Index-layer tools come first. `by_kind.search` is first-come, so
+        // `search_code` leads (content-search templates and
+        // `${{ tools.by_kind.search }}` must name the content tool).
+        // `resolve_context` still wins task-start routing via its description.
+        // `grep` is removed from Grok Build.
         (&astrolabe::SearchCodeTool).into(),
+        (&astrolabe::ResolveContextTool).into(),
         (&astrolabe::FindSymbolTool).into(),
         (&astrolabe::GetLanguagesTool).into(),
         (&astrolabe::FindReferencesTool).into(),
@@ -383,8 +385,8 @@ fn explore_toolset() -> ToolServerConfig {
         tools: vec![
             (&grok_build::ReadFileTool).into(),
             (&grok_build::ListDirTool).into(),
-            (&astrolabe::ResolveContextTool).into(),
             (&astrolabe::SearchCodeTool).into(),
+            (&astrolabe::ResolveContextTool).into(),
             (&astrolabe::FindSymbolTool).into(),
             (&astrolabe::GetLanguagesTool).into(),
             (&astrolabe::FindReferencesTool).into(),
@@ -402,8 +404,8 @@ fn plan_toolset() -> ToolServerConfig {
         tools: vec![
             (&grok_build::ReadFileTool).into(),
             (&grok_build::ListDirTool).into(),
-            (&astrolabe::ResolveContextTool).into(),
             (&astrolabe::SearchCodeTool).into(),
+            (&astrolabe::ResolveContextTool).into(),
             (&astrolabe::FindSymbolTool).into(),
             (&astrolabe::GetLanguagesTool).into(),
             (&astrolabe::FindReferencesTool).into(),
@@ -422,8 +424,8 @@ fn grok_build_plan_toolset() -> ToolServerConfig {
     ToolServerConfig {
         tools: vec![
             // Standard grok-build tools
-            (&astrolabe::ResolveContextTool).into(),
             (&astrolabe::SearchCodeTool).into(),
+            (&astrolabe::ResolveContextTool).into(),
             (&astrolabe::FindSymbolTool).into(),
             (&astrolabe::GetLanguagesTool).into(),
             (&astrolabe::FindReferencesTool).into(),
@@ -1742,14 +1744,15 @@ mod tests {
         assert!(plan.tools.len() < gb.tools.len());
     }
     /// `grep` is removed from every Grok Build toolset; `search_code` owns the
-    /// content-search slot and the index tools ship in the read-only presets.
+    /// content-search slot (`by_kind.search`) and the index tools ship in the
+    /// read-only presets. `resolve_context` still wins task-start routing via
+    /// its description, so it need not lead the Search slot.
     #[test]
     fn index_tools_lead_the_search_slot_and_ship_in_read_only_presets() {
         let index_tools = [
-            ToolConfig::from(&astrolabe::ResolveContextTool).id,
             ToolConfig::from(&astrolabe::SearchCodeTool).id,
-            ToolConfig::from(&astrolabe::FindSymbolTool).id,
             ToolConfig::from(&astrolabe::ResolveContextTool).id,
+            ToolConfig::from(&astrolabe::FindSymbolTool).id,
             ToolConfig::from(&astrolabe::GetLanguagesTool).id,
         ];
         let grep_id = "GrokBuild:grep";
@@ -1775,6 +1778,15 @@ mod tests {
                 position(&cfg, &search).is_some(),
                 "{label} is missing search_code"
             );
+            // `by_kind.search` is first-come among Search-kind tools; the
+            // content-search tool must own the slot for templates.
+            let search_pos = position(&cfg, &search).expect("search_code present");
+            let resolve = ToolConfig::from(&astrolabe::ResolveContextTool).id;
+            let resolve_pos = position(&cfg, &resolve).expect("resolve_context present");
+            assert!(
+                search_pos < resolve_pos,
+                "{label}: search_code must lead resolve_context for by_kind.search"
+            );
         }
         for (label, cfg) in [
             ("explore", toolset_for_preset("explore").unwrap()),
@@ -1789,6 +1801,14 @@ mod tests {
             assert!(
                 position(&cfg, grep_id).is_none(),
                 "{label}: grep must not be listed"
+            );
+            let search = ToolConfig::from(&astrolabe::SearchCodeTool).id;
+            let search_pos = position(&cfg, &search).expect("search_code present");
+            let resolve = ToolConfig::from(&astrolabe::ResolveContextTool).id;
+            let resolve_pos = position(&cfg, &resolve).expect("resolve_context present");
+            assert!(
+                search_pos < resolve_pos,
+                "{label}: search_code must lead resolve_context for by_kind.search"
             );
         }
         // The concise preset keeps only `search_code`.
