@@ -221,7 +221,7 @@ fn dock_subagent_icons_hover_and_click_where_painted() {
         .collect::<Vec<_>>()
         .concat();
     assert!(
-        row.contains("Subagent test"),
+        row.contains("General test"),
         "subagent row painted: {row:?}"
     );
     let _ = agent.handle_mouse(&mouse(MouseEventKind::Moved, dock.x + 5, row_y));

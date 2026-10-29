@@ -77,7 +77,7 @@ fn context_badge_shown_only_for_resumed_and_forked() {
 }
 
 #[test]
-fn subagent_label_prefers_persona_then_role_then_tag() {
+fn subagent_label_prefers_persona_then_role_then_builtin_type() {
     struct Case {
         persona: Option<&'static str>,
         role: Option<&'static str>,
@@ -116,7 +116,7 @@ fn subagent_label_prefers_persona_then_role_then_tag() {
             None,
             "explore",
             "[deep-dive] find auth code",
-            "Deep-dive",
+            "Explore",
             "find auth code",
         ),
         case(
@@ -132,7 +132,7 @@ fn subagent_label_prefers_persona_then_role_then_tag() {
             None,
             "general-purpose",
             "do a thing",
-            "Subagent",
+            "General",
             "do a thing",
         ),
         case(
@@ -156,7 +156,7 @@ fn subagent_label_prefers_persona_then_role_then_tag() {
             None,
             "general-purpose",
             "[] do something",
-            "Subagent",
+            "General",
             "[] do something",
         ),
         case(
@@ -164,7 +164,7 @@ fn subagent_label_prefers_persona_then_role_then_tag() {
             None,
             "general-purpose",
             "[broken description",
-            "Subagent",
+            "General",
             "[broken description",
         ),
         case(
@@ -172,7 +172,7 @@ fn subagent_label_prefers_persona_then_role_then_tag() {
             None,
             "custom-agent",
             "test task",
-            "Subagent",
+            "Custom-agent",
             "test task",
         ),
         case(

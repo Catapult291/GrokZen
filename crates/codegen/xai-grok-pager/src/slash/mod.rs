@@ -2206,8 +2206,8 @@ mod tests {
         let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
         let meta = serde_json::json!({
             "scope": "plugin",
-            "path": "/plugins/acme/skills/login/SKILL.md",
-            "bareName": "login",
+            "path": "/plugins/acme/skills/doctor/SKILL.md",
+            "bareName": "doctor",
             "pluginName": "acme",
         })
         .as_object()
@@ -2215,26 +2215,26 @@ mod tests {
         .unwrap();
         ctrl.registry_mut()
             .set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
-                "acme:login".to_string(),
-                "Acme account login".to_string(),
+                "acme:doctor".to_string(),
+                "Acme environment check".to_string(),
             )
             .meta(meta)]);
 
         let state = SlashState::default();
         let models = ModelState::default();
-        ctrl.refresh(&state, "/login", 6, &models);
+        ctrl.refresh(&state, "/doctor", 7, &models);
         let snapshot = state.snapshot();
-        let login = snapshot
+        let builtin = snapshot
             .matches
             .iter()
-            .find(|row| row.display == "/login")
-            .expect("builtin /login");
-        assert_eq!(login.provenance, Some(CommandProvenance::Builtin));
-        assert!(!login.description.contains("built-in"));
+            .find(|row| row.display == "/doctor")
+            .expect("builtin /doctor");
+        assert_eq!(builtin.provenance, Some(CommandProvenance::Builtin));
+        assert!(!builtin.description.contains("built-in"));
         let skill = snapshot
             .matches
             .iter()
-            .find(|row| row.display == "/acme:login")
+            .find(|row| row.display == "/acme:doctor")
             .expect("qualified skill");
         assert_eq!(
             skill.provenance,
@@ -2242,19 +2242,19 @@ mod tests {
                 source: "acme".to_string()
             })
         );
-        assert_eq!(skill.description, "Acme account login");
-        assert!(ctrl.registry().get("login").is_some_and(|c| !c.is_skill()));
+        assert_eq!(skill.description, "Acme environment check");
+        assert!(ctrl.registry().get("doctor").is_some_and(|c| !c.is_skill()));
         assert!(
             ctrl.registry()
-                .get("acme:login")
+                .get("acme:doctor")
                 .is_some_and(|c| c.is_skill())
         );
 
-        ctrl.refresh(&state, "/acme:login", 11, &models);
+        ctrl.refresh(&state, "/acme:doctor", 12, &models);
         let snapshot = state.snapshot();
         assert_eq!(
             snapshot.selection().map(|row| row.display.as_str()),
-            Some("/acme:login"),
+            Some("/acme:doctor"),
             "exact qualified query should select the skill"
         );
     }

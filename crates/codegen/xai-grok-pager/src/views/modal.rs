@@ -1729,7 +1729,7 @@ mod palette_sharing_tests {
         for expected in [
             "会话",
             "新建会话",
-            "智能体仪表盘",
+            "智能体面板",
             "上下文用量",
             "模型与输入",
             "工作流",
