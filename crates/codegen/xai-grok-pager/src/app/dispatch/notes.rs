@@ -180,6 +180,18 @@ pub(super) fn dispatch_open_feedback_modal(
     effects
 }
 
+/// Whether the coding-data sharing lock suppresses the one-shot trace offer.
+/// PrivacyBuild is a compile-time retention lock; `test-uploads` lifts session uploads for
+/// unit tests, so the one-shot offer may still ask. ZDR and team-managed locks always suppress.
+fn sharing_lock_allows_trace_offer(app: &AppView) -> bool {
+    use crate::settings::CodingDataSharingLock;
+    match app.coding_data_sharing_lock() {
+        None => true,
+        Some(CodingDataSharingLock::PrivacyBuild) => xai_grok_product::SESSION_DATA_UPLOADS_ALLOWED,
+        Some(CodingDataSharingLock::Zdr | CodingDataSharingLock::TeamManaged) => false,
+    }
+}
+
 /// (when the offer applies and no choice was made yet) or encode the images, close the modal, thank immediately, and emit only the POST. The one-shot upload is never a sibling of the POST:
 /// "Never submit while paste probes are in flight" is owned by the modal's key layer
 /// (`FeedbackModalState::handle_key` defers behind the probe count); every producer of `Action::SubmitFeedbackModal` must route through it or `take_deferred_submit`.
@@ -200,7 +212,7 @@ pub(super) fn dispatch_submit_feedback_modal(
     let offer_trace = app.feedback_trace_offer()
         && !app.feedback_trace_choice_latched
         && !app.coding_data_retention_opt_out
-        && app.coding_data_sharing_lock().is_none()
+        && sharing_lock_allows_trace_offer(app)
         && app.team_name.is_none()
         && !app.is_zdr
         && !app.screen_mode.is_minimal();
@@ -568,6 +580,8 @@ pub(super) fn dispatch_send_feedback(
         "session.no_active_period",
         "No active session.",
     )
+    // Failure prefixes already append `. Not sent…`; a trailing period here would double it.
+    .trim_end_matches('.')
     .to_string();
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
