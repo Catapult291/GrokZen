@@ -301,7 +301,7 @@ impl JsonlStorageAdapter {
         }
         summaries.sort_by_cached_key(|s| {
             (
-                std::cmp::Reverse(s.last_active_at.unwrap_or(s.updated_at)),
+                std::cmp::Reverse(s.last_reply_at.or(s.last_active_at).unwrap_or(s.updated_at)),
                 s.info.id.0.to_string(),
             )
         });
@@ -312,7 +312,7 @@ impl JsonlStorageAdapter {
     const RECENT_LIST_READ_SLACK: usize = 8;
     /// Instead of reading every `summary.json` (expensive at scale, ~12K files), this stats each file to get its mtime.
     /// On a machine with ~12K sessions this reduces cold-boot `workspace_list` from ~3s to ~200ms.
-    /// Final order among candidates uses `last_active_at` else `updated_at`.
+    /// Final order among candidates uses `last_reply_at`, then `last_active_at`, else `updated_at`.
     pub async fn list_sessions_recent(&self, limit: usize) -> io::Result<Vec<Summary>> {
         let adapter = self.clone();
         tokio::task::spawn_blocking(move || adapter.list_sessions_recent_sync(limit))
@@ -363,7 +363,7 @@ impl JsonlStorageAdapter {
         }
         summaries.sort_by_cached_key(|s| {
             (
-                std::cmp::Reverse(s.last_active_at.unwrap_or(s.updated_at)),
+                std::cmp::Reverse(s.last_reply_at.or(s.last_active_at).unwrap_or(s.updated_at)),
                 s.info.id.0.to_string(),
             )
         });
@@ -681,6 +681,11 @@ impl JsonlStorageAdapter {
             info,
             super::summary_write::SummaryPatch {
                 record_activity: true,
+                record_reply: matches!(
+                    update,
+                    super::SessionUpdate::Acp(notification)
+                        if matches!(&notification.update, acp::SessionUpdate::AgentMessageChunk(_))
+                ),
                 messages: Some(super::summary_write::CounterOp::Increment(1)),
                 ..Default::default()
             },
@@ -1342,6 +1347,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             info,
             super::summary_write::SummaryPatch {
                 record_activity: true,
+                record_reply: matches!(message, ConversationItem::Assistant(_)),
                 chat_messages: Some(super::summary_write::CounterOp::Increment(1)),
                 chat_format_version: Some(CHAT_FORMAT_VERSION),
                 ..Default::default()

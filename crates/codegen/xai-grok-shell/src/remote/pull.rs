@@ -178,6 +178,7 @@ pub(crate) mod hydrate {
             // Record the *local* grok_home (where this hydrated copy lives), not the original remote session's, since reconstruction runs locally
             grok_home: crate::session::persistence::grok_home_string(),
             last_active_at: None,
+            last_reply_at: None,
             generated_title,
             title_is_manual,
             worktree_label: None,

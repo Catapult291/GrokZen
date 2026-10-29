@@ -164,6 +164,47 @@ async fn test_jsonl_round_trip() {
     assert_eq!(loaded.updates.len(), 1);
     assert!(loaded.plan_state.is_some());
 }
+#[tokio::test]
+async fn only_assistant_replies_advance_last_reply_at() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    assert_eq!(
+        adapter.read_summary_sync(&info).unwrap().last_reply_at,
+        None
+    );
+
+    adapter
+        .append_chat_message(&info, &ConversationItem::user("question"))
+        .await
+        .unwrap();
+    assert_eq!(
+        adapter.read_summary_sync(&info).unwrap().last_reply_at,
+        None,
+        "a user prompt is not a reply"
+    );
+
+    adapter
+        .append_chat_message(&info, &ConversationItem::assistant("answer"))
+        .await
+        .unwrap();
+    let replied = adapter
+        .read_summary_sync(&info)
+        .unwrap()
+        .last_reply_at
+        .expect("assistant reply stamps last_reply_at");
+
+    // Reopening a session writes metadata (`updated_at`), which must not move the resume timestamp.
+    adapter
+        .update_current_model(&info, &acp::ModelId::new("grok-4.3"))
+        .await
+        .unwrap();
+    let after = adapter.read_summary_sync(&info).unwrap();
+    assert_eq!(after.last_reply_at, Some(replied));
+    assert!(after.updated_at >= replied);
+}
+
 /// Resume from updates.jsonl alone: when chat_history.jsonl is missing, load rebuilds it from the ACP update stream.
 /// The update stream is the durable source of truth.
 #[tokio::test]
@@ -1303,6 +1344,7 @@ fn write_test_summary(
         request_id: None,
         grok_home: None,
         last_active_at,
+        last_reply_at: None,
         generated_title: None,
         title_is_manual: false,
         worktree_label: None,

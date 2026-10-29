@@ -1235,6 +1235,12 @@ pub struct Summary {
     /// `None` for sessions created before this field was added.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_active_at: Option<DateTime<Utc>>,
+    /// When the session last received an assistant reply.
+    /// Advanced only when an assistant message is appended; metadata writes and merely reopening the session leave it untouched.
+    /// Session listings (`/resume`) use it for the timestamp and order so viewing history never reshuffles the list.
+    /// `None` for sessions created before this field was added; callers fall back to `last_active_at` / `updated_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reply_at: Option<DateTime<Utc>>,
     /// LLM-generated session title persisted separately from `session_summary`.
     /// When present, this is preferred for display over `session_summary`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1352,6 +1358,7 @@ impl Summary {
             request_id: None,
             grok_home: grok_home_string(),
             last_active_at: None,
+            last_reply_at: None,
             generated_title: None,
             title_is_manual: false,
             worktree_label: None,
@@ -3222,7 +3229,7 @@ pub(crate) async fn load_light(
 }
 
 /// List session summaries, optionally filtered by cwd (absolute path string).
-/// Returns summaries sorted by `last_active_at` (else `updated_at`) descending.
+/// Returns summaries sorted by `last_reply_at` (else `last_active_at`, else `updated_at`) descending.
 pub async fn list_summaries(cwd: Option<&str>) -> io::Result<Vec<Summary>> {
     let root_dir = crate::util::grok_home::grok_home();
     let storage: Box<dyn StorageAdapter> = Box::new(JsonlStorageAdapter::with_root(root_dir));
@@ -3361,7 +3368,7 @@ mod delete_session_history_tests;
 mod worktree_stamp_tests;
 
 /// List the `limit` most recently modified session summaries across all workspaces.
-/// Uses stat-based mtime sorting to avoid reading every summary file on disk; final order uses `last_active_at` else `updated_at`.
+/// Uses stat-based mtime sorting to avoid reading every summary file on disk; final order uses `last_reply_at`, then `last_active_at`, else `updated_at`.
 pub async fn list_recent_summaries(limit: usize) -> io::Result<Vec<Summary>> {
     let root_dir = crate::util::grok_home::grok_home();
     let storage = JsonlStorageAdapter::with_root(root_dir);
