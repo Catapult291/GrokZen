@@ -193,6 +193,9 @@ windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# Flip FEEDBACK_UPLOADS_ALLOWED / SESSION_DATA_UPLOADS_ALLOWED for unit tests
+# against local mock servers. Release builds never enable this.
+xai-grok-product = { path = "../xai-grok-product", features = ["test-uploads"] }
 xai-interjection-core = { workspace = true }
 # The fixture that builds a `[ui.status_line]` section field by field.
 xai-grok-status-line = { workspace = true, features = ["test-support"] }
