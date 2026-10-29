@@ -433,6 +433,10 @@ impl AstrolabeEngine {
 
     /// `find_references`. Blocking; index-first, with `needs_host_lsp` set
     /// when only a language server can answer.
+    ///
+    /// Index-first covers Go for every name and TypeScript/TSX/Python for
+    /// unique top-level names (vendor `refs_graph`); other languages defer to
+    /// the workspace server. The scope is upstream's measured choice.
     pub fn find_references(
         &self,
         paths: &PathMap,
@@ -485,6 +489,11 @@ impl AstrolabeEngine {
 
     /// `goto_definition`. Blocking; returns declarations from the index or
     /// asks the host server, depending on what the index can decide.
+    ///
+    /// The index answers on its own for Go only. Every other language comes
+    /// back `unknown` with an anchor, so `needs_host_lsp` is what hands it to
+    /// the workspace server; that split is upstream's measured choice
+    /// (`live_backend::index_definition`), not a host limitation.
     pub fn goto_definition(
         &self,
         paths: &PathMap,

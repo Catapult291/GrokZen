@@ -39,14 +39,13 @@ pub const FIND_SYMBOL_DESC: &str = r#"Locate a symbol by name, prefix, `Class/me
 // "which parts implement", "map of the code") and force the first call.
 pub const RESOLVE_CONTEXT_DESC: &str = r#"First when asked which files/symbols are involved, which parts implement X, or a map of the code: task-ranked related files and symbols."#;
 
-pub const GET_LANGUAGES_DESC: &str =
-    r#"Indexed languages, file and LOC counts, index gaps, and language-server readiness."#;
+pub const GET_LANGUAGES_DESC: &str = r#"Indexed languages, file and LOC counts, index gaps, language-server readiness, and which languages answer precise queries from the index."#;
 
-pub const FIND_REFERENCES_DESC: &str = r#"Precise references for a symbol: callers, usages, and rename impact. Index first; the workspace language server answers when the index cannot decide. `dry_run_rename=NewName` returns a read-only per-file checklist. Lines are 1-based."#;
+pub const FIND_REFERENCES_DESC: &str = r#"Precise references for a symbol: callers, usages, and rename impact. Index-first for Go and unique top-level TypeScript/TSX/Python names; otherwise the workspace language server answers. `dry_run_rename=NewName` returns a read-only per-file checklist. Lines are 1-based."#;
 
-pub const GOTO_DEFINITION_DESC: &str = r#"Resolve a symbol's definition from a file and line, or by name; index first, language server fallback. Lines are 1-based."#;
+pub const GOTO_DEFINITION_DESC: &str = r#"Resolve a symbol's definition from a file and line, or by name; index-first for Go, language server for other languages. Lines are 1-based."#;
 
-pub const GET_DIAGNOSTICS_DESC: &str = r#"Syntax and type errors for one file, from language-server diagnostics or the parser. Prefer build/test for project-wide truth."#;
+pub const GET_DIAGNOSTICS_DESC: &str = r#"Parser/language-server diagnostics for one file; the toolchain never runs. Not a build: run cargo check / go build / tsc for project-level truth."#;
 
 /// `search_code` params. The toolset flips `hashline_note` on when the
 /// hashline file toolset is active: bodies returned here are for reading and
@@ -214,6 +213,43 @@ where
         .map_err(|e| xai_tool_runtime::ToolError::custom("astrolabe", e.to_string()))
 }
 
+/// A short index lookup that honors turn cancellation: `None` when the turn is
+/// already cancelled, and no further wait once it is cancelled mid-flight.
+///
+/// Unlike `search_code`, the engine lookup has no per-file cancel checkpoint,
+/// so dropping the join only ends the wait — the blocking task finishes its
+/// query in the background. That still hands the turn back promptly, which is
+/// what matters for a lookup this short.
+async fn blocking_lookup<T, F>(
+    ctx: &xai_tool_runtime::ToolCallContext,
+    f: F,
+) -> Result<Option<T>, xai_tool_runtime::ToolError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let cancellation = ctx
+        .get::<xai_tool_runtime::Cancellation>()
+        .map(|c| c.0.clone());
+    if cancellation
+        .as_ref()
+        .is_some_and(|token| token.is_cancelled())
+    {
+        return Ok(None);
+    }
+    let mut handle = tokio::task::spawn_blocking(f);
+    let joined = |res: Result<T, tokio::task::JoinError>| {
+        res.map_err(|e| xai_tool_runtime::ToolError::custom("astrolabe", e.to_string()))
+    };
+    match cancellation {
+        Some(token) => tokio::select! {
+            res = &mut handle => Ok(Some(joined(res)?)),
+            _ = token.cancelled() => Ok(None),
+        },
+        None => Ok(Some(joined((&mut handle).await)?)),
+    }
+}
+
 /// Flips an engine cancel flag whenever it drops. The dispatcher cancels a
 /// tool by dropping its future, so the guard (not just the token arm) is what
 /// stops the scan when the turn goes away.
@@ -227,6 +263,9 @@ impl Drop for CancelOnDrop {
 
 const SEARCH_CANCELLED: &str =
     "(search cancelled before it finished; narrow the query with path/glob and retry.)";
+
+const LOOKUP_CANCELLED: &str =
+    "(lookup cancelled before it finished; retry or narrow the query with path.)";
 
 fn text_output(text: String) -> ToolOutput {
     ToolOutput::Text(TextOutput {
@@ -285,8 +324,32 @@ fn with_note(text: String, note: &str, budget_bytes: usize) -> String {
     xai_grok_astrolabe::render::truncate(out, budget_bytes)
 }
 
-const NO_LSP_NOTE: &str = "note: `lsp_fallback = grok` but no workspace language server is configured. \
-Add one to ~/.grok/lsp.json, or set GROK_ASTROLABE_LSP=astrolabe to use Astrolabe's own pool.";
+/// One failure sentence for the `lsp_fallback = grok` dead end, used when no
+/// host server is registered and when the registered pool cannot answer. The
+/// `lsp` tool's unavailable error names the same config files, so the model has
+/// one fix to apply.
+fn no_host_lsp_note(detail: Option<&str>) -> String {
+    let mut note = String::from("note: `lsp_fallback = grok` and ");
+    match detail {
+        Some(detail) => {
+            note.push_str("the workspace language server did not answer (");
+            note.push_str(detail.trim());
+            note.push(')');
+        }
+        None => note.push_str("no workspace language server is registered"),
+    }
+    note.push_str(". ");
+    note.push_str(crate::implementations::lsp::LSP_SERVER_SETUP);
+    note.push_str(
+        " Or set lsp_fallback = \"astrolabe\" to use Astrolabe's built-in pool; get_languages shows configured/Ready.",
+    );
+    note
+}
+
+/// Diagnostics answer "what does the parser or LSP say about this file", not
+/// "does the project build": cross-file type checking, features and cfg belong
+/// to the build. Kept short on purpose — it rides on every diagnostics reply.
+const BUILD_TRUTH_NOTE: &str = "note: single-file diagnostics, not a build. Run the project's build/test (cargo check, go build, tsc) for project-level truth.";
 
 // ---------------------------------------------------------------------------
 // search_code
@@ -443,8 +506,11 @@ impl xai_tool_runtime::Tool for FindSymbolTool {
         let engine = open_engine(&env).await?;
         let paths = env.paths;
         let deny = env.deny;
-        let out = blocking(move || engine.find_symbol(&paths, &deny, input)).await?;
-        Ok(text_output(out.map_err(engine_error)?.text))
+        let out = blocking_lookup(&ctx, move || engine.find_symbol(&paths, &deny, input)).await?;
+        Ok(match out {
+            Some(out) => text_output(out.map_err(engine_error)?.text),
+            None => text_output(LOOKUP_CANCELLED.to_string()),
+        })
     }
 }
 
@@ -506,8 +572,11 @@ impl xai_tool_runtime::Tool for ResolveContextTool {
         let engine = open_engine(&env).await?;
         let paths = env.paths;
         let deny = env.deny;
-        let out = blocking(move || engine.resolve_context(&paths, &deny, input)).await?;
-        Ok(text_output(out.map_err(engine_error)?.text))
+        let out = blocking_lookup(&ctx, move || engine.resolve_context(&paths, &deny, input)).await?;
+        Ok(match out {
+            Some(out) => text_output(out.map_err(engine_error)?.text),
+            None => text_output(LOOKUP_CANCELLED.to_string()),
+        })
     }
 }
 
@@ -703,7 +772,7 @@ impl xai_tool_runtime::Tool for FindReferencesTool {
                     return Ok(text_output(with_note(output.text, note, cfg.budget_bytes)));
                 }
                 Err(err) => {
-                    let note = format!("note: language server: {err}");
+                    let note = no_host_lsp_note(Some(&err));
                     return Ok(text_output(with_note(output.text, &note, cfg.budget_bytes)));
                 }
             }
@@ -711,7 +780,7 @@ impl xai_tool_runtime::Tool for FindReferencesTool {
 
         let mut text = output.text;
         if unknown_reason.is_some() && lsp.is_none() && host_lsp_allowed() {
-            text = with_note(text, NO_LSP_NOTE, cfg.budget_bytes);
+            text = with_note(text, &no_host_lsp_note(None), cfg.budget_bytes);
         }
         Ok(text_output(text))
     }
@@ -821,7 +890,7 @@ impl xai_tool_runtime::Tool for GotoDefinitionTool {
                     return Ok(text_output(with_note(output.text, note, cfg.budget_bytes)));
                 }
                 Err(err) => {
-                    let note = format!("note: language server: {err}");
+                    let note = no_host_lsp_note(Some(&err));
                     return Ok(text_output(with_note(output.text, &note, cfg.budget_bytes)));
                 }
             }
@@ -829,7 +898,7 @@ impl xai_tool_runtime::Tool for GotoDefinitionTool {
 
         let mut text = output.text;
         if unknown_reason.is_some() && lsp.is_none() && host_lsp_allowed() {
-            text = with_note(text, NO_LSP_NOTE, cfg.budget_bytes);
+            text = with_note(text, &no_host_lsp_note(None), cfg.budget_bytes);
         }
         Ok(text_output(text))
     }
@@ -925,7 +994,8 @@ impl xai_tool_runtime::Tool for GetDiagnosticsTool {
                         severity.as_deref(),
                         cfg.budget_bytes,
                     );
-                    return Ok(text_output(rendered.text));
+                    let text = with_note(rendered.text, BUILD_TRUTH_NOTE, cfg.budget_bytes);
+                    return Ok(text_output(text));
                 }
                 Ok(_) => {}
                 Err(err) => host_error = Some(err),
@@ -941,10 +1011,12 @@ impl xai_tool_runtime::Tool for GetDiagnosticsTool {
         let mut text = out.text;
         if let Some(err) = host_error {
             let note = format!(
-                "note: host language server unavailable ({err}); parser/toolchain result below."
+                "note: host language server unavailable ({err}). {} Parser result below.",
+                crate::implementations::lsp::LSP_SERVER_SETUP
             );
             text = with_note(text, &note, cfg.budget_bytes);
         }
+        let text = with_note(text, BUILD_TRUTH_NOTE, cfg.budget_bytes);
         Ok(text_output(text))
     }
 }
@@ -1178,6 +1250,23 @@ mod tests {
         }
     }
 
+    /// `rust-analyzer` from the default rustup toolchain. This repo pins
+    /// 1.94.0 (no rust-analyzer component) and the LSP child inherits this
+    /// process's working directory, so a bare `rust-analyzer` would resolve
+    /// through the proxy to that toolchain and exit.
+    fn stable_rust_analyzer() -> Option<std::path::PathBuf> {
+        let out = std::process::Command::new("rustup")
+            .args(["which", "rust-analyzer", "--toolchain", "stable"])
+            .current_dir(std::env::temp_dir())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!path.is_empty()).then(|| std::path::PathBuf::from(path))
+    }
+
     fn rust_workspace() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("src")).unwrap();
@@ -1220,6 +1309,180 @@ mod tests {
         assert!(text.text.contains("src/lib.rs:1"), "{}", text.text);
     }
 
+    /// No host backend at all: a Rust definition is an explicit dead end with
+    /// the config pointers, never an empty list that reads as "no definition".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn goto_definition_without_a_language_server_explains_the_dead_end() {
+        let tmp = rust_workspace();
+        let mut resources = Resources::new();
+        resources.insert(Cwd(tmp.path().to_path_buf()));
+        let ctx = crate::types::tool_metadata::test_ctx(resources.into_shared());
+        let output = xai_tool_runtime::Tool::run(
+            &GotoDefinitionTool,
+            ctx,
+            GotoDefinitionRequest {
+                path: Some("src/lib.rs".to_string()),
+                line: Some(1),
+                symbol: Some("precise_marker".to_string()),
+                ..GotoDefinitionRequest::default()
+            },
+        )
+        .await
+        .unwrap();
+        let ToolOutput::Text(text) = output else {
+            panic!("goto_definition must return text");
+        };
+        assert!(text.text.contains("lsp_fallback = grok"), "{}", text.text);
+        assert!(text.text.contains("~/.grok/lsp.json"), "{}", text.text);
+        assert!(
+            text.text.contains("lsp_fallback = \"astrolabe\""),
+            "{}",
+            text.text
+        );
+    }
+
+    /// End-to-end with the real rust-analyzer (Phase C6): Rust defers from the
+    /// index to the host server, references and definition carry the same
+    /// 1-based lines as `search_code`, and hover answers through the same
+    /// backend the `lsp` tool calls.
+    ///
+    /// Ignored by default — needs a rust-analyzer binary and 20–60 s:
+    /// `cargo test -p xai-grok-tools --lib real_rust_analyzer -- --ignored --nocapture`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a real rust-analyzer (stable rustup toolchain)"]
+    async fn real_rust_analyzer_answers_references_definition_and_hover() {
+        use std::collections::BTreeMap;
+
+        use crate::implementations::lsp::{LspBackendAdapter, LspManager, LspOperation};
+        use crate::implementations::lsp::config::LspServerConfig;
+
+        let Some(binary) = stable_rust_analyzer() else {
+            eprintln!("no stable-toolchain rust-analyzer; skipping");
+            return;
+        };
+        // The same file a user puts at ~/.grok/lsp.json for Rust.
+        let fixture = include_str!("testdata/lsp.rust-analyzer.json");
+        let mut servers: BTreeMap<String, LspServerConfig> =
+            serde_json::from_str(fixture).expect("lsp.json fixture parses");
+        // This repo pins 1.94.0, which has no rust-analyzer component; a bare
+        // `rust-analyzer` would hit the rustup proxy and exit. Use the binary
+        // the default toolchain provides.
+        for config in servers.values_mut() {
+            config.command = binary.to_string_lossy().into_owned();
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"lsp_e2e\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("src/lib.rs"),
+            "pub fn marker() -> u8 {\n    1\n}\n\npub fn caller() -> u8 {\n    marker()\n}\n",
+        )
+        .unwrap();
+
+        let manager = LspManager::new(
+            servers,
+            tmp.path().to_path_buf(),
+            true,
+            crate::notification::ToolNotificationHandle::noop(),
+        );
+        let adapter = LspBackendAdapter::new(Arc::new(tokio::sync::Mutex::new(manager)));
+        let backend: Arc<dyn LspBackend> = Arc::new(adapter);
+
+        // rust-analyzer answers once its own indexing settles; poll the tool
+        // rather than racing a fixed sleep.
+        let mut references = String::new();
+        for _ in 0..24 {
+            let mut resources = Resources::new();
+            resources.insert(Cwd(tmp.path().to_path_buf()));
+            resources.insert(backend.clone());
+            let ctx = crate::types::tool_metadata::test_ctx(resources.into_shared());
+            let output = xai_tool_runtime::Tool::run(
+                &FindReferencesTool,
+                ctx,
+                FindReferencesRequest {
+                    symbol: "marker".to_string(),
+                    path: Some("src/lib.rs".to_string()),
+                    ..FindReferencesRequest::default()
+                },
+            )
+            .await
+            .unwrap();
+            let ToolOutput::Text(text) = output else {
+                panic!("find_references must return text");
+            };
+            references = text.text;
+            if references.contains("confidence: exact (lsp)")
+                && references.contains("src/lib.rs:1 [declaration]")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+        }
+        assert!(
+            references.contains("confidence: exact (lsp)"),
+            "references: {references}"
+        );
+        assert!(
+            references.contains("src/lib.rs:1 [declaration]"),
+            "references: {references}"
+        );
+        assert!(references.contains("src/lib.rs:6"), "references: {references}");
+
+        let mut resources = Resources::new();
+        resources.insert(Cwd(tmp.path().to_path_buf()));
+        resources.insert(backend.clone());
+        let ctx = crate::types::tool_metadata::test_ctx(resources.into_shared());
+        let output = xai_tool_runtime::Tool::run(
+            &GotoDefinitionTool,
+            ctx,
+            GotoDefinitionRequest {
+                path: Some("src/lib.rs".to_string()),
+                line: Some(6),
+                symbol: Some("marker".to_string()),
+                ..GotoDefinitionRequest::default()
+            },
+        )
+        .await
+        .unwrap();
+        let ToolOutput::Text(definition) = output else {
+            panic!("goto_definition must return text");
+        };
+        assert!(
+            definition.text.contains("confidence: exact (lsp)"),
+            "definition: {}",
+            definition.text
+        );
+        assert!(
+            definition.text.contains("src/lib.rs:1"),
+            "definition: {}",
+            definition.text
+        );
+
+        let hover = backend
+            .dispatch(&LspToolInput {
+                operation: LspOperation::Hover,
+                file_path: Some(
+                    tmp.path()
+                        .join("src/lib.rs")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                line: Some(5),
+                character: Some(4),
+                query: None,
+            })
+            .await;
+        assert!(!hover.is_error, "hover: {}", hover.text);
+        assert!(hover.text.contains("marker"), "hover: {}", hover.text);
+
+        xai_grok_astrolabe::shutdown_all();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn get_diagnostics_falls_back_to_the_parser() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1248,6 +1511,11 @@ mod tests {
         };
         assert!(text.text.contains("lib.rs"), "{}", text.text);
         assert!(!text.text.contains("index_root"), "{}", text.text);
+        assert!(
+            text.text.contains(BUILD_TRUTH_NOTE),
+            "diagnostics must say they are not a build: {}",
+            text.text
+        );
     }
 
     fn workspace() -> tempfile::TempDir {
@@ -1498,6 +1766,92 @@ mod tests {
             "{}",
             text.text
         );
+        assert!(
+            text.text.contains("index-first precise answers"),
+            "get_languages must name the index-first languages: {}",
+            text.text
+        );
+        assert!(
+            text.text.contains("goto_definition = go"),
+            "{}",
+            text.text
+        );
+    }
+
+    /// Both dead ends of `lsp_fallback = grok` — nothing registered, and a
+    /// registered pool that cannot answer — carry the same config pointers.
+    #[test]
+    fn no_host_lsp_note_names_the_config_and_the_astrolabe_fallback() {
+        for note in [no_host_lsp_note(None), no_host_lsp_note(Some("No LSP server configured"))] {
+            assert!(note.contains("lsp_fallback = grok"), "{note}");
+            assert!(note.contains("~/.grok/lsp.json"), "{note}");
+            assert!(note.contains("<cwd>/.grok/lsp.json"), "{note}");
+            assert!(note.contains("lsp_fallback = \"astrolabe\""), "{note}");
+            assert!(note.contains("get_languages"), "{note}");
+        }
+        assert!(no_host_lsp_note(Some("No LSP server configured")).contains("did not answer"));
+        assert!(no_host_lsp_note(None).contains("no workspace language server is registered"));
+    }
+
+    /// The `lsp` tool's unavailable error and the astrolabe note share one
+    /// sentence, so the model gets the same fix from either tool.
+    #[test]
+    fn the_lsp_setup_sentence_is_shared() {
+        let setup = crate::implementations::lsp::LSP_SERVER_SETUP;
+        assert!(setup.contains("~/.grok/lsp.json"), "{setup}");
+        assert!(setup.contains("<cwd>/.grok/lsp.json"), "{setup}");
+        assert!(no_host_lsp_note(None).contains(setup), "{}", no_host_lsp_note(None));
+    }
+
+    /// `find_symbol` and `resolve_context` hand the turn back when it is
+    /// already cancelled instead of starting an index lookup.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lookups_short_circuit_a_pre_cancelled_turn() {
+        let tmp = workspace();
+
+        let mut resources = Resources::new();
+        resources.insert(Cwd(tmp.path().to_path_buf()));
+        let mut ctx = crate::types::tool_metadata::test_ctx(resources.into_shared());
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        ctx.extensions
+            .insert(xai_tool_runtime::Cancellation(token));
+        let output = xai_tool_runtime::Tool::run(
+            &FindSymbolTool,
+            ctx,
+            FindSymbolRequest {
+                query: "native_marker".to_string(),
+                ..FindSymbolRequest::default()
+            },
+        )
+        .await
+        .unwrap();
+        let ToolOutput::Text(text) = output else {
+            panic!("find_symbol must return text");
+        };
+        assert!(text.text.contains("cancelled"), "{}", text.text);
+
+        let mut resources = Resources::new();
+        resources.insert(Cwd(tmp.path().to_path_buf()));
+        let mut ctx = crate::types::tool_metadata::test_ctx(resources.into_shared());
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        ctx.extensions
+            .insert(xai_tool_runtime::Cancellation(token));
+        let output = xai_tool_runtime::Tool::run(
+            &ResolveContextTool,
+            ctx,
+            ResolveContextRequest {
+                task: "where is native_marker defined".to_string(),
+                ..ResolveContextRequest::default()
+            },
+        )
+        .await
+        .unwrap();
+        let ToolOutput::Text(text) = output else {
+            panic!("resolve_context must return text");
+        };
+        assert!(text.text.contains("cancelled"), "{}", text.text);
     }
 
     #[test]

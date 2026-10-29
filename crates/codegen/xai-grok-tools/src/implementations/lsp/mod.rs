@@ -38,6 +38,12 @@ use async_lsp::lsp_types::{Position, TextDocumentIdentifier, TextDocumentPositio
 /// given up. Kept here, next to the pieces that have to agree on it, rather than as a number at the call site.
 pub const DIAGNOSTICS_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// Where the host reads language servers from, and what to check when one does
+/// not answer. Shared by the `lsp` tool and the Astrolabe precise tools so a
+/// missing or failed server has one fix, worded the same way everywhere.
+pub const LSP_SERVER_SETUP: &str =
+    "Configure ~/.grok/lsp.json or <cwd>/.grok/lsp.json and ensure the language server starts.";
+
 #[derive(Debug, thiserror::Error)]
 pub enum LspError {
     #[error("failed to spawn LSP server: {0}")]
