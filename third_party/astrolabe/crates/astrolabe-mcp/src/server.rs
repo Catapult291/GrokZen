@@ -5232,6 +5232,11 @@ impl AstrolabeServer {
                  {status_legend}",
                 session.cache_budget_bytes
             );
+            body.push_str(
+                "index-first precise answers (no language server): \
+                 goto_definition = go; find_references = go (any name), \
+                 typescript/tsx/python (unique top-level names); other languages need the host server.\n",
+            );
             if let Some(section) = host_section {
                 body.push_str(&section);
             }

@@ -67,6 +67,11 @@
 # 12. `crates/astrolabe-core/src/watch.rs`: default `poll_interval` is 2 s on
 #     Windows (10 s elsewhere) for the remaining real fallbacks; a 10 s cycle
 #     kept a new file invisible for a full cycle.
+# 13. `crates/astrolabe-mcp/src/server.rs` `get_languages_inner`: one line
+#     naming which languages answer precise queries from the index alone
+#     (goto_definition = Go; find_references = Go and unique top-level
+#     TS/TSX/Python names), mirroring `refs_graph::graph_first_language` and
+#     `live_backend::index_definition`. Read-only text; no engine change.
 # ============================================================================
 
 [workspace]
