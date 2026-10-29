@@ -698,6 +698,16 @@ fn plan_ssh_wrap(
     if cfg!(windows) {
         return Err(FixError::PlatformUnsupported);
     }
+    ssh_wrap_plan(request, report, terminal)
+}
+
+/// SSH-wrap planning without the platform gate, so tests that only exercise
+/// dispatch routing can still build a plan on Windows.
+fn ssh_wrap_plan(
+    request: FixRequest,
+    report: &DiagnosticReport,
+    terminal: &TerminalContext,
+) -> Result<FixPlan, FixError> {
     if terminal.is_official_vscode_remote {
         return Err(FixError::NotApplicable);
     }
@@ -1607,12 +1617,12 @@ pub fn configured_report(mut report: DiagnosticReport, configured: bool) -> Diag
 
 #[cfg(test)]
 pub(crate) fn test_fix_plan(home: &Path) -> FixPlan {
-    plan_fix(
+    ssh_wrap_plan(
         tests::request(home, "/bin/bash"),
         &tests::report(),
         &TerminalContext::default(),
     )
-    .unwrap()
+    .expect("test fix plan")
 }
 
 #[cfg(test)]
