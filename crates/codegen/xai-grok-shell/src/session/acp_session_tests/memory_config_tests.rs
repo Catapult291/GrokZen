@@ -1053,8 +1053,12 @@ async fn test_run_session_spawns_launch_dream() {
                 std::path::PathBuf::from("/tmp"),
                 crate::session::fs_watch::FsWatchCapabilities::none(),
             ));
+            // dream_count only increments after the model call finishes. A failed
+            // localhost request can take seconds behind a local proxy, so wait with
+            // a generous deadline instead of a short fixed poll window.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
             let mut ran = false;
-            for _ in 0..200 {
+            while tokio::time::Instant::now() < deadline {
                 if actor
                     .memory
                     .dream_count
