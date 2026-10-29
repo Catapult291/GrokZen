@@ -31,7 +31,7 @@ use crate::types::resources::{
 use crate::types::tool::{ToolKind, ToolNamespace};
 use crate::types::tool_metadata::{ToolMetadata, resolve_cwd, shared_resources};
 
-pub const SEARCH_CODE_DESC: &str = r#"Exhaustive literal/regex search over the indexed workspace. Hits include the enclosing function or type body, so you often need no read_file. Limit paths/file types with glob. Wide results summarize per file, or count with aggregate; page with offset. Respects .gitignore and the workspace read policy. Patterns with newlines are unsupported; read files outside the workspace with read_file. Code-map/which-files: resolve_context first."#;
+pub const SEARCH_CODE_DESC: &str = r#"Exhaustive literal/regex search over the indexed workspace. Hits include the enclosing function/type body — often no read_file needed. Limit paths/file types with glob. Wide results summarize per file; page with offset; aggregate for counts. Respects .gitignore and the workspace read policy. Newlines unsupported — read the file or search each line. Paths outside the root: use read_file. Code-map: resolve_context first."#;
 
 pub const FIND_SYMBOL_DESC: &str = r#"Locate a symbol by name, prefix, `Class/method` path, or file outline; returns its signature and path:line."#;
 
@@ -135,31 +135,6 @@ pub fn listing_enabled_for(mode: xai_grok_astrolabe::AstrolabeMode, registry_id:
     (!index_tool || mode.index_tools()) && (!is_precise_tool(registry_id) || mode.precise_tools())
 }
 
-/// `[toolset.astrolabe].replace_grep = false`: historically moved `search_code`
-/// behind the last `grep` entry. `grep` is no longer listed in any Grok Build
-/// toolset, so this is a no-op; kept so the config flag stays harmless.
-pub fn demote_search_code(tools: &mut Vec<crate::registry::types::ToolConfig>) {
-    let Some(from) = tools
-        .iter()
-        .position(|tool| tool.id == "GrokBuild:search_code")
-    else {
-        return;
-    };
-    let Some(grep) = tools.iter().rposition(|tool| tool.id == "GrokBuild:grep") else {
-        return;
-    };
-    if grep < from {
-        return;
-    }
-    let search = tools.remove(from);
-    let at = tools
-        .iter()
-        .rposition(|tool| tool.id == "GrokBuild:grep")
-        .map(|index| index + 1)
-        .unwrap_or(0);
-    tools.insert(at, search);
-}
-
 /// Session-scoped inputs shared by every Astrolabe tool.
 struct CallEnv {
     paths: PathMap,
@@ -172,8 +147,8 @@ struct CallEnv {
 /// machine: the engine reads bytes from local disk, so indexing a remote or
 /// sandboxed workspace would answer from the wrong tree.
 const REMOTE_WORKSPACE_NOTE: &str = "astrolabe index tools need a local workspace. This session's file system is remote or \
-     sandboxed, so an in-process index would read different bytes than read_file. Use grep and \
-     read_file instead, or set [toolset.astrolabe] mode = \"off\" to hide these tools.";
+     sandboxed, so an in-process index would read different bytes than read_file. Use read_file \
+     instead, or set [toolset.astrolabe] mode = \"off\" to hide these tools.";
 
 async fn call_env(
     ctx: &xai_tool_runtime::ToolCallContext,
@@ -1590,51 +1565,5 @@ mod tests {
         ));
         // Tools outside this pack are never filtered by this gate.
         assert!(listing_enabled_for(AstrolabeMode::Off, "GrokBuild:grep"));
-    }
-
-    #[test]
-    fn replace_grep_false_moves_search_code_behind_grep() {
-        fn configs(ids: &[&str]) -> Vec<crate::registry::types::ToolConfig> {
-            ids.iter()
-                .map(|id| crate::registry::types::ToolConfig {
-                    id: (*id).to_string(),
-                    params: None,
-                    name_override: None,
-                    params_name_overrides: None,
-                    description_override: None,
-                    behavior_version: None,
-                    kind: None,
-                })
-                .collect()
-        }
-        let mut tools = configs(&[
-            "GrokBuild:search_code",
-            "GrokBuild:find_symbol",
-            "GrokBuild:grep",
-            "GrokBuild:read_file",
-        ]);
-        demote_search_code(&mut tools);
-        let ids: Vec<&str> = tools.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec![
-                "GrokBuild:find_symbol",
-                "GrokBuild:grep",
-                "GrokBuild:search_code",
-                "GrokBuild:read_file"
-            ]
-        );
-
-        // Already behind grep: no change.
-        let mut tools = configs(&["GrokBuild:grep", "GrokBuild:search_code"]);
-        demote_search_code(&mut tools);
-        let ids: Vec<&str> = tools.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids, vec!["GrokBuild:grep", "GrokBuild:search_code"]);
-
-        // No grep in the list: keep the original position.
-        let mut tools = configs(&["GrokBuild:search_code", "GrokBuild:read_file"]);
-        demote_search_code(&mut tools);
-        let ids: Vec<&str> = tools.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids, vec!["GrokBuild:search_code", "GrokBuild:read_file"]);
     }
 }

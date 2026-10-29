@@ -580,7 +580,6 @@ astrolabe = { mode = "all", max_files = 9000, persist = "none" }
         assert!(cfg.astrolabe.enabled);
         assert_eq!(cfg.astrolabe.index_root, "git");
         assert_eq!(cfg.astrolabe.lsp_fallback, "grok");
-        assert!(cfg.astrolabe.replace_grep);
         assert_eq!(cfg.astrolabe.budget_tokens, 2_500);
     }
 
