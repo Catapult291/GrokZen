@@ -879,6 +879,7 @@ fn make_picker_entry(id: &str, cwd: &str) -> crate::app::app_view::SessionPicker
         model_id: None,
         num_messages: 0,
         last_active_at: None,
+        last_reply_at: None,
         branch: None,
         repo_name: "repo".into(),
         worktree_label: None,

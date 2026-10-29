@@ -226,6 +226,11 @@ fn parse_session_picker_entries_with(
                 .or_else(|| v.get("last_active_at"))
                 .and_then(Value::as_str)
                 .and_then(|s| s.parse().ok());
+            let last_reply_at: Option<chrono::DateTime<chrono::Utc>> = v
+                .get("lastReplyAt")
+                .or_else(|| v.get("last_reply_at"))
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse().ok());
             let branch = v.get("branch").and_then(Value::as_str).map(String::from);
             let worktree_label = v
                 .get("worktreeLabel")
@@ -259,6 +264,7 @@ fn parse_session_picker_entries_with(
                 model_id,
                 num_messages,
                 last_active_at,
+                last_reply_at,
                 branch,
                 repo_name,
                 worktree_label,

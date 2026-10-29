@@ -2,7 +2,7 @@
 //!
 //! Used by both the ACP `x.ai/session/list` handler and the `grok sessions` CLI command.
 //! Deduplicates by session ID (remote wins) and filters local results by query.
-//! Sorts by the same key the picker UI displays (`last_active_at` falling back to `updated_at`) descending.
+//! Sorts by the same key the picker UI displays (`last_reply_at`, then `last_active_at`, falling back to `updated_at`) descending.
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -45,6 +45,10 @@ pub struct MergedSession {
     pub num_messages: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_active_at: Option<String>,
+    /// When the session last received an assistant reply (local sessions only).
+    /// The `/resume` picker displays and sorts on this, so reopening a session never refreshes its time or order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_reply_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -430,6 +434,7 @@ pub fn merge(
                 model_id: Some(s.current_model_id.to_string()),
                 num_messages: s.num_messages,
                 last_active_at: s.last_active_at.map(|t| t.to_rfc3339()),
+                last_reply_at: s.last_reply_at.map(|t| t.to_rfc3339()),
                 branch: s.head_branch,
                 repo_name,
                 worktree_label: s.worktree_label,
@@ -488,6 +493,7 @@ pub fn merge(
                 model_id: r.model_id,
                 num_messages: local.num_messages.max(r.last_turn_number.max(0) as usize),
                 last_active_at: merged_last_active,
+                last_reply_at: local.last_reply_at,
                 branch: local.branch,
                 repo_name: local.repo_name,
                 worktree_label: local.worktree_label,
@@ -512,13 +518,19 @@ pub fn merge(
     merged
 }
 
-/// Mirrors the key the session picker UI displays (`last_active_at`, falling back to `updated_at`) so the "time ago" column matches the sort order.
-/// Like the UI (`session_picker.rs`), an unparseable `last_active_at` counts as absent.
-/// `None` means neither timestamp parses; that entry sorts to the bottom.
+/// Mirrors the key the session picker UI displays (`last_reply_at`, then `last_active_at`, falling back to `updated_at`) so the "time ago" column matches the sort order.
+/// Using the last reply keeps the order fixed when a session is reopened without a new turn.
+/// Like the UI (`session_picker.rs`), an unparseable timestamp counts as absent.
+/// `None` means no timestamp parses; that entry sorts to the bottom.
 fn effective_sort_time(s: &MergedSession) -> Option<chrono::DateTime<chrono::FixedOffset>> {
-    s.last_active_at
+    s.last_reply_at
         .as_deref()
         .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .or_else(|| {
+            s.last_active_at
+                .as_deref()
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        })
         .or_else(|| chrono::DateTime::parse_from_rfc3339(&s.updated_at).ok())
 }
 
@@ -624,6 +636,7 @@ mod tests {
             request_id: None,
             grok_home: None,
             last_active_at: None,
+            last_reply_at: None,
             generated_title: None,
             title_is_manual: false,
             worktree_label: None,
@@ -1029,6 +1042,30 @@ mod tests {
         let merged = merge(Vec::new(), local, None, &[], 20);
         assert_eq!(first(&merged).session_id, "recent_activity");
         assert_eq!(at(&merged, 1).session_id, "stale_activity");
+    }
+
+    #[test]
+    fn sorted_by_last_reply_at_over_newer_activity() {
+        // Reopening or metadata work can advance `last_active_at` / `updated_at` without a new reply.
+        // The resume order is pinned to `last_reply_at` so merely viewing history cannot reshuffle it.
+        let mut reopened = make_summary_with_last_active(
+            "reopened",
+            "reopened",
+            "2026-07-01T00:00:00Z",       // metadata bump from reopening
+            Some("2026-07-01T00:00:00Z"), // newer activity without a reply
+        );
+        reopened.last_reply_at = Some("2026-02-01T00:00:00Z".parse().unwrap());
+        let mut replied = make_summary_with_last_active(
+            "replied",
+            "replied",
+            "2026-03-01T00:00:00Z",
+            Some("2026-03-01T00:00:00Z"),
+        );
+        replied.last_reply_at = Some("2026-05-01T00:00:00Z".parse().unwrap());
+
+        let merged = merge(Vec::new(), vec![reopened, replied], None, &[], 20);
+        assert_eq!(first(&merged).session_id, "replied");
+        assert_eq!(at(&merged, 1).session_id, "reopened");
     }
 
     #[test]
@@ -1605,6 +1642,7 @@ mod tests {
             model_id: None,
             num_messages,
             last_active_at: None,
+            last_reply_at: None,
             branch: None,
             repo_name: None,
             worktree_label: None,

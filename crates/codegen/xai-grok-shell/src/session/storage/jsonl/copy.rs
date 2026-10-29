@@ -577,6 +577,7 @@ fn fork_summary(
         // Fresh local grok_home, not inherited from source: the fork lives on this machine.
         grok_home: crate::session::persistence::grok_home_string(),
         last_active_at: source.last_active_at,
+        last_reply_at: source.last_reply_at,
         generated_title: source.generated_title,
         // A fork keeps the parent's title, so whether that title was set manually carries over too
         title_is_manual: source.title_is_manual,

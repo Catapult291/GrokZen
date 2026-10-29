@@ -62,11 +62,13 @@ pub(crate) struct TraceTurnPatch {
 }
 
 /// Only the set fields change; the rest are read fresh under the lock and preserved.
-/// Per-field merge rules (see [`Summary::apply_patch`]): `last_active_at` / `next_trace_turn` / `chat_format_version` are monotonic (never lowered).
+/// Per-field merge rules (see [`Summary::apply_patch`]): `last_active_at` / `last_reply_at` / `next_trace_turn` / `chat_format_version` are monotonic (never lowered).
 /// Counters apply to the fresh read; everything else is last-writer-wins on that field alone.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SummaryPatch {
     pub record_activity: bool,
+    /// The appended item is an assistant reply: stamp `last_reply_at` (monotonic), the stable `/resume` timestamp.
+    pub record_reply: bool,
     pub messages: Option<CounterOp>,
     pub chat_messages: Option<CounterOp>,
     pub chat_format_version: Option<u8>,
@@ -108,7 +110,7 @@ pub(crate) struct SummaryPatch {
 
 impl Summary {
     /// Apply `patch` in place using the per-field merge rules.
-    /// `now` is the single timestamp used for both `last_active_at` (when activity is recorded) and `updated_at`.
+    /// `now` is the single timestamp used for `last_active_at` (when activity is recorded), `last_reply_at` (when an assistant reply is recorded), and `updated_at`.
     /// Returns `true` iff an auto title was adopted (`generated_title_if_absent` or `generated_title_regenerate`).
     pub(crate) fn apply_patch(&mut self, patch: &SummaryPatch, now: DateTime<Utc>) -> bool {
         if patch.record_activity {
@@ -117,6 +119,10 @@ impl Summary {
                 self.last_active_at
                     .map_or(now, |existing| existing.max(now)),
             );
+        }
+        if patch.record_reply {
+            // Monotonic like `last_active_at`, but only assistant replies advance it.
+            self.last_reply_at = Some(self.last_reply_at.map_or(now, |existing| existing.max(now)));
         }
         if let Some(op) = &patch.messages {
             self.num_messages = op.apply(self.num_messages);

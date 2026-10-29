@@ -285,6 +285,9 @@ pub struct SessionPickerEntry {
     pub num_messages: usize,
     /// When the session last had content added (most recent of local and remote).
     pub last_active_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When the session last received an assistant reply. The `/resume` picker displays and sorts on this
+    /// (falling back to `last_active_at` / `updated_at`) so reopening history never refreshes its time.
+    pub last_reply_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Git branch associated with the session (if available from the server response).
     pub branch: Option<String>,
     /// Repo display name derived from the CWD path (last 2 path components joined by `-`).
