@@ -4592,7 +4592,12 @@ impl MvpAgent {
             let cfg = self.cfg.borrow();
             // The registry and `by_kind` are process-wide, so the Astrolabe
             // configuration has to be installed before the toolset is
-            // finalized. The first session wins; later ones reuse it.
+            // finalized. The first session wins; later ones reuse it
+            // (`install_config` returns false). Mode, budgets, max_files
+            // and the rest of `[toolset.astrolabe]` therefore cannot change
+            // mid-process — restart Grok Build for a different config.
+            // Per-root engine knobs are also frozen at the first open of
+            // each (root, gitignore, deny) key; see engine.rs D1 docs.
             xai_grok_astrolabe::install_config(xai_grok_astrolabe::AstrolabeConfig::from_toolset(
                 &cfg.toolset.astrolabe,
             ));
