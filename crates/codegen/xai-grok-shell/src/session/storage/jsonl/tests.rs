@@ -205,6 +205,82 @@ async fn only_assistant_replies_advance_last_reply_at() {
     assert!(after.updated_at >= replied);
 }
 
+/// A summary written before `last_reply_at` existed carries no reply stamp, so the picker falls back to
+/// `last_active_at` — which the bookkeeping appended on every reopen advances. Loading recovers the real
+/// reply time from `updates.jsonl` once and pins it.
+#[tokio::test]
+async fn load_backfills_last_reply_at_for_legacy_summary() {
+    use serde_json::json;
+
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    adapter
+        .append_chat_message(&info, &ConversationItem::user("ping"))
+        .await
+        .unwrap();
+    adapter
+        .append_chat_message(&info, &ConversationItem::assistant("pong"))
+        .await
+        .unwrap();
+
+    let reply_at = chrono::Utc::now() - chrono::Duration::hours(1);
+    let reopened_at = chrono::Utc::now();
+    let update_line = |timestamp: i64, kind: &str| {
+        json!({
+            "timestamp": timestamp,
+            "method": "session/update",
+            "params": { "update": { "sessionUpdate": kind } },
+        })
+        .to_string()
+    };
+    let updates = [
+        update_line(reply_at.timestamp() - 5, "user_message_chunk"),
+        update_line(reply_at.timestamp(), "agent_message_chunk"),
+        // What a reopen appends: a background-task snapshot and the session-start hook report.
+        update_line(reopened_at.timestamp(), "background_tasks"),
+        update_line(reopened_at.timestamp(), "hook_execution"),
+    ];
+    std::fs::write(
+        adapter.session_dir(&info).join("updates.jsonl"),
+        format!("{}\n", updates.join("\n")),
+    )
+    .unwrap();
+
+    // Under the old build a reopen bumped the activity clock and left no reply stamp behind.
+    let mut summary = adapter.read_summary_sync(&info).unwrap();
+    summary.last_reply_at = None;
+    summary.last_active_at = Some(reopened_at);
+    summary.updated_at = reopened_at;
+    adapter.write_summary_sync(&info, &summary).unwrap();
+
+    let reply_at = chrono::DateTime::from_timestamp(reply_at.timestamp(), 0).unwrap();
+    let loaded = adapter.load_session_without_updates(&info).await.unwrap();
+    assert_eq!(loaded.summary.last_reply_at, Some(reply_at));
+
+    let on_disk = adapter.read_summary_sync(&info).unwrap();
+    assert_eq!(on_disk.last_reply_at, Some(reply_at));
+    assert_eq!(
+        on_disk.updated_at, reopened_at,
+        "the backfill is metadata repair, not activity"
+    );
+
+    // Another reopen bumps activity again; the pinned reply time must not move.
+    adapter
+        .apply_summary_patch(
+            &info,
+            crate::session::storage::summary_write::SummaryPatch {
+                record_activity: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let reloaded = adapter.load_session_without_updates(&info).await.unwrap();
+    assert_eq!(reloaded.summary.last_reply_at, Some(reply_at));
+}
+
 /// Resume from updates.jsonl alone: when chat_history.jsonl is missing, load rebuilds it from the ACP update stream.
 /// The update stream is the durable source of truth.
 #[tokio::test]

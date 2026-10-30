@@ -461,3 +461,31 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
     assert_eq!(roster.origin.kind, "local");
     assert_eq!(roster.origin.host.as_deref(), Some("box"));
 }
+
+#[test]
+fn dormant_roster_row_pins_last_reply_over_newer_activity() {
+    let replied = chrono::Utc::now() - chrono::Duration::days(2);
+    let reopened = chrono::Utc::now();
+    let entry = SessionPickerEntry {
+        id: "sess-2".to_string(),
+        summary: "Reopened history".to_string(),
+        updated_at: reopened,
+        created_at: replied,
+        cwd: "/repo/app".to_string(),
+        hostname: None,
+        source: "local".to_string(),
+        model_id: None,
+        num_messages: 2,
+        last_active_at: Some(reopened),
+        last_reply_at: Some(replied),
+        branch: None,
+        repo_name: "repo-app".to_string(),
+        worktree_label: None,
+        last_turn_summary: None,
+        last_recap: None,
+        session_kind: None,
+        card_detail: None,
+    };
+    let roster = session_picker_entry_to_roster(entry);
+    assert_eq!(roster.last_change_unix_ms, replied.timestamp_millis());
+}
