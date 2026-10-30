@@ -343,7 +343,8 @@ fn parse_session_picker_entries_with(
 }
 /// Local on-disk sessions have no live activity signal, so they map to [`RosterActivity::Dormant`] and render in the dashboard's **Inactive** group.
 pub(super) fn session_picker_entry_to_roster(e: SessionPickerEntry) -> RosterEntry {
-    let last_change = e.last_active_at.unwrap_or(e.updated_at);
+    // Same key the `/resume` picker uses: the last reply pins the row, so reopening history never reorders it.
+    let last_change = e.last_reply_at.or(e.last_active_at).unwrap_or(e.updated_at);
     RosterEntry {
         session_id: e.id,
         title: Some(e.summary).filter(|s| !s.trim().is_empty()),

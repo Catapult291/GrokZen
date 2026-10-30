@@ -75,6 +75,29 @@ impl Default for JsonlStorageAdapter {
         Self::new()
     }
 }
+
+/// One `updates.jsonl` line, reduced to what identifies an assistant reply and when it landed.
+/// Unknown fields (content, tool payloads, ...) are ignored, so parsing a tail stays cheap.
+#[derive(serde::Deserialize)]
+struct ReplyStampLine {
+    #[serde(default)]
+    timestamp: u64,
+    #[serde(default)]
+    params: ReplyStampParams,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct ReplyStampParams {
+    #[serde(default)]
+    update: ReplyStampUpdate,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct ReplyStampUpdate {
+    #[serde(default, rename = "sessionUpdate")]
+    session_update: String,
+}
+
 impl JsonlStorageAdapter {
     pub fn new() -> Self {
         Self {
@@ -734,6 +757,60 @@ impl JsonlStorageAdapter {
             );
         }
         Ok(updates)
+    }
+    /// Tail of `updates.jsonl` scanned when reconstructing a legacy session's last reply time.
+    const REPLY_TAIL_BYTES: u64 = 256 * 1024;
+
+    /// Newest `agent_message_chunk` envelope timestamp in this session's `updates.jsonl` tail.
+    ///
+    /// Only the tail is read: a reply is followed by at most the rest of its turn plus the bookkeeping a later
+    /// reopen appends, so scanning the whole file (some are multi-megabyte) would cost far more than it buys.
+    fn last_agent_reply_at_sync(&self, info: &Info) -> Option<chrono::DateTime<chrono::Utc>> {
+        let mut file = std::fs::File::open(self.updates_file(info)).ok()?;
+        let len = file.metadata().ok()?.len();
+        if len == 0 {
+            return None;
+        }
+        let start = len.saturating_sub(Self::REPLY_TAIL_BYTES);
+        file.seek(io::SeekFrom::Start(start)).ok()?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).ok()?;
+        let tail = String::from_utf8_lossy(&bytes);
+        let mut lines = tail.split('\n');
+        if start > 0 {
+            // The window can begin mid-line; that fragment is not valid JSON.
+            lines.next();
+        }
+        let latest = lines
+            .filter_map(|line| serde_json::from_str::<ReplyStampLine>(line).ok())
+            .filter(|line| {
+                line.timestamp > 0 && line.params.update.session_update == "agent_message_chunk"
+            })
+            .map(|line| line.timestamp)
+            .max()?;
+        chrono::DateTime::from_timestamp(i64::try_from(latest).ok()?, 0)
+    }
+    /// Summaries written before `last_reply_at` existed fall back to `last_active_at`, which session-start
+    /// bookkeeping advances on every reopen — the row would jump to the top with a fresh time.
+    /// Recover the real reply time from the persisted transcript once and pin it (metadata repair: no `updated_at`/mtime bump).
+    async fn backfill_last_reply_at_if_absent(
+        &self,
+        info: &Info,
+        summary: Summary,
+    ) -> io::Result<Summary> {
+        if summary.last_reply_at.is_some() {
+            return Ok(summary);
+        }
+        let Some(reply_at) = self.last_agent_reply_at_sync(info) else {
+            return Ok(summary);
+        };
+        let summary_path = self.summary_file(info);
+        let lock_path = self.summary_lock_file(info);
+        tokio::task::spawn_blocking(move || {
+            super::summary_write::backfill_last_reply_at(&summary_path, &lock_path, reply_at)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
     /// A first `summary.json` create that renamed then failed its parent-dir sync leaves the file in place.
     /// Retrying `init_session` would otherwise load it as an existing session and never re-run that sync.
@@ -1600,7 +1677,9 @@ impl StorageAdapter for JsonlStorageAdapter {
         }
     }
     async fn load_session(&self, info: &Info) -> io::Result<PersistedData> {
-        let summary = self.read_summary_sync(info)?;
+        let summary = self
+            .backfill_last_reply_at_if_absent(info, self.read_summary_sync(info)?)
+            .await?;
         let chat_file = self.chat_file(info);
         self.ensure_chat_history(info, summary.chat_format_version)?;
         let chat_history = self.read_chat_history_sync(chat_file, summary.chat_format_version)?;
@@ -1655,7 +1734,9 @@ impl StorageAdapter for JsonlStorageAdapter {
         info: &Info,
     ) -> io::Result<super::PersistedDataLight> {
         tracing::info!("Loading session data (without updates) from JSONL");
-        let summary = self.read_summary_sync(info)?;
+        let summary = self
+            .backfill_last_reply_at_if_absent(info, self.read_summary_sync(info)?)
+            .await?;
         let chat_file = self.chat_file(info);
         self.ensure_chat_history(info, summary.chat_format_version)?;
         let chat_history = self.read_chat_history_sync(chat_file, summary.chat_format_version)?;

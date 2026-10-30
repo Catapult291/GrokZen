@@ -258,6 +258,44 @@ impl WorktreeIdentityRepair {
     }
 }
 
+/// Pin `last_reply_at` on a summary written before that field existed.
+///
+/// The session picker orders and timestamps rows by `last_reply_at`, then `last_active_at`, then `updated_at`.
+/// A legacy row has no reply stamp, so reopening it — which appends session-start bookkeeping updates — moved it to the top with a fresh time.
+/// The caller recovers the real reply time from the persisted transcript; this is metadata repair, so `updated_at` and the file mtime stay put and the row keeps its place.
+/// An existing `last_reply_at` wins; returns the lock-fresh summary.
+pub(crate) fn backfill_last_reply_at(
+    summary_path: &Path,
+    lock_path: &Path,
+    reply_at: DateTime<Utc>,
+) -> io::Result<Summary> {
+    let lock = open_lock_file(lock_path)?;
+    lock.lock_exclusive()?;
+    let result = (|| {
+        let mut summary = read_summary(summary_path)?;
+        if summary.last_reply_at.is_some() {
+            return Ok(summary);
+        }
+        summary.last_reply_at = Some(reply_at);
+        // Restore the pre-write mtime so the stat-based recent-session window still matches the unrepaired file.
+        let previous_mtime = std::fs::metadata(summary_path)
+            .ok()
+            .and_then(|meta| meta.modified().ok());
+        write_summary_atomic(summary_path, &summary)?;
+        if let Some(mtime) = previous_mtime
+            && let Err(error) = restore_summary_mtime(summary_path, mtime)
+        {
+            tracing::warn!(
+                "failed to restore summary mtime after last_reply_at backfill on {}: {error}",
+                summary_path.display()
+            );
+        }
+        Ok(summary)
+    })();
+    let _ = lock.unlock();
+    result
+}
+
 /// A kinded summary that is still missing `worktree_label` gets only the label.
 /// Kind and source stay put, so a legacy fork is not rewritten as `worktree`.
 /// A kinded and labeled summary is never rewritten.
