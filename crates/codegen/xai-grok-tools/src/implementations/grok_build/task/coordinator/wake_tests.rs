@@ -415,6 +415,7 @@ async fn run_pre_start_wake_restore_scenario(origin: WakeAdmissionOrigin, exit: 
             WakeAdmissionOrigin::Dequeued => CoordinatorConfig {
                 limits: SubagentLimits {
                     max_concurrent: 1,
+                    max_total_agents: 8,
                     behavior: LimitBehavior::Queue,
                 },
                 buffer_completions: true,

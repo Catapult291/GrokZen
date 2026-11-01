@@ -232,6 +232,9 @@ pub fn apply_child_tool_policy(
             .tools
             .retain(|tool| tool.kind != Some(ToolKind::Task));
         prune_orphaned_background_task_tools(&mut definition.tool_config);
+        xai_grok_tools::implementations::grok_build::task::types::prune_orphaned_subagent_tools(
+            &mut definition.tool_config,
+        );
     }
     definition.tool_config.tools.retain(|tool| {
         !xai_grok_tools::implementations::grok_build::is_workflow_tool(tool.kind, &tool.id)

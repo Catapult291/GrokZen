@@ -26,6 +26,7 @@ fn summary(
     };
     SubagentCompletionSummary {
         snapshot: SubagentSnapshot {
+            label: None,
             subagent_id: id.into(),
             description: desc.into(),
             subagent_type: typ.into(),
@@ -33,6 +34,7 @@ fn summary(
             started_at_epoch_ms: 0,
             duration_ms: ms,
             persona: None,
+            ..Default::default()
         },
         loop_task_id: None,
         tool_calls: tools,

@@ -108,6 +108,7 @@ fn prior_wake_meta(id: &str, model_id: &str) -> SubagentMeta {
         attempt_id: Some("at1.prior".to_owned()),
         parent_session_id: "setup-parent".to_owned(),
         child_session_id: id.to_owned(),
+        effective_tools: None,
         subagent_type: "general-purpose".to_owned(),
         description: "prior description".to_owned(),
         prompt: "prior prompt".to_owned(),

@@ -16,6 +16,7 @@ fn running_meta(id: &str, parent: &str) -> SubagentMeta {
         attempt_id: None,
         parent_session_id: parent.into(),
         child_session_id: format!("child-{id}"),
+        effective_tools: None,
         subagent_type: "explore".into(),
         description: "task".into(),
         prompt: "do work".into(),
@@ -50,21 +51,20 @@ fn write_meta(dir: &std::path::Path, meta: &SubagentMeta) {
 fn running_inspection(id: &str, parent: &str) -> SubagentInspection {
     SubagentInspection {
         snapshot: SubagentSnapshot {
+            label: None,
             subagent_id: id.to_string(),
             description: "task".to_string(),
             subagent_type: "explore".to_string(),
             status: SubagentSnapshotStatus::Running {
                 turn_count: 1,
                 tool_call_count: 0,
-                tokens_used: 0,
-                context_window_tokens: 0,
-                context_usage_pct: 0,
                 tools_used: Vec::new(),
                 error_count: 0,
             },
             started_at_epoch_ms: 0,
             duration_ms: 50,
             persona: None,
+            ..Default::default()
         },
         parent_session_id: parent.to_string(),
         child_session_id: format!("child-{id}"),
@@ -209,6 +209,61 @@ async fn list_running_subagents_skips_live_coordinator_child() {
             assert_eq!(reread.status, "running");
             assert_eq!(drain_cancelled_finishes(&mut cmd_rx, id), 0);
             let _ = std::fs::remove_dir_all(sub_dir.parent().unwrap());
+        })
+        .await;
+}
+
+/// `list_subagents` must reach a live event pump and answer inside the wait
+/// budget — the production `ListAgents` branch that a stub-only pump used to
+/// swallow (the caller would eat the backend's 5s timeout and see an empty
+/// tree).
+#[tokio::test(flavor = "current_thread")]
+async fn list_subagents_answers_through_the_live_event_pump() {
+    use xai_grok_tools::implementations::grok_build::task::types::{
+        SubagentAgentEntry, SubagentAgentStatus,
+    };
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let agent = build_minimal_agent_for_tests();
+            let event_rx = agent
+                .subagent_event_rx
+                .borrow_mut()
+                .take()
+                .expect("subagent event rx still available");
+            let mut event_rx = event_rx.into_event_receiver();
+            let entry = SubagentAgentEntry {
+                id: "sa-tree-1".to_owned(),
+                label: Some("auth research".to_owned()),
+                subagent_type: "explore".to_owned(),
+                status: SubagentAgentStatus::Running,
+                model: None,
+                parent_id: "parent-session".to_owned(),
+                depth: 1,
+                elapsed_ms: 100,
+                tokens_in: 0,
+                tokens_out: 0,
+                context_pct: 0,
+                current_tool: None,
+                queue_position: None,
+                resumable: false,
+            };
+            let expected = entry.clone();
+            tokio::task::spawn_local(async move {
+                while let Some(event) = event_rx.recv().await {
+                    if let SubagentEvent::ListAgents(request) = event {
+                        let _ = request.respond_to.send(vec![expected.clone()]);
+                    }
+                }
+            });
+
+            let listed = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                agent.list_subagents("parent-session", true, None, 50),
+            )
+            .await
+            .expect("list_subagents must answer inside the wait budget");
+            assert_eq!(listed, vec![entry]);
         })
         .await;
 }

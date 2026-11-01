@@ -1108,12 +1108,12 @@ fn subagents_config_default_enabled() {
     });
 }
 #[test]
-fn subagents_max_depth_defaults_to_one() {
+fn subagents_max_depth_defaults_to_two() {
     assert_eq!(
-            SubagentsConfig::resolve_max_depth(None, None, None),
-            SubagentsConfig::DEFAULT_MAX_DEPTH
-        );
-    assert_eq!(SubagentsConfig::DEFAULT_MAX_DEPTH, 1);
+        SubagentsConfig::resolve_max_depth(None, None, None),
+        SubagentsConfig::DEFAULT_MAX_DEPTH
+    );
+    assert_eq!(SubagentsConfig::DEFAULT_MAX_DEPTH, 2);
 }
 #[test]
 fn subagents_max_depth_env_beats_toml_and_remote() {

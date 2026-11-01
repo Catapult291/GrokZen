@@ -72,7 +72,7 @@ fn registered_settings() {
             ),
             (
                 "active_agent_messages",
-                ("GROK_ACTIVE_AGENT_MESSAGES", false),
+                ("GROK_ACTIVE_AGENT_MESSAGES", true),
             ),
             ("dock", ("GROK_DOCK", false)),
             ("terminal_theme", ("GROK_TERMINAL_THEME", false)),

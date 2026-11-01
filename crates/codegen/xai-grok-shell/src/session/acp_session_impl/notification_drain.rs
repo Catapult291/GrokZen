@@ -821,6 +821,7 @@ mod live_orphan_hook_tests {
             attempt_id: None,
             parent_session_id: parent.into(),
             child_session_id: format!("child-{id}"),
+            effective_tools: None,
             subagent_type: "explore".into(),
             description: "task".into(),
             prompt: "do work".into(),
@@ -855,21 +856,20 @@ mod live_orphan_hook_tests {
     fn running_inspection(id: &str) -> SubagentInspection {
         SubagentInspection {
             snapshot: SubagentSnapshot {
+                label: None,
                 subagent_id: id.to_string(),
                 description: "task".to_string(),
                 subagent_type: "explore".to_string(),
                 status: SubagentSnapshotStatus::Running {
                     turn_count: 1,
                     tool_call_count: 0,
-                    tokens_used: 0,
-                    context_window_tokens: 0,
-                    context_usage_pct: 0,
                     tools_used: Vec::new(),
                     error_count: 0,
                 },
                 started_at_epoch_ms: 0,
                 duration_ms: 50,
                 persona: None,
+                ..Default::default()
             },
             parent_session_id: String::new(),
             child_session_id: format!("child-{id}"),
@@ -919,6 +919,10 @@ mod live_orphan_hook_tests {
                         .into_iter()
                         .collect();
                     let _ = request.respond_to.send(list);
+                } else if let SubagentEvent::ListAgents(request) = event {
+                    // No live children in this stub: an empty tree answers
+                    // immediately instead of stalling the caller's 5s wait.
+                    let _ = request.respond_to.send(Vec::new());
                 }
             }
         });

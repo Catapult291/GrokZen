@@ -145,6 +145,7 @@ impl ChannelSpawner {
         harness_agent_type: Option<String>,
     ) -> Result<String, SpawnError> {
         let request = SubagentRequest {
+            label: None,
             id: id.to_string(),
             prompt,
             description: GOAL_SUMMARIZER_SUBAGENT_DESCRIPTION.to_string(),

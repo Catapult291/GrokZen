@@ -243,6 +243,7 @@ pub async fn spawn_isolated_subagent_for_e2e(
         id: id.clone(),
         prompt: String::new(),
         description: "grove-e2e isolated".into(),
+        label: None,
         subagent_type: "general-purpose".into(),
         parent_session_id: "grove-e2e-parent".into(),
         parent_prompt_id: None,

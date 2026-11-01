@@ -322,6 +322,7 @@ async fn pre_start_wake_rollback_keeps_the_activation_disposition() {
         if exit == "queued_cancelled" {
             c.admission = Admission::new(SubagentLimits {
                 max_concurrent: 1,
+                max_total_agents: 8,
                 behavior: LimitBehavior::Queue,
             });
             add(&mut c, admissions.clone(), IDS[4], "other", None);

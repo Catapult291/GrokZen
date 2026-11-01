@@ -757,6 +757,9 @@ pub enum SessionUpdate {
         child_session_id: String,
         /// Agent type used for the subagent ("general-purpose", "explore", "plan", or custom).
         subagent_type: String,
+        /// Short model-chosen display label; falls back to the id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
         /// Short human-readable description of the task.
         description: String,
         /// Effective context source after bootstrap: "new" or "resumed".
@@ -1754,6 +1757,7 @@ mod tests {
         // SubagentProgress must appear between SubagentSpawned and SubagentFinished in the enum definition
         // Clients expect notifications in that order
         let spawned = serde_json::to_value(SessionUpdate::SubagentSpawned {
+            label: None,
             attempt_id: None,
             subagent_id: "s".into(),
             parent_session_id: "p".into(),
@@ -1819,6 +1823,7 @@ mod tests {
     #[test]
     fn subagent_spawned_agent_address_serializes_as_typed_camel_case() {
         let update = SessionUpdate::SubagentSpawned {
+            label: None,
             attempt_id: None,
             subagent_id: "s".into(),
             parent_session_id: "p".into(),

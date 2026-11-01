@@ -61,6 +61,8 @@ pub(super) fn reduce_prompt_turn_result(
                         result.cancelled = false;
                         result.error = None;
                         result.output = Arc::from(value.to_string());
+                        result.structured = Some(value);
+                        result.stop_reason = xai_tool_types::stop_reason::END_TURN.to_owned();
                     }
                     (
                         PromptTurnResultMode::Initial {
@@ -75,6 +77,8 @@ pub(super) fn reduce_prompt_turn_result(
                             truncated,
                         ));
                         result.output = Arc::from(final_text);
+                        result.stop_reason =
+                            xai_tool_types::stop_reason::NO_STRUCTURED_RESULT.to_owned();
                     }
                     (
                         PromptTurnResultMode::Initial {
@@ -89,6 +93,8 @@ pub(super) fn reduce_prompt_turn_result(
                             truncated,
                         ));
                         result.output = Arc::from(final_text);
+                        result.stop_reason =
+                            xai_tool_types::stop_reason::NO_STRUCTURED_RESULT.to_owned();
                     }
                     (
                         PromptTurnResultMode::Initial {
@@ -103,6 +109,7 @@ pub(super) fn reduce_prompt_turn_result(
                             text_or_summary(&final_text, summaries.success),
                             truncated,
                         );
+                        result.stop_reason = xai_tool_types::stop_reason::END_TURN.to_owned();
                     }
                     (PromptTurnResultMode::ParentFollowup, None) => {
                         result.success = true;
@@ -112,6 +119,7 @@ pub(super) fn reduce_prompt_turn_result(
                             text_or_summary(&final_text, summaries.success),
                             truncated,
                         );
+                        result.stop_reason = xai_tool_types::stop_reason::END_TURN.to_owned();
                     }
                     (PromptTurnResultMode::ParentFollowup, Some(_)) => {
                         result.success = false;
@@ -122,6 +130,7 @@ pub(super) fn reduce_prompt_turn_result(
                         ));
                         result.output = Arc::from(final_text);
                         result.output_usage_incomplete = true;
+                        result.stop_reason = xai_tool_types::stop_reason::ERROR.to_owned();
                     }
                 }
             }
@@ -134,6 +143,8 @@ pub(super) fn reduce_prompt_turn_result(
                 ));
                 result.output = text_or_summary(&final_text, summaries.cancelled);
                 result.output_usage_incomplete = true;
+                result.stop_reason = xai_tool_types::stop_reason::CANCELLED.to_owned();
+                result.partial = true;
                 cancellation_may_hide_usage = true;
             }
             PromptCompletionKind::MaxTurnsReached { limit } => {
@@ -142,6 +153,8 @@ pub(super) fn reduce_prompt_turn_result(
                 result.error = Some(format!("max turns reached (limit: {limit})"));
                 result.output = text_or_summary(&final_text, || (summaries.max_turns)(limit));
                 result.output_usage_incomplete = true;
+                result.stop_reason = xai_tool_types::stop_reason::MAX_TURNS.to_owned();
+                result.partial = true;
             }
             PromptCompletionKind::Rewound => {
                 result.success = false;
@@ -149,6 +162,8 @@ pub(super) fn reduce_prompt_turn_result(
                 result.error = Some("Subagent turn was rewound".to_string());
                 result.output = Arc::from(final_text);
                 result.output_usage_incomplete = true;
+                result.stop_reason = xai_tool_types::stop_reason::CANCELLED.to_owned();
+                result.partial = true;
                 cancellation_may_hide_usage = true;
             }
             PromptCompletionKind::RemovedFromQueue => {
@@ -157,6 +172,8 @@ pub(super) fn reduce_prompt_turn_result(
                 result.error = Some("Subagent turn was removed before it ran".to_string());
                 result.output = Arc::from(final_text);
                 result.output_usage_incomplete = true;
+                result.stop_reason = xai_tool_types::stop_reason::CANCELLED.to_owned();
+                result.partial = true;
             }
         },
         Ok(Err(error)) => {
@@ -169,6 +186,12 @@ pub(super) fn reduce_prompt_turn_result(
             });
             result.output = Arc::from(final_text);
             result.output_usage_incomplete = true;
+            result.stop_reason = if was_cancelled {
+                xai_tool_types::stop_reason::CANCELLED.to_owned()
+            } else {
+                xai_tool_types::stop_reason::ERROR.to_owned()
+            };
+            result.partial = true;
             cancellation_may_hide_usage = was_cancelled;
         }
         Err(_) => {
@@ -181,6 +204,12 @@ pub(super) fn reduce_prompt_turn_result(
             });
             result.output = Arc::from(final_text);
             result.output_usage_incomplete = true;
+            result.stop_reason = if was_cancelled {
+                xai_tool_types::stop_reason::CANCELLED.to_owned()
+            } else {
+                xai_tool_types::stop_reason::ERROR.to_owned()
+            };
+            result.partial = true;
             cancellation_may_hide_usage = true;
         }
     }

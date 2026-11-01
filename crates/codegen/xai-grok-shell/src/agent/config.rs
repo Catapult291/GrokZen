@@ -934,6 +934,10 @@ pub struct Config {
     pub subagents_max_depth: u32,
     #[serde(skip)]
     pub subagents_max_concurrent: usize,
+    /// Resolved cumulative per-root subagent budget.
+    /// See [`crate::config::SubagentsConfig::resolve_max_total_agents`].
+    #[serde(skip)]
+    pub subagents_max_total_agents: usize,
     /// Resolved concurrent subagent turn-sampling limit feeding the shared semaphore.
     /// See [`crate::config::SubagentsConfig::resolve_sampling_limit`].
     #[serde(skip)]
@@ -1217,6 +1221,8 @@ impl Default for Config {
             subagents_max_depth: crate::config::SubagentsConfig::DEFAULT_MAX_DEPTH,
             subagents_max_concurrent:
                 xai_grok_tools::implementations::grok_build::task::admission::DEFAULT_MAX_CONCURRENT,
+            subagents_max_total_agents:
+                xai_grok_tools::implementations::grok_build::task::admission::DEFAULT_MAX_TOTAL_AGENTS,
             subagents_sampling_limit:
                 xai_grok_tools::implementations::grok_build::task::admission::DEFAULT_MAX_CONCURRENT,
             subagents_limit_behavior: Default::default(),
@@ -1676,6 +1682,11 @@ impl Config {
             sa.max_concurrent,
             remote.and_then(|r| r.subagents_max_concurrent),
         );
+        self.subagents_max_total_agents = SubagentsConfig::resolve_max_total_agents(
+            env(SubagentsConfig::ENV_MAX_TOTAL_AGENTS).as_deref(),
+            sa.max_total_agents,
+            remote.and_then(|r| r.subagents_max_total_agents),
+        );
         self.subagents_sampling_limit = SubagentsConfig::resolve_sampling_limit(
             env(SubagentsConfig::ENV_SAMPLING_LIMIT).as_deref(),
             sa.sampling_limit,
@@ -1715,6 +1726,11 @@ impl Config {
                 .raw_config
                 .get("subagents")
                 .and_then(|s| s.get("max_concurrent"))
+                .and_then(|v| v.as_integer()),
+            max_total_agents: ctx
+                .raw_config
+                .get("subagents")
+                .and_then(|s| s.get("max_total_agents"))
                 .and_then(|v| v.as_integer()),
             limit_behavior: ctx
                 .raw_config

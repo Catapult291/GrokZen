@@ -72,6 +72,7 @@ async fn mint_test_sender(owner: SubagentOwner) -> Option<AgentMessageSender> {
         backend
             .spawn(
                 SubagentRequest {
+                    label: None,
                     id,
                     prompt: "work".to_owned(),
                     description: "child".to_owned(),
