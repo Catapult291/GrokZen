@@ -847,7 +847,8 @@ impl ToolOutput {
             ToolOutput::SubagentCompleted(sub) => {
                 let mut text = sub.output.clone();
                 if let Some(ref wt) = sub.worktree_path {
-                    text.push_str(&format!("\n\n<worktree_path>{wt}</worktree_path>"));
+                    text.push_str("\n\n");
+                    text.push_str(&xai_tool_types::format_worktree_block(wt));
                 }
                 text.push_str("\n\n");
                 text.push_str(&sub.resume_footer());

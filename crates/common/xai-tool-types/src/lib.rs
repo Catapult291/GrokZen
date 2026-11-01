@@ -38,7 +38,8 @@ pub use task::{
     builtin_subagent_by_name, default_subagent_type, format_resume_footer,
     format_subagent_auto_backgrounded, format_subagent_backgrounded_on_turn_end,
     format_subagent_completed, format_subagent_started_background, format_wait_cap_ms,
-    is_not_sentinel, max_wait_block_ms, render_tool_access_fragment, resolve_task_ids,
+    format_worktree_block, is_not_sentinel, max_wait_block_ms, render_tool_access_fragment,
+    resolve_task_ids,
     sanitize_label, sanitize_optional_arg, should_continue_parent_work, stop_reason,
     task_output_waits, task_output_waits_from_json, validate_output_schema,
 };
