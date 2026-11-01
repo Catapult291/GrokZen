@@ -1019,6 +1019,7 @@ pub fn map_subagent_completed(ev: &events::SubagentCompleted) -> Option<External
     Some(
         ExternalRecord::event(ExternalEventName::Subagent)
             .attr(ExternalKey::Phase, "completed")
+            .attr(ExternalKey::SubagentType, ev.subagent_type.as_str())
             .attr(ExternalKey::Outcome, <&'static str>::from(ev.outcome))
             .attr(ExternalKey::DurationMs, ev.duration_ms),
     )
