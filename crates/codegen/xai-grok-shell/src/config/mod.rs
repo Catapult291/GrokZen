@@ -57,6 +57,9 @@ pub struct SubagentsConfig {
     pub max_depth: Option<i64>,
     #[serde(default)]
     pub max_concurrent: Option<i64>,
+    /// Cumulative subagents one root session may create (`[subagents] max_total_agents`).
+    #[serde(default)]
+    pub max_total_agents: Option<i64>,
     /// Concurrent subagent turn-sampling limit. See [`Self::resolve_sampling_limit`].
     #[serde(default)]
     pub sampling_limit: Option<i64>,
@@ -89,6 +92,7 @@ impl Default for SubagentsConfig {
             enabled: true,
             max_depth: None,
             max_concurrent: None,
+            max_total_agents: None,
             sampling_limit: None,
             limit_behavior: None,
             workflow_max_concurrent: None,
@@ -246,16 +250,16 @@ impl SubagentsConfig {
         self.discover_roles_in_dir(&roles_dir);
     }
     pub const ENV_MAX_DEPTH: &'static str = "GROK_SUBAGENTS_MAX_DEPTH";
-    pub const DEFAULT_MAX_DEPTH: u32 = 1;
+    pub const DEFAULT_MAX_DEPTH: u32 = 2;
     /// Clamp to `1..=u32::MAX`. Values below 1 (including 0 and negatives) warn and become 1 so nesting is never accidentally disabled.
     pub(crate) fn clamp_max_depth(raw: i64, source: &str) -> u32 {
-        if raw < i64::from(Self::DEFAULT_MAX_DEPTH) {
+        if raw < 1 {
             tracing::warn!(
                 source,
                 value = raw,
                 "subagents max_depth < 1; clamping to 1"
             );
-            Self::DEFAULT_MAX_DEPTH
+            1
         } else if raw > i64::from(u32::MAX) {
             tracing::warn!(
                 source,
@@ -295,8 +299,24 @@ impl SubagentsConfig {
         Self::DEFAULT_MAX_DEPTH
     }
     pub const ENV_MAX_CONCURRENT: &'static str = "GROK_MAX_CONCURRENT_SUBAGENTS";
+    pub const ENV_MAX_TOTAL_AGENTS: &'static str = "GROK_SUBAGENTS_MAX_TOTAL_AGENTS";
     pub const ENV_SAMPLING_LIMIT: &'static str = "GROK_SUBAGENT_SAMPLING_LIMIT";
     pub const ENV_LIMIT_BEHAVIOR: &'static str = "GROK_SUBAGENT_LIMIT_BEHAVIOR";
+
+    /// Precedence: env > TOML > remote > [`admission::DEFAULT_MAX_TOTAL_AGENTS`].
+    pub(crate) fn resolve_max_total_agents(
+        env: Option<&str>,
+        config: Option<i64>,
+        remote: Option<u32>,
+    ) -> usize {
+        resolve_positive_count(
+            Self::ENV_MAX_TOTAL_AGENTS,
+            env,
+            config,
+            remote,
+            xai_grok_tools::implementations::grok_build::task::admission::DEFAULT_MAX_TOTAL_AGENTS,
+        )
+    }
     pub const ENV_WORKFLOW_MAX_CONCURRENT: &'static str = "GROK_WORKFLOW_MAX_CONCURRENT_AGENTS";
     pub(crate) fn resolve_max_concurrent(
         env: Option<&str>,

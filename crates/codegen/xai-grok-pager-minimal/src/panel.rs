@@ -713,6 +713,7 @@ mod tests {
             model_id: None,
             num_messages: 0,
             last_active_at: None,
+            last_reply_at: None,
             branch: None,
             repo_name: "repo".into(),
             worktree_label: None,

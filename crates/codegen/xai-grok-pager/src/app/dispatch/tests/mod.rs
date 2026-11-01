@@ -436,6 +436,7 @@ pub(super) fn enqueue_local(app: &mut AppView, id: AgentId, text: &str) {
 fn make_test_subagent(child_sid: &str, sa_id: &str) -> crate::app::subagent::SubagentInfo {
     let now = std::time::Instant::now();
     crate::app::subagent::SubagentInfo {
+        label: None,
         subagent_id: Arc::from(sa_id),
         child_session_id: Arc::from(child_sid),
         description: Arc::from("test subagent"),

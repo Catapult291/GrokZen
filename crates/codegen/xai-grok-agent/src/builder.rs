@@ -215,21 +215,72 @@ fn implicit_subagent_type(
     }
     Some(only.to_owned())
 }
-/// Plugin and user-defined agent types the parent may spawn, sorted by name.
-/// The list leaves out built-in agents, xAI-bundled agents, and any agent that shadows a built-in name.
+/// The first enabled tool of `kind`, resolved to its client-facing name.
+fn tool_name_for_kind(
+    tool_config: &xai_grok_tools::registry::types::ToolServerConfig,
+    kind: ToolKind,
+    fallback: &str,
+) -> String {
+    tool_config
+        .tools
+        .iter()
+        .find(|tc| tc.kind == Some(kind))
+        .map(|tc| tc.resolve_client_name(short_tool_name(&tc.id)))
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
+/// Owned tool names backing [`xai_tool_types::SubagentToolNaming`].
+struct SubagentToolNames {
+    execute: String,
+    read: String,
+    edit: String,
+    list: String,
+    search: String,
+    web_search: String,
+    plan: String,
+}
+
+impl SubagentToolNames {
+    fn new(tool_config: &xai_grok_tools::registry::types::ToolServerConfig) -> Self {
+        Self {
+            execute: tool_name_for_kind(tool_config, ToolKind::Execute, "run_terminal_command"),
+            read: tool_name_for_kind(tool_config, ToolKind::Read, "read_file"),
+            edit: tool_name_for_kind(tool_config, ToolKind::Edit, "search_replace"),
+            list: tool_name_for_kind(tool_config, ToolKind::ListDir, "list_dir"),
+            search: tool_name_for_kind(tool_config, ToolKind::Search, "search_code"),
+            web_search: tool_name_for_kind(tool_config, ToolKind::WebSearch, "web_search"),
+            plan: tool_name_for_kind(tool_config, ToolKind::Plan, "todo_write"),
+        }
+    }
+    fn naming(&self) -> xai_tool_types::SubagentToolNaming<'_> {
+        xai_tool_types::SubagentToolNaming {
+            execute: &self.execute,
+            read: &self.read,
+            edit: &self.edit,
+            list: &self.list,
+            search: &self.search,
+            web_search: &self.web_search,
+            plan: &self.plan,
+        }
+    }
+}
+
+/// Built-in and custom agent types the parent may spawn. Built-ins come first; a project
+/// agent that shadows a built-in claims that name slot with its own descriptor.
 fn selectable_subagent_types(
     subagents: &[crate::discovery::SubagentEntry],
     allowed: Option<&[String]>,
+    naming: &xai_tool_types::SubagentToolNaming<'_>,
 ) -> Vec<xai_tool_types::SubagentDescriptor> {
+    use crate::discovery::SubagentSource;
     let mut selectable: Vec<_> = subagents
         .iter()
-        .filter(|entry| {
-            matches!(
-                entry.source,
-                crate::discovery::SubagentSource::UserDefined {
-                    scope: crate::config::AgentScope::Project | crate::config::AgentScope::User
-                }
-            ) && entry.shadows_builtin.is_none()
+        .filter(|entry| match &entry.source {
+            SubagentSource::Builtin(_) => entry.shadows_builtin.is_none(),
+            SubagentSource::UserDefined {
+                scope: crate::config::AgentScope::Project | crate::config::AgentScope::User,
+            } => true,
+            SubagentSource::UserDefined { .. } => false,
         })
         .filter(|entry| {
             allowed.is_none_or(|allowed| {
@@ -238,13 +289,35 @@ fn selectable_subagent_types(
                     .any(|name| name.eq_ignore_ascii_case(&entry.name))
             })
         })
-        .map(|entry| xai_tool_types::SubagentDescriptor {
-            name: entry.name.clone(),
-            description: entry.description.clone(),
-            tools: None,
+        .filter_map(|entry| match &entry.source {
+            SubagentSource::Builtin(_) => Some(
+                xai_tool_types::builtin_subagent_by_name(&entry.name)
+                    .map(|builtin| builtin.to_descriptor(naming))
+                    .unwrap_or_else(|| xai_tool_types::SubagentDescriptor {
+                        name: entry.name.clone(),
+                        description: entry.description.clone(),
+                        tools: None,
+                    }),
+            ),
+            SubagentSource::UserDefined { .. } => Some(xai_tool_types::SubagentDescriptor {
+                name: entry.name.clone(),
+                description: entry.description.clone(),
+                tools: None,
+            }),
         })
         .collect();
-    selectable.sort_by(|a, b| a.name.cmp(&b.name));
+    // Built-ins keep catalog order and precede custom agents, which stay alphabetical.
+    let rank = |name: &str| {
+        xai_tool_types::BUILTIN_SUBAGENTS
+            .iter()
+            .position(|builtin| builtin.name.eq_ignore_ascii_case(name))
+    };
+    selectable.sort_by(|a, b| match (rank(&a.name), rank(&b.name)) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.name.cmp(&b.name),
+    });
     selectable
 }
 /// Single copy of the params-merge loop the per-tool param injections share.
@@ -1112,7 +1185,9 @@ impl AgentBuilder {
                 &pinned,
             );
         }
-        let selectable = selectable_subagent_types(&subagents, allowed_types);
+        let subagent_tools = SubagentToolNames::new(&tool_config);
+        let selectable =
+            selectable_subagent_types(&subagents, allowed_types, &subagent_tools.naming());
         if !selectable.is_empty()
             && let Ok(types) = serde_json::to_value(&selectable)
         {
@@ -1167,6 +1242,9 @@ impl AgentBuilder {
                 !xai_grok_tools::implementations::grok_build::is_workflow_tool(tool.kind, &tool.id)
             });
         }
+        xai_grok_tools::implementations::grok_build::task::types::prune_orphaned_subagent_tools(
+            &mut tool_config,
+        );
         let use_backend_search = self.backend_search;
         let web_search_enabled = self.web_search_config.is_enabled();
         let (tool_registry_timer, tool_registry_span) = build_await_step!("tool_registry");
@@ -2056,7 +2134,7 @@ mod tests {
     #[tokio::test]
     async fn child_toolsets_inject_write_only_alongside_edit_and_never_plan_mode() {
         use xai_grok_tools::computer::local::LocalTerminalBackend;
-        let cases: [(&str, crate::config::AgentDefinition, &[&str], &[&str]); 3] = [
+        let cases: [(&str, crate::config::AgentDefinition, &[&str], &[&str]); 4] = [
             (
                 "explore",
                 crate::config::AgentDefinition::explore(),
@@ -2073,6 +2151,12 @@ mod tests {
                 "general-purpose",
                 crate::config::AgentDefinition::general_purpose(),
                 &["write", "search_replace"],
+                &["enter_plan_mode", "exit_plan_mode"],
+            ),
+            (
+                "implementer",
+                crate::config::AgentDefinition::implementer(),
+                &["write", "search_replace", "run_terminal_command"],
                 &["enter_plan_mode", "exit_plan_mode"],
             ),
         ];
@@ -2568,7 +2652,9 @@ mod tests {
             "allowed={allowed:?} tools={pinned_names:?} implicit={implicit:?}"
         );
         let mut toggle = std::collections::HashMap::new();
-        toggle.insert("general-purpose".into(), false);
+        for type_name in ["general-purpose", "explore", "plan", "implementer"] {
+            toggle.insert(type_name.into(), false);
+        }
         let bash_params = serde_json::json!({
             "auto_background_on_timeout": true,
         })
@@ -2590,7 +2676,7 @@ mod tests {
         let disabled_names = names_of(&disabled).await;
         assert!(
             !disabled_names.iter().any(|name| name == "spawn_subagent"),
-            "disabling general-purpose with no single fallback hides task: {disabled_names:?}"
+            "disabling every builtin with no custom fallback hides task: {disabled_names:?}"
         );
         for kept in [
             "run_terminal_command",
@@ -2618,7 +2704,9 @@ mod tests {
         use xai_grok_tools::notification::ToolNotificationHandle;
         use xai_grok_tools::types::resources::Params;
         let mut toggle = std::collections::HashMap::new();
-        toggle.insert("general-purpose".into(), false);
+        for type_name in ["general-purpose", "explore", "plan", "implementer"] {
+            toggle.insert(type_name.into(), false);
+        }
         let bash_params = serde_json::json!({ "enabled_background": false })
             .as_object()
             .unwrap()
@@ -2665,7 +2753,7 @@ mod tests {
         assert!(!bash.0.enabled_background);
     }
     #[test]
-    fn selectable_types_are_project_and_user_agents_the_parent_may_spawn() {
+    fn selectable_types_are_builtins_then_custom_agents_the_parent_may_spawn() {
         use crate::config::{AgentScope, BuiltinAgentName};
         use crate::discovery::{SubagentEntry, SubagentSource};
         use xai_grok_tools::types::config_source::ConfigSource;
@@ -2694,16 +2782,66 @@ mod tests {
             entry("reviewer", user(AgentScope::Project)),
             entry("merlin:stash", user(AgentScope::User)),
         ];
+        let tools = super::SubagentToolNames::new(
+            &xai_grok_tools::registry::types::ToolServerConfig::default(),
+        );
         let names = |allowed: Option<&[String]>| -> Vec<String> {
-            super::selectable_subagent_types(&subagents, allowed)
+            super::selectable_subagent_types(&subagents, allowed, &tools.naming())
                 .into_iter()
                 .map(|descriptor| descriptor.name)
                 .collect()
         };
-        assert_eq!(vec!["merlin:stash", "reviewer"], names(None));
+        assert_eq!(
+            vec![
+                "general-purpose",
+                "explore",
+                "plan",
+                "merlin:stash",
+                "reviewer"
+            ],
+            names(None)
+        );
         let allowed = vec!["Reviewer".to_owned(), "explore".to_owned()];
-        assert_eq!(vec!["reviewer"], names(Some(&allowed)));
+        assert_eq!(vec!["explore", "reviewer"], names(Some(&allowed)));
         assert!(names(Some(&[])).is_empty());
+    }
+
+    #[tokio::test]
+    async fn disabling_general_purpose_keeps_other_builtin_types_selectable() {
+        use xai_grok_tools::computer::local::LocalTerminalBackend;
+        use xai_grok_tools::notification::ToolNotificationHandle;
+        let mut toggle = std::collections::HashMap::new();
+        toggle.insert("general-purpose".into(), false);
+        let agent = AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(crate::config::AgentDefinition::default_grok_build())
+        .with_subagents_enabled(true)
+        .with_subagent_toggle(toggle)
+        .build()
+        .await
+        .expect("gp-disabled agent should build");
+        let spawn = agent
+            .tool_definitions()
+            .await
+            .into_iter()
+            .find(|definition| definition.function.name == "spawn_subagent")
+            .expect("other builtin types keep the task tool");
+        let offered: Vec<String> = spawn
+            .function
+            .parameters
+            .pointer("/properties/subagent_type/enum")
+            .and_then(serde_json::Value::as_array)
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|name| name.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(vec!["explore", "plan", "implementer"], offered);
     }
     #[tokio::test]
     async fn spawn_schema_offers_plugin_agent_types_by_name() {
@@ -2773,9 +2911,14 @@ mod tests {
             offered.iter().any(|name| name == "demo-plugin:reviewer"),
             "{offered:?}"
         );
-        for built_in in ["general-purpose", "explore", "plan"] {
-            assert!(!offered.iter().any(|name| name == built_in), "{offered:?}");
+        for built_in in ["general-purpose", "explore", "plan", "implementer"] {
+            assert!(offered.iter().any(|name| name == built_in), "{offered:?}");
         }
+        assert_eq!(
+            offered.last().map(String::as_str),
+            Some("demo-plugin:reviewer"),
+            "custom types come after built-ins: {offered:?}"
+        );
         let restricted = build(vec![
             "read_file".into(),
             "Agent(demo-plugin:reviewer, worker)".into(),

@@ -293,7 +293,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "active_agent_messages",
         path: "features.active_agent_messages",
         env: "GROK_ACTIVE_AGENT_MESSAGES",
-        default_enabled: false,
+        default_enabled: true,
         remote: Some(|settings| settings.active_agent_messages_enabled),
         capability: None,
     },

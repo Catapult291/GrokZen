@@ -721,6 +721,7 @@ async fn test_subagent_notifications_round_trip() {
     let spawned = XaiSessionNotification {
         session_id: acp::SessionId::new("parent-session"),
         update: XaiSessionUpdateType::SubagentSpawned {
+            label: None,
             attempt_id: None,
             subagent_id: "child-001".to_string(),
             parent_session_id: "parent-session".to_string(),
@@ -876,6 +877,7 @@ async fn test_subagent_spawned_resumed_roundtrip() {
     let spawned = XaiSessionNotification {
         session_id: acp::SessionId::new("resume-parent"),
         update: XaiSessionUpdateType::SubagentSpawned {
+            label: None,
             attempt_id: None,
             subagent_id: "child-resumed".to_string(),
             parent_session_id: "resume-parent".to_string(),

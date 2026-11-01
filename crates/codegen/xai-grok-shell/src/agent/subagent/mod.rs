@@ -1387,6 +1387,7 @@ fn durable_resume_source_from_meta(
         subagent_type: meta.subagent_type,
         persona: meta.persona,
         model_id: meta.effective_model_id,
+        effective_tools: meta.effective_tools,
     })
 }
 /// Resolve the MCP pool a child subagent should import from its parent. Inheritance applies to **every** agent source (built-in, user, project, and plugin).
@@ -2067,6 +2068,11 @@ pub(crate) struct SubagentMeta {
     /// Persisted for durable `resume_from` identity validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_model_id: Option<String>,
+    /// Sorted tool names the child's resolved definition carried at spawn.
+    /// Persisted so a resume can warn when the definition's toolset narrowed
+    /// since the source run (definition drift).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_tools: Option<Vec<String>>,
 }
 /// Canonical subagent metadata for GCS persistence (`subagent.json`).
 /// Uploaded to `{session_id}/subagent.json` in GCS and optionally mirrored locally.

@@ -487,6 +487,7 @@ impl ChannelSpawner {
         resume_from: Option<&str>,
     ) -> Result<String, SpawnError> {
         let request = SubagentRequest {
+            label: None,
             id: id.to_string(),
             prompt,
             description: GOAL_CLASSIFIER_SUBAGENT_DESCRIPTION.to_string(),

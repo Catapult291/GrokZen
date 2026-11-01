@@ -42,6 +42,7 @@ impl ChildControl for ShellChildRuntime {
                     tokens_used: snapshot.context_tokens_used,
                     context_window_tokens: snapshot.context_window_tokens,
                     context_usage_pct: snapshot.context_window_usage,
+                    current_tool: snapshot.tools_used.last().cloned(),
                     tools_used: snapshot.tools_used,
                     error_count: snapshot.error_count,
                 })

@@ -77,6 +77,20 @@ fn context_badge_shown_only_for_resumed_and_forked() {
 }
 
 #[test]
+fn subagent_label_prefers_the_explicit_spawn_label() {
+    let mut info = make_info();
+    info.attempt.persona = Some("persona".into());
+    info.attempt.role = Some("role".into());
+    info.label = Some("auth-research".into());
+    let (label, _) = format_subagent_label(&info);
+    assert_eq!(label, "Auth-research");
+
+    info.label = Some("   ".into());
+    let (label, _) = format_subagent_label(&info);
+    assert_eq!(label, "Persona", "blank labels fall through");
+}
+
+#[test]
 fn subagent_label_prefers_persona_then_role_then_builtin_type() {
     struct Case {
         persona: Option<&'static str>,

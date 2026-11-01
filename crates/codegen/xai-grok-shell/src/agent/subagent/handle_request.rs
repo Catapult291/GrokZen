@@ -376,6 +376,7 @@ pub(crate) async fn run_shell_child(
         session_running,
         agent_address,
         spawner_session_id: _,
+        sibling_roster,
     } = run;
     let is_wake = wake_origin.is_some();
     let (wake_message_source, wake_message_id) = match wake_origin {
@@ -555,6 +556,30 @@ pub(crate) async fn run_shell_child(
             );
         }
         effective_runtime.model = None;
+        // Toolset compatibility replaces the old same-type gate: the resumed
+        // child re-renders its definition fresh, so warn when the toolset
+        // narrowed since the source run instead of refusing.
+        if let Some(source_tools) = &source.effective_tools {
+            let current_tools: std::collections::BTreeSet<String> = definition
+                .tool_config
+                .tools
+                .iter()
+                .filter_map(|tool| tool.id.rsplit(':').next().map(str::to_owned))
+                .collect();
+            let missing: Vec<&String> = source_tools
+                .iter()
+                .filter(|tool| !current_tools.contains(*tool))
+                .collect();
+            if !missing.is_empty() {
+                tracing::warn!(
+                    subagent_id = %request.id,
+                    source_subagent = %source.subagent_id,
+                    ?missing,
+                    "Resumed subagent's definition lost tools the source run had; \
+                     transcript references to them may fail"
+                );
+            }
+        }
         if let Err(e) = xai_grok_subagent_resolution::validate_resume_identity(
             &request.subagent_type,
             request.runtime_overrides.persona.as_deref(),
@@ -784,12 +809,14 @@ pub(crate) async fn run_shell_child(
         .runtime_overrides
         .spawn_depth
         .unwrap_or(ctx.parent_depth + 1);
-    let tools_before_policy = definition.tool_config.tools.len();
     let allow_nested_subagents = child_depth < ctx.subagents_max_depth;
+    // At the depth cap the `task` tool stays visible: the tool's depth check
+    // rejects the call with an explicit "depth limit exceeded" error, so the
+    // model sees a reportable failure instead of a silently missing tool.
     xai_grok_subagent_resolution::apply_child_tool_policy(
         &mut definition,
         effective_runtime.capability_mode,
-        allow_nested_subagents,
+        true,
     );
     if let Some(mode) = effective_runtime.capability_mode {
         tracing::info!(
@@ -799,11 +826,12 @@ pub(crate) async fn run_shell_child(
             "Applied capability mode filter to agent tool config"
         );
     }
-    if !allow_nested_subagents && definition.tool_config.tools.len() < tools_before_policy {
+    if !allow_nested_subagents {
         tracing::info!(
             subagent_id = %request.id,
             child_depth,
-            "Stripped task tool from child at max depth"
+            max_depth = ctx.subagents_max_depth,
+            "Child at max depth keeps the task tool; spawns will be rejected by the depth check"
         );
     }
     if request.owner.is_workflow() {
@@ -1017,6 +1045,17 @@ pub(crate) async fn run_shell_child(
             .map(|p| p.to_string_lossy().to_string()),
         snapshot_ref: None,
         effective_model_id: Some(effective_model_id.0.to_string()),
+        effective_tools: Some({
+            let mut names: Vec<String> = definition
+                .tool_config
+                .tools
+                .iter()
+                .filter_map(|tool| tool.id.rsplit(':').next().map(str::to_owned))
+                .collect();
+            names.sort();
+            names.dedup();
+            names
+        }),
     };
     let gcs_upload_ctx = GcsUploadContext {
         bucket_url: ctx.gcs_bucket_url.clone(),
@@ -1046,6 +1085,7 @@ pub(crate) async fn run_shell_child(
         parent_session_id: ctx.parent_session_id.clone(),
         parent_prompt_id: request.parent_prompt_id.clone(),
         subagent_type: request.subagent_type.clone(),
+        label: request.label.clone(),
         description: request.description.clone(),
         effective_context_source: Some(effective_source_str.to_string()),
         context_normalized: fork_context_normalized(&context_source, context_verbatim_fork),
@@ -1221,6 +1261,23 @@ pub(crate) async fn run_shell_child(
             .is_none_or(|mode| mode.allows_tool_kind(ToolKind::ActiveAgentMessage));
     if !active_agent_messages_enabled {
         drop(agent_message_sender.take());
+    }
+    if active_agent_messages_enabled && let Some(body) = definition.prompt_body.as_mut() {
+        body.push_str(
+            "\n\n<agent-roster>\n\
+             You run in a session shared with other agents. Message the main agent with \
+             `subagent_id: \"parent\"`.",
+        );
+        if !sibling_roster.is_empty() {
+            body.push_str("\nNamed siblings you may message:");
+            for sibling in &sibling_roster {
+                body.push_str(&format!(
+                    "\n- {} — {} ({})",
+                    sibling.id, sibling.label, sibling.subagent_type
+                ));
+            }
+        }
+        body.push_str("\n</agent-roster>");
     }
     let task_output_budget = request
         .runtime_overrides

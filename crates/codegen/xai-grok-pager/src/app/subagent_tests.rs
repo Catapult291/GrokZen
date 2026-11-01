@@ -634,6 +634,7 @@ fn accepted_attempt_invalidates_prior_disk_proof() {
         let mut prior = make_info();
         prior.transcript = transcript;
         let child = SubagentChildInfo {
+            label: None,
             subagent_id: prior.subagent_id.to_string(),
             child_session_id: prior.child_session_id.to_string(),
             description: prior.description.to_string(),

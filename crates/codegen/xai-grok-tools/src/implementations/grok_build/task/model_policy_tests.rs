@@ -3,6 +3,19 @@ use pretty_assertions::assert_eq;
 use super::*;
 
 #[test]
+fn task_schema_offers_thoroughness_levels() {
+    let schema = task_input_schema();
+    assert!(
+        property(&schema, "thoroughness").is_some(),
+        "thoroughness must be model-facing: {schema}"
+    );
+    let rendered = schema.to_string();
+    for level in ["quick", "medium", "very_thorough"] {
+        assert!(rendered.contains(level), "missing {level}: {rendered}");
+    }
+}
+
+#[test]
 fn exported_schema_hides_model_only_under_inherited_selection() {
     let schema = task_input_schema();
 
@@ -44,7 +57,7 @@ fn exported_schema_offers_selectable_types_as_an_optional_enum() {
         Some(&serde_json::json!({
             "type": "string",
             "enum": ["merlin:stash", "reviewer"],
-            "description": "Omit for a general-purpose subagent. Set it to hand the task to one of these agents:\n\
+            "description": "Omit for a general-purpose subagent. Pick explore for read-only investigation, plan for implementation design, and implementer for implementation plus verification; other types hand the task to the named agent:\n\
                             - merlin:stash: Searches Stash. Use for code history.\n\
                             - reviewer: Reviews diffs.",
         })),
@@ -113,6 +126,57 @@ fn exported_schema_leaves_out_types_with_overlong_names() {
     };
     let schema = task_input_schema();
     assert_eq!(schema, exported_input_schema(&schema, &only_long));
+}
+
+#[test]
+fn schema_preserves_builtin_before_custom_order() {
+    let mut types: Vec<SubagentDescriptor> = xai_tool_types::BUILTIN_SUBAGENTS
+        .iter()
+        .map(|builtin| {
+            builtin.to_descriptor(&xai_tool_types::SubagentToolNaming {
+                execute: "run_terminal_command",
+                read: "read_file",
+                edit: "search_replace",
+                list: "list_dir",
+                search: "search_code",
+                web_search: "web_search",
+                plan: "todo_write",
+            })
+        })
+        .collect();
+    types.push(descriptor("reviewer", "Reviews diffs."));
+    let params = TaskParams {
+        selectable_subagent_types: types,
+        ..TaskParams::default()
+    };
+
+    let exported = exported_input_schema(&task_input_schema(), &params);
+    let names: Vec<&str> = property(&exported, SUBAGENT_TYPE_PARAM)
+        .and_then(|p| p.get("enum"))
+        .and_then(serde_json::Value::as_array)
+        .expect("subagent_type enum")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+
+    assert_eq!(
+        names,
+        vec![
+            "general-purpose",
+            "explore",
+            "plan",
+            "implementer",
+            "reviewer"
+        ]
+    );
+    let description = property(&exported, SUBAGENT_TYPE_PARAM)
+        .and_then(|p| p.get("description"))
+        .and_then(serde_json::Value::as_str)
+        .expect("subagent_type description");
+    assert!(
+        description.contains("Has access to: run_terminal_command"),
+        "tool summaries use the session's real tool names: {description}"
+    );
 }
 
 fn task_input_schema() -> serde_json::Value {

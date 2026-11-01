@@ -882,6 +882,9 @@ pub struct RemoteSettings {
     pub subagents_max_depth: Option<u32>,
     #[serde(default)]
     pub subagents_max_concurrent: Option<u32>,
+    /// Cumulative per-root subagent budget (`grok_build_settings.subagents_max_total_agents`).
+    #[serde(default)]
+    pub subagents_max_total_agents: Option<u32>,
     #[serde(default)]
     pub subagents_sampling_limit: Option<u32>,
     /// `"queue"` or `"fail"`.

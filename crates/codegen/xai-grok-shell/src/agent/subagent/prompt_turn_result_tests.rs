@@ -126,6 +126,18 @@ fn schema_free_initial() -> PromptTurnResultMode {
     }
 }
 
+/// `Receiver::recv` result for a dropped sender, awaited on a throwaway
+/// single-thread runtime (the test body is sync). `RecvError`'s constructor
+/// is private, so the error comes from a real receive.
+fn dropped_rx_blocking(
+    rx: tokio::sync::oneshot::Receiver<PromptTurnResult>,
+) -> Result<PromptTurnResult, tokio::sync::oneshot::error::RecvError> {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("test runtime")
+        .block_on(rx)
+}
+
 #[test]
 fn initial_schema_requirement_accepts_valid_structured_output() {
     let output = reduce(
@@ -222,6 +234,96 @@ fn parent_followup_rejects_impossible_structured_receipt() {
     );
     assert_eq!(output.result.output.as_ref(), "follow-up text");
     assert!(output.result.output_usage_incomplete);
+}
+
+/// Result-contract stamping: validated documents land in `structured` with
+/// `end_turn`; schema failures stamp `no_structured_result`; terminal
+/// non-completions stamp `max_turns` / `cancelled` with `partial = true`.
+#[test]
+fn result_contract_fields_follow_the_completion_kind() {
+    // Validated document → structured + end_turn, not partial.
+    let out = reduce(
+        Ok(Ok(prompt_turn_ok(
+            PromptCompletionKind::Completed,
+            Some(Ok(serde_json::json!({"answer": 42}))),
+        ))),
+        schema_initial(),
+        "fallback",
+        false,
+    );
+    assert_eq!(
+        out.result.structured,
+        Some(serde_json::json!({"answer": 42}))
+    );
+    assert_eq!(out.result.stop_reason, "end_turn");
+    assert!(!out.result.partial);
+
+    // Schema requested, nothing produced → no_structured_result, partial.
+    let out = reduce(
+        Ok(Ok(prompt_turn_ok(PromptCompletionKind::Completed, None))),
+        schema_initial(),
+        "fallback",
+        false,
+    );
+    assert!(out.result.structured.is_none());
+    assert_eq!(out.result.stop_reason, "no_structured_result");
+    assert!(
+        !out.result.partial,
+        "validation failure is not a max-turns partial"
+    );
+
+    // Schema-free turn → end_turn without structured.
+    let out = reduce(
+        Ok(Ok(prompt_turn_ok(PromptCompletionKind::Completed, None))),
+        schema_free_initial(),
+        "plain answer",
+        false,
+    );
+    assert!(out.result.structured.is_none());
+    assert_eq!(out.result.stop_reason, "end_turn");
+    assert!(!out.result.partial);
+
+    // Max turns → max_turns + partial.
+    let out = reduce(
+        Ok(Ok(prompt_turn_ok(
+            PromptCompletionKind::MaxTurnsReached { limit: 12 },
+            None,
+        ))),
+        schema_free_initial(),
+        "cut report",
+        false,
+    );
+    assert_eq!(out.result.stop_reason, "max_turns");
+    assert!(out.result.partial);
+
+    // Cancel → cancelled + partial.
+    let out = reduce(
+        Ok(Ok(prompt_turn_ok(
+            PromptCompletionKind::Cancelled {
+                category: None,
+                context: None,
+            },
+            None,
+        ))),
+        schema_free_initial(),
+        "cancelled text",
+        false,
+    );
+    assert_eq!(out.result.stop_reason, "cancelled");
+    assert!(out.result.partial);
+
+    // Child session dropped → error + partial. (RecvError's constructor is
+    // private; a real dropped oneshot produces the same variant.)
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel::<PromptTurnResult>();
+    drop(dropped_tx);
+    let out = reduce(
+        dropped_rx_blocking(dropped_rx),
+        schema_free_initial(),
+        "text",
+        false,
+    );
+    assert_eq!(out.result.stop_reason, "error");
+    assert!(out.result.partial);
 }
 
 #[test]

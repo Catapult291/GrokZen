@@ -8,6 +8,26 @@ use serde::{Deserialize, Serialize};
 // `task` (spawn) tool — Input
 // ───────────────────────────────────────────────────────────────────────────
 
+/// How deeply an `explore` subagent should investigate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Thoroughness {
+    Quick,
+    Medium,
+    VeryThorough,
+}
+
+impl Thoroughness {
+    /// Wire spelling of the level.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Quick => "quick",
+            Self::Medium => "medium",
+            Self::VeryThorough => "very_thorough",
+        }
+    }
+}
+
 /// Input for the `task` tool — launches a subagent to handle a task
 /// autonomously.
 ///
@@ -36,6 +56,23 @@ pub struct TaskToolInput {
     #[schemars(skip)]
     #[serde(default, skip_serializing)]
     pub subagent_type_specified: bool,
+
+    /// Short display label for this subagent (3–5 words). Shown by `list_agents`
+    /// and the subagent UI; omitted means the id is used.
+    #[schemars(
+        description = "Short display label for this subagent (3-5 words). Used by list_agents \
+            and the subagent UI; omit to fall back to the id."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+
+    /// How deeply an `explore` subagent should investigate. Other types ignore it.
+    #[schemars(
+        description = "How thoroughly an explore subagent should investigate: \"quick\", \
+            \"medium\", or \"very_thorough\". Ignored for other subagent types."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thoroughness: Option<Thoroughness>,
 
     /// Whether to run the subagent in the background.
     ///
@@ -67,6 +104,18 @@ pub struct TaskToolInput {
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolation: Option<SubagentIsolationMode>,
+
+    /// Initial conversation context: `fresh` (default) starts an empty
+    /// transcript; `fork` seeds the child with the parent's normalized
+    /// conversation. Forked children run read-only unless the type is
+    /// `implementer`.
+    #[schemars(
+        description = "Initial context: \"fresh\" (default) or \"fork\" (seed the child with \
+            the parent's conversation). Forked children inherit the parent model and run \
+            read-only unless subagent_type is \"implementer\"; resume_from ignores this."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<SubagentContextMode>,
 
     /// Resume a previous subagent's conversation instead of starting fresh.
     ///
@@ -112,6 +161,22 @@ pub struct TaskToolInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
+    /// Optional JSON Schema (subset) the subagent's final answer must satisfy.
+    ///
+    /// The child's turn is asked to end with a single JSON value; a result that
+    /// does not validate fails the subagent instead of reaching the caller.
+    /// Supports the `type / properties / required / items / enum` subset plus
+    /// its shared keywords; unsupported keywords are rejected here so a schema
+    /// that would be silently ignored fails before any child work is spent.
+    #[schemars(
+        description = "Optional JSON Schema the subagent's final answer must match. Supported \
+            subset: type, properties, required, items, enum (plus additionalProperties, \
+            minItems/maxItems, minLength/maxLength, minimum/maximum). Unsupported keywords are \
+            rejected before spawn; when omitted the subagent returns free text."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
+
     /// Optional id of the workspace the child runs in. Accepted on the wire
     /// and ignored locally; omitted from the derived schema, so hosts that
     /// support it advertise the property themselves.
@@ -138,6 +203,12 @@ struct TaskToolInputDe {
     description: String,
     #[serde(default)]
     subagent_type: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    thoroughness: Option<Thoroughness>,
+    #[serde(default)]
+    output_schema: Option<serde_json::Value>,
     #[serde(
         default = "default_true",
         deserialize_with = "crate::serde_lenient::deserialize_lenient_bool"
@@ -145,6 +216,8 @@ struct TaskToolInputDe {
     run_in_background: bool,
     #[serde(default)]
     isolation: Option<SubagentIsolationMode>,
+    #[serde(default)]
+    context: Option<SubagentContextMode>,
     #[serde(default)]
     resume_from: Option<String>,
     #[serde(default)]
@@ -169,8 +242,12 @@ impl Serialize for TaskToolInput {
             subagent_type: self
                 .subagent_type_specified
                 .then_some(self.subagent_type.as_str()),
+            label: self.label.as_deref(),
+            thoroughness: self.thoroughness,
+            output_schema: self.output_schema.as_ref(),
             run_in_background: self.run_in_background,
             isolation: self.isolation.as_ref(),
+            context: self.context,
             resume_from: self.resume_from.as_deref(),
             cwd: self.cwd.as_deref(),
             model: self.model.as_deref(),
@@ -187,9 +264,17 @@ struct TaskToolInputSer<'a> {
     description: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     subagent_type: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thoroughness: Option<Thoroughness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_schema: Option<&'a serde_json::Value>,
     run_in_background: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     isolation: Option<&'a SubagentIsolationMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<SubagentContextMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     resume_from: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -222,9 +307,13 @@ impl From<TaskToolInputDe> for TaskToolInput {
                 .filter(|value| is_not_sentinel(value))
                 .unwrap_or_else(default_subagent_type),
             subagent_type_specified: specified,
+            label: raw.label,
+            thoroughness: raw.thoroughness,
+            output_schema: raw.output_schema,
             run_in_background: raw.run_in_background,
             capability_mode: None,
             isolation: raw.isolation,
+            context: raw.context,
             resume_from: raw.resume_from,
             cwd: raw.cwd,
             model: raw.model,
@@ -260,8 +349,147 @@ pub fn sanitize_optional_arg(value: Option<String>) -> Option<String> {
     })
 }
 
+/// Normalize a model-supplied subagent label: trim, collapse whitespace, keep
+/// at most five words and 64 characters, and drop sentinel values.
+pub fn sanitize_label(value: Option<String>) -> Option<String> {
+    let value = sanitize_optional_arg(value)?;
+    let mut label = value
+        .split_whitespace()
+        .take(5)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if label.is_empty() {
+        return None;
+    }
+    if label.chars().count() > 64 {
+        label = label.chars().take(64).collect();
+    }
+    Some(label)
+}
+
 fn default_true() -> bool {
     true
+}
+
+/// JSON Schema keywords the `task` tool's `output_schema` subset supports.
+///
+/// Anything outside this set is rejected before spawn so a schema that would
+/// be silently ignored fails fast instead of producing a result the caller
+/// cannot trust.
+const OUTPUT_SCHEMA_SUPPORTED_KEYWORDS: &[&str] = &[
+    "type",
+    "properties",
+    "required",
+    "items",
+    "enum",
+    "additionalProperties",
+    "minItems",
+    "maxItems",
+    "minLength",
+    "maxLength",
+    "minimum",
+    "maximum",
+    "description",
+    "$defs",
+    "definitions",
+    "$ref",
+];
+
+/// Validate `schema` against the supported JSON Schema subset.
+///
+/// Returns `()` for a schema the child-side contract can enforce, or a
+/// message naming the first offending path / keyword. Bare `true`/`false`
+/// schema booleans are rejected: they carry no structure worth contracting.
+pub fn validate_output_schema(schema: &serde_json::Value) -> Result<(), String> {
+    let serde_json::Value::Object(root) = schema else {
+        return Err(
+            "output_schema must be a JSON object (a JSON Schema), not a bare value".to_string(),
+        );
+    };
+    for (key, value) in root {
+        if !OUTPUT_SCHEMA_SUPPORTED_KEYWORDS.contains(&key.as_str()) {
+            return Err(format!(
+                "output_schema uses unsupported keyword \"{key}\"; supported: {}",
+                OUTPUT_SCHEMA_SUPPORTED_KEYWORDS.join(", ")
+            ));
+        }
+        match key.as_str() {
+            "type" => {
+                let Some(types) = as_type_list(value) else {
+                    return Err(
+                        "output_schema.type must be a type name or array of type names".to_string(),
+                    );
+                };
+                if types.is_empty() {
+                    return Err("output_schema.type must name at least one type".to_string());
+                }
+                for t in &types {
+                    if !matches!(
+                        t.as_str(),
+                        "object" | "array" | "string" | "number" | "integer" | "boolean" | "null"
+                    ) {
+                        return Err(format!("output_schema.type: unknown type \"{t}\""));
+                    }
+                }
+            }
+            "properties" | "$defs" | "definitions" => {
+                let Some(map) = value.as_object() else {
+                    return Err(format!("output_schema.{key} must be an object"));
+                };
+                for (name, sub) in map {
+                    validate_output_schema(sub).map_err(|e| format!("{key}.{name}: {e}"))?;
+                }
+            }
+            "items" => {
+                validate_output_schema(value).map_err(|e| format!("items: {e}"))?;
+            }
+            "additionalProperties" => {
+                if value.is_boolean() {
+                    continue;
+                }
+                validate_output_schema(value).map_err(|e| format!("additionalProperties: {e}"))?;
+            }
+            "required" => {
+                let Some(names) = value.as_array() else {
+                    return Err(
+                        "output_schema.required must be an array of property names".to_string()
+                    );
+                };
+                if names.iter().any(|n| n.as_str().is_none()) {
+                    return Err("output_schema.required must contain only strings".to_string());
+                }
+            }
+            "enum" => {
+                if !matches!(value, serde_json::Value::Array(values) if !values.is_empty()) {
+                    return Err("output_schema.enum must be a non-empty array".to_string());
+                }
+            }
+            "minItems" | "maxItems" | "minLength" | "maxLength" | "minimum" | "maximum" => {
+                if !value.is_number() {
+                    return Err(format!("output_schema.{key} must be a number"));
+                }
+            }
+            "$ref" => {
+                if value.as_str().is_none() {
+                    return Err("output_schema.$ref must be a string".to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Read `value` as one type name or an array of type names.
+fn as_type_list(value: &serde_json::Value) -> Option<Vec<String>> {
+    match value {
+        serde_json::Value::String(name) => Some(vec![name.clone()]),
+        serde_json::Value::Array(names) => names
+            .iter()
+            .map(|n| n.as_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>(),
+        _ => None,
+    }
 }
 
 /// Capability mode controlling which tool classes a child agent can use.
@@ -321,6 +549,30 @@ impl SubagentIsolationMode {
     }
 }
 
+/// Initial conversation context for a `task` spawn: an empty transcript or a
+/// copy of the parent's conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentContextMode {
+    /// Start with an empty transcript (default).
+    #[default]
+    Fresh,
+    /// Seed the child with the parent's normalized conversation. The child
+    /// inherits the parent model and runs read-only unless its type is
+    /// `implementer`.
+    Fork,
+}
+
+impl SubagentContextMode {
+    /// Canonical wire string (matches the serde `snake_case` representation).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Fork => "fork",
+        }
+    }
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // `task` (spawn) tool — Output
 // ───────────────────────────────────────────────────────────────────────────
@@ -345,6 +597,23 @@ pub struct SubagentCompletedOutput {
     /// If the subagent used a persona, the persona name to pass when resuming.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persona_hint: Option<String>,
+    /// Schema-validated structured result the child produced via its output
+    /// contract. `None` unless an `output_schema` was requested and the child
+    /// produced a conforming answer; when set it duplicates the JSON document
+    /// carried in `output` so programmatic consumers can destructure it
+    /// without parsing prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured: Option<serde_json::Value>,
+    /// Why the subagent's turn ended: `end_turn`, `max_turns`, `cancelled`,
+    /// `no_structured_result`, or `error`. Empty string when the coordinator
+    /// did not stamp it (older callers); treat that as `end_turn` on success.
+    #[serde(default)]
+    pub stop_reason: String,
+    /// True when the child stopped before finishing its task (max turns,
+    /// cancellation, truncation) — the result is a partial answer and
+    /// `resume_from` can continue it.
+    #[serde(default)]
+    pub partial: bool,
 }
 
 impl SubagentCompletedOutput {
@@ -673,6 +942,21 @@ pub fn format_subagent_completed(
          tool_calls={tool_calls}, turns={turns}, duration_ms={duration_ms}</subagent_meta>\n\n\
          {footer}"
     )
+}
+
+/// Canonical `stop_reason` values for [`SubagentCompletedOutput`].
+pub mod stop_reason {
+    /// The child finished its turn normally.
+    pub const END_TURN: &str = "end_turn";
+    /// The child hit its turn limit; the result is partial and resumable.
+    pub const MAX_TURNS: &str = "max_turns";
+    /// The child was cancelled before finishing.
+    pub const CANCELLED: &str = "cancelled";
+    /// An `output_schema` was requested but the child never produced a
+    /// conforming structured answer.
+    pub const NO_STRUCTURED_RESULT: &str = "no_structured_result";
+    /// The child failed (session error, crash).
+    pub const ERROR: &str = "error";
 }
 
 /// Render a resume footer from bare fields (when [`SubagentCompletedOutput`] is
@@ -1122,8 +1406,8 @@ fn substitute_tool_placeholders(
 
 /// Prompt body for the **general-purpose** subagent.
 ///
-/// This agent has access to all tools and is used for complex search,
-/// code exploration, and multi-step research tasks.
+/// This agent has access to all tools and handles mixed research and
+/// implementation tasks.
 pub const GENERAL_PURPOSE_PROMPT: &str = "\
 Complete the assigned task directly. Do what was asked; nothing more, nothing less. \
 Report results in the format and length the task specifies; otherwise give a clear, \
@@ -1132,19 +1416,24 @@ complete writeup.
 Strengths:
 - Searching across large codebases for code, configurations, and patterns
 - Multi-file analysis and architecture investigation
-- Multi-step research requiring exploration of many files
+- Multi-step research and implementation
 
 Guidelines:\
 ${%- if tools.by_kind.search and tools.by_kind.list %}
 - Use ${{ tools.by_kind.search }} or ${{ tools.by_kind.list }} for broad searches; ${{ tools.by_kind.read }} for known paths.\
 ${%- endif %}
 - Start broad and narrow down. Try multiple search strategies.
-- Be thorough: check multiple locations, consider different naming conventions.\
+- Read the relevant code before changing it. Match existing patterns and conventions.\
 ${%- if tools.by_kind.edit %}
+- Keep diffs minimal and scoped to the request.
 - NEVER create files unless absolutely necessary. Prefer editing existing files.
 - NEVER create documentation files (*.md) unless explicitly requested.\
+${%- endif %}\
+${%- if tools.by_kind.execute %}
+- After changing code, run the most relevant tests, build, or linter. Fix failures caused by your change.
+- Report the exact commands and their outcomes in your final response.\
 ${%- endif %}
-- Return absolute file paths and relevant code snippets in your final response.
+- Return absolute file paths in your final response, plus what changed and how it was verified.
 
 Workspace boundary:
 - Default scope is the workspace in <user_info>. Stay within it unless told otherwise.
@@ -1171,13 +1460,48 @@ Strengths:
 
 Guidelines:
 - Use ${{ tools.by_kind.list }} for file pattern matching, ${{ tools.by_kind.search }} for content search, ${{ tools.by_kind.read }} for known paths.
-- Adapt search approach based on the thoroughness level specified by the caller.
+- Scale your search effort to the thoroughness level stated at the start of your prompt: \
+`quick` covers the obvious matches, `medium` checks nearby call sites and conventions, \
+`very_thorough` traces every relevant path and reports edge cases.
 - Return absolute file paths in your final response.
 - Maximize parallel tool calls for speed.
 
 Workspace boundary:
 - Your default search scope is the workspace in <user_info>. Do not search outside it unless asked.
 - If not found in the workspace, report that rather than broadening scope.";
+
+/// Prompt body for the **implementer** subagent.
+///
+/// A write-capable agent that makes the requested code change and verifies it.
+pub const IMPLEMENTER_PROMPT: &str = "\
+You are an implementation agent. Make the requested code change, keep it minimal, \
+and verify it before reporting back.
+
+=== WRITE MODE ===
+You may edit files and run commands. Stay within the assigned workspace.
+
+Process:
+1. **Understand** the requested change and locate the relevant code.
+2. **Read before editing**: inspect the current implementation, call sites, and tests.
+3. **Implement** the smallest coherent diff that satisfies the request.\
+${%- if tools.by_kind.edit %}
+Use ${{ tools.by_kind.edit }} for changes; use ${{ tools.by_kind.read }}, \
+${{ tools.by_kind.search }}, and ${{ tools.by_kind.list }} to investigate.\
+${%- endif %}\
+${%- if tools.by_kind.execute %}
+4. **Verify**: run the most relevant tests, build, or linter with ${{ tools.by_kind.execute }}. \
+Fix failures caused by your change; report pre-existing failures as such.\
+${%- endif %}
+
+Rules:
+- Do not add features, refactors, or files beyond what the task requires.
+- NEVER create documentation files (*.md) unless explicitly requested.
+- If blocked, report what you tried and the exact failure.
+- Final response: changed file paths, what changed and why, exact verification commands, \
+and any remaining risks.
+
+Workspace boundary:
+- Default scope is the workspace in <user_info>. Stay within it unless told otherwise.";
 
 /// Prompt body for the **plan** subagent.
 ///
@@ -1217,7 +1541,7 @@ Workspace boundary:
 /// The **general-purpose** built-in subagent.
 pub const GENERAL_PURPOSE_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
     name: "general-purpose",
-    description: "General purpose agent for multi-step tasks.",
+    description: "Mixed research and implementation agent for multi-step tasks.",
     tools_template: "Has access to: \
          ${{ tools.by_kind.execute }}, ${{ tools.by_kind.read }}, ${{ tools.by_kind.edit }}, \
          ${{ tools.by_kind.list }}, ${{ tools.by_kind.search }}, ${{ tools.by_kind.web_search }}, \
@@ -1246,9 +1570,24 @@ pub const PLAN_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
     prompt_template: PLAN_PROMPT,
 };
 
+/// The **implementer** built-in subagent.
+pub const IMPLEMENTER_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
+    name: "implementer",
+    description: "Implementation agent that edits code and runs tests to verify the change.",
+    tools_template: "Has access to: \
+         ${{ tools.by_kind.execute }}, ${{ tools.by_kind.read }}, ${{ tools.by_kind.edit }}, \
+         ${{ tools.by_kind.list }}, ${{ tools.by_kind.search }}, \
+         ${{ tools.by_kind.web_search }}, and ${{ tools.by_kind.plan }}.",
+    prompt_template: IMPLEMENTER_PROMPT,
+};
+
 /// The built-in subagent types advertised to the model, in display order.
-pub const BUILTIN_SUBAGENTS: [BuiltinSubagent; 3] =
-    [GENERAL_PURPOSE_SUBAGENT, EXPLORE_SUBAGENT, PLAN_SUBAGENT];
+pub const BUILTIN_SUBAGENTS: [BuiltinSubagent; 4] = [
+    GENERAL_PURPOSE_SUBAGENT,
+    EXPLORE_SUBAGENT,
+    PLAN_SUBAGENT,
+    IMPLEMENTER_SUBAGENT,
+];
 
 /// Tool-access fragment for a subagent type whose toolset the host resolved at build time, in the
 /// same voice as the `tools_template` fragments: `Has access to: a, b, and c.` or, when `read_only`,
@@ -1607,15 +1946,39 @@ mod tests {
     }
 
     #[test]
+    fn task_tool_input_thoroughness_round_trips_and_omits_when_absent() {
+        let parsed: TaskToolInput = serde_json::from_str(
+            r#"{"description": "d", "prompt": "p", "thoroughness": "very_thorough"}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.thoroughness, Some(Thoroughness::VeryThorough));
+        let json = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(
+            json.get("thoroughness").and_then(|v| v.as_str()),
+            Some("very_thorough")
+        );
+
+        let omitted: TaskToolInput =
+            serde_json::from_str(r#"{"description": "d", "prompt": "p"}"#).unwrap();
+        assert_eq!(omitted.thoroughness, None);
+        let json = serde_json::to_value(&omitted).unwrap();
+        assert!(json.get("thoroughness").is_none());
+    }
+
+    #[test]
     fn task_tool_input_model_none_skips_serialize() {
         let input = TaskToolInput {
             prompt: "p".into(),
             description: "d".into(),
             subagent_type: "explore".into(),
             subagent_type_specified: true,
+            label: None,
+            thoroughness: None,
+            output_schema: None,
             run_in_background: false,
             capability_mode: None,
             isolation: None,
+            context: None,
             resume_from: None,
             cwd: None,
             model: None,
@@ -1840,7 +2203,7 @@ mod tests {
     fn builtin_subagent_catalog_names_and_descriptor_conversion() {
         assert_eq!(
             BUILTIN_SUBAGENTS.map(|b| b.name),
-            ["general-purpose", "explore", "plan"]
+            ["general-purpose", "explore", "plan", "implementer"]
         );
 
         let desc = EXPLORE_SUBAGENT.to_descriptor(&plain_tool_naming());
@@ -1872,6 +2235,10 @@ mod tests {
             builtin_subagent_by_name("plan").map(|b| b.prompt_template),
             Some(PLAN_PROMPT)
         );
+        assert_eq!(
+            builtin_subagent_by_name("implementer").map(|b| b.prompt_template),
+            Some(IMPLEMENTER_PROMPT)
+        );
         assert!(builtin_subagent_by_name("code-reviewer").is_none());
     }
 
@@ -1893,6 +2260,8 @@ mod tests {
         assert!(EXPLORE_PROMPT.contains("=== READ-ONLY MODE ==="));
         assert!(PLAN_PROMPT.contains("=== READ-ONLY MODE ==="));
         assert!(!GENERAL_PURPOSE_PROMPT.contains("READ-ONLY"));
+        assert!(!IMPLEMENTER_PROMPT.contains("READ-ONLY"));
+        assert!(IMPLEMENTER_PROMPT.contains("=== WRITE MODE ==="));
     }
 
     #[cfg(feature = "prompt-render")]
@@ -2411,5 +2780,135 @@ mod tests {
             "review",
             "review the diff",
         ));
+    }
+
+    #[test]
+    fn validate_output_schema_accepts_supported_subset() {
+        validate_output_schema(&serde_json::json!({
+            "type": "object",
+            "properties": {
+                "files": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1}
+                },
+                "count": {"type": "integer", "minimum": 0}
+            },
+            "required": ["files"],
+            "additionalProperties": false
+        }))
+        .expect("supported subset must pass");
+
+        validate_output_schema(&serde_json::json!({
+            "type": ["string", "null"],
+            "enum": ["a", "b"]
+        }))
+        .expect("type list + enum must pass");
+
+        validate_output_schema(&serde_json::json!({
+            "type": "object",
+            "$defs": {"name": {"type": "string", "maxLength": 8}},
+            "properties": {"who": {"$ref": "#/$defs/name"}}
+        }))
+        .expect("defs and ref must pass");
+    }
+
+    #[test]
+    fn validate_output_schema_rejects_unsupported_and_malformed() {
+        for (schema, needle) in [
+            (
+                serde_json::json!({"type": "object", "patternProperties": {"^x": {}}}),
+                "patternProperties",
+            ),
+            (serde_json::json!({"allOf": []}), "allOf"),
+            (serde_json::json!({"type": "object", "oneOf": []}), "oneOf"),
+            (serde_json::json!(true), "must be a JSON object"),
+            (serde_json::json!({"type": "widget"}), "unknown type"),
+            (serde_json::json!({"required": "files"}), "must be an array"),
+            (serde_json::json!({"enum": []}), "non-empty"),
+            (
+                serde_json::json!({"properties": {"a": {"minLength": "x"}}}),
+                "must be a number",
+            ),
+        ] {
+            let err =
+                validate_output_schema(&schema).expect_err("unsupported schema must be rejected");
+            assert!(err.contains(needle), "needle {needle:?} in: {err}");
+        }
+        // Nested rejection names the path.
+        let err = validate_output_schema(&serde_json::json!({
+            "properties": {"a": {"not": []}}
+        }))
+        .expect_err("nested keyword must be rejected");
+        assert!(err.contains("properties.a"), "path in: {err}");
+    }
+
+    #[test]
+    fn task_tool_input_output_schema_round_trips_and_omits_when_absent() {
+        let parsed: TaskToolInput = serde_json::from_str(
+            r#"{"description":"d","prompt":"p","output_schema":{"type":"object","required":["ok"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.output_schema.as_ref().and_then(|s| s.get("type")),
+            Some(&serde_json::json!("object"))
+        );
+        let json = serde_json::to_value(&parsed).unwrap();
+        assert!(json.get("output_schema").is_some());
+
+        let omitted: TaskToolInput =
+            serde_json::from_str(r#"{"description":"d","prompt":"p"}"#).unwrap();
+        assert_eq!(omitted.output_schema, None);
+        let json = serde_json::to_value(&omitted).unwrap();
+        assert!(json.get("output_schema").is_none());
+    }
+
+    #[test]
+    fn task_tool_input_schema_advertises_output_schema() {
+        let schema = serde_json::to_value(schemars::schema_for!(TaskToolInput)).unwrap();
+        let description = schema["properties"]["output_schema"]["description"]
+            .as_str()
+            .expect("output_schema must be an advertised, described property");
+        assert!(description.contains("JSON Schema"));
+    }
+
+    #[test]
+    fn subagent_completed_output_serializes_new_fields_conditionally() {
+        let base = SubagentCompletedOutput {
+            output: "done".into(),
+            subagent_id: "sa-1".into(),
+            subagent_type: "explore".into(),
+            tool_calls: 1,
+            turns: 1,
+            duration_ms: 10,
+            worktree_path: None,
+            persona: None,
+            resume_from_hint: "sa-1".into(),
+            persona_hint: None,
+            structured: None,
+            stop_reason: super::stop_reason::END_TURN.to_owned(),
+            partial: false,
+        };
+        let json = serde_json::to_value(&base).unwrap();
+        assert!(json.get("structured").is_none());
+        assert_eq!(
+            json.get("stop_reason").and_then(|v| v.as_str()),
+            Some("end_turn")
+        );
+        assert_eq!(json.get("partial").and_then(|v| v.as_bool()), Some(false));
+
+        let structured = SubagentCompletedOutput {
+            structured: Some(serde_json::json!({"files": ["a.rs"]})),
+            stop_reason: super::stop_reason::NO_STRUCTURED_RESULT.to_owned(),
+            partial: true,
+            ..base
+        };
+        let json = serde_json::to_value(&structured).unwrap();
+        assert_eq!(
+            json.get("structured").cloned(),
+            Some(serde_json::json!({"files": ["a.rs"]}))
+        );
+        assert_eq!(json.get("partial").and_then(|v| v.as_bool()), Some(true));
+        // Old clients can still read the prose result.
+        assert_eq!(json.get("output").and_then(|v| v.as_str()), Some("done"));
     }
 }

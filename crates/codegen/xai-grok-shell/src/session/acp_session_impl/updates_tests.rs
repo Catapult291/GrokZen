@@ -22,6 +22,7 @@ fn spawned(
     resumed_from: Option<&str>,
 ) -> XaiSessionUpdate {
     XaiSessionUpdate::SubagentSpawned {
+        label: None,
         subagent_id: subagent_id.to_owned(),
         attempt_id: attempt_id.map(str::to_owned),
         parent_session_id: "test-actor".to_owned(),

@@ -96,6 +96,7 @@ pub(super) fn recap_block(text: &str) -> RenderBlock {
 pub(super) fn make_subagent_info(child_sid: &str) -> SubagentInfo {
     let now = Instant::now();
     SubagentInfo {
+        label: None,
         subagent_id: Arc::from(format!("sa-{child_sid}")),
         child_session_id: Arc::from(child_sid),
         description: Arc::from("test"),
@@ -1450,6 +1451,7 @@ pub(super) fn test_subagent_spawned_for_workflow(
     workflow_run_id: Option<String>,
 ) -> XaiSessionUpdate {
     XaiSessionUpdate::SubagentSpawned {
+        label: None,
         subagent_id: child_sid.into(),
         attempt_id: Some("at1.one".into()),
         parent_session_id: parent_sid.into(),

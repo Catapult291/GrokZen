@@ -1,14 +1,16 @@
 use super::*;
-use crate::implementations::grok_build::task::admission::{LimitBehavior, SubagentLimits};
+use crate::implementations::grok_build::task::admission::{
+    DEFAULT_MAX_CONCURRENT, LimitBehavior, SubagentLimits,
+};
 use crate::implementations::grok_build::task::backend::{ChannelBackend, SubagentBackend};
 use crate::implementations::grok_build::task::types::{
     ActiveAgentMessageDelivery, ActiveAgentMessageOperation, ActiveAgentMessageOutcome,
     ActiveAgentMessageRequest, ActiveAgentMessageSource, ActiveMessageTarget, AgentMessageSender,
-    HandedOffForegroundSubagent, SubagentCancelRequest, SubagentClearUsageNotAppliedRequest,
-    SubagentCompletionsRequest, SubagentListActiveRequest, SubagentLoopUnitActiveRequest,
-    SubagentMarkUsageNotAppliedRequest, SubagentOutstandingReply, SubagentOutstandingRequest,
-    SubagentOwner, SubagentRegistryCounts, SubagentRequest, SubagentSnapshotStatus,
-    SubagentWaitPromptDrainedRequest,
+    HandedOffForegroundSubagent, SubagentAgentStatus, SubagentCancelRequest,
+    SubagentClearUsageNotAppliedRequest, SubagentCompletionsRequest, SubagentListActiveRequest,
+    SubagentLoopUnitActiveRequest, SubagentMarkUsageNotAppliedRequest, SubagentOutstandingReply,
+    SubagentOutstandingRequest, SubagentOwner, SubagentRegistryCounts, SubagentRequest,
+    SubagentSnapshotStatus, SubagentWaitPromptDrainedRequest,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -35,6 +37,7 @@ impl ChildControl for TestControl {
             tokens_used: 100,
             context_window_tokens: 1_000,
             context_usage_pct: 10,
+            current_tool: Some("read_file".to_owned()),
             tools_used: vec!["read_file".to_owned()],
             error_count: 0,
         })
@@ -117,6 +120,7 @@ struct TestRunner {
     /// `(id, spawner_session_id)` as handed to the runner.
     advertise_targets: mpsc::UnboundedSender<(String, Option<String>)>,
     wake_runs: mpsc::UnboundedSender<WakeRun>,
+    sibling_rosters: mpsc::UnboundedSender<Vec<SubagentRosterEntry>>,
     admitted_messages: Option<mpsc::UnboundedSender<(ActiveAgentMessageOperation, String)>>,
     admission_gate: Option<AdmissionGate>,
 }
@@ -147,6 +151,7 @@ impl ChildRunner for TestRunner {
         let queue_waits = self.queue_waits.clone();
         let advertise_targets = self.advertise_targets.clone();
         let wake_runs = self.wake_runs.clone();
+        let sibling_rosters = self.sibling_rosters.clone();
         let admitted_messages = self.admitted_messages.clone();
         let admission_gate = self.admission_gate.clone();
         let failed_wake_teardown_ready = self.failed_wake_teardown_ready.clone();
@@ -163,7 +168,9 @@ impl ChildRunner for TestRunner {
                 session_running,
                 agent_address: _,
                 spawner_session_id,
+                sibling_roster,
             } = run;
+            let _ = sibling_rosters.send(sibling_roster);
             let (wake_agent_id, wake_message_source, wake_message_id) = match wake_origin {
                 Some(origin) => (
                     Some(origin.agent_id),
@@ -399,6 +406,7 @@ pub(in crate::implementations::grok_build::task::coordinator) fn request(
     background: bool,
 ) -> SubagentRequest {
     SubagentRequest {
+        label: None,
         id: id.to_owned(),
         prompt: "work".to_owned(),
         description: "test child".to_owned(),
@@ -445,6 +453,8 @@ pub(in crate::implementations::grok_build::task::coordinator) struct Harness {
         mpsc::UnboundedReceiver<(String, Option<String>)>,
     pub(in crate::implementations::grok_build::task::coordinator) wake_runs:
         mpsc::UnboundedReceiver<WakeRun>,
+    pub(in crate::implementations::grok_build::task::coordinator) sibling_rosters:
+        mpsc::UnboundedReceiver<Vec<SubagentRosterEntry>>,
     pub(in crate::implementations::grok_build::task::coordinator) admitted_messages:
         mpsc::UnboundedReceiver<(ActiveAgentMessageOperation, String)>,
     pub(in crate::implementations::grok_build::task::coordinator) actor: tokio::task::JoinHandle<()>,
@@ -493,6 +503,7 @@ pub(in crate::implementations::grok_build::task::coordinator) fn harness_with_op
     let (queue_wait_tx, queue_waits) = mpsc::unbounded_channel();
     let (advertise_tx, advertise_targets) = mpsc::unbounded_channel();
     let (wake_run_tx, wake_runs) = mpsc::unbounded_channel();
+    let (sibling_roster_tx, sibling_rosters) = mpsc::unbounded_channel();
     let (admitted_message_tx, admitted_messages) = mpsc::unbounded_channel();
     let actor = tokio::spawn(
         SubagentCoordinator::from_channel(
@@ -511,6 +522,7 @@ pub(in crate::implementations::grok_build::task::coordinator) fn harness_with_op
                 queue_waits: queue_wait_tx,
                 advertise_targets: advertise_tx,
                 wake_runs: wake_run_tx,
+                sibling_rosters: sibling_roster_tx,
                 admitted_messages: Some(admitted_message_tx),
                 admission_gate: None,
             },
@@ -535,6 +547,7 @@ pub(in crate::implementations::grok_build::task::coordinator) fn harness_with_op
         queue_waits,
         advertise_targets,
         wake_runs,
+        sibling_rosters,
         admitted_messages,
         actor,
     }
@@ -570,6 +583,7 @@ fn harness_with_admission_gate(
         entered: entered_tx,
         release: admission_release.clone(),
     };
+    let (sibling_roster_tx, sibling_rosters) = mpsc::unbounded_channel();
     let actor = tokio::spawn(
         SubagentCoordinator::from_channel(
             command_rx,
@@ -590,6 +604,7 @@ fn harness_with_admission_gate(
                 queue_waits: queue_wait_tx,
                 advertise_targets: advertise_tx,
                 wake_runs: wake_run_tx,
+                sibling_rosters: sibling_roster_tx,
                 admitted_messages: Some(admitted_message_tx),
                 admission_gate: Some(gate),
             },
@@ -612,6 +627,7 @@ fn harness_with_admission_gate(
             queue_waits,
             advertise_targets,
             wake_runs,
+            sibling_rosters,
             admitted_messages,
             actor,
         },
@@ -672,6 +688,103 @@ async fn active_message_on_owned_pending_admits_after_promotion() {
         ActiveAgentMessageOutcome::Unsupported,
         "promotion must run the active admission path"
     );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn list_agents_reports_running_queued_and_ready_with_labels() {
+    let mut harness = harness_with_config(
+        false,
+        CoordinatorConfig {
+            limits: SubagentLimits {
+                max_concurrent: 1,
+                max_total_agents: 8,
+                behavior: LimitBehavior::Queue,
+            },
+            ..CoordinatorConfig::default()
+        },
+    );
+    let backend = parent_backend(&harness);
+
+    let mut first = request("first", true);
+    first.label = Some("alpha".to_owned());
+    let (registered, _first_spawn) = spawn_noting_registration(backend.clone(), first);
+    registered.await.expect("background registration");
+    assert_eq!(harness.started.recv().await.as_deref(), Some("first"));
+    let _ = harness.requests.recv().await;
+
+    let mut second = request("second", true);
+    second.label = Some("beta".to_owned());
+    let (registered, _second_spawn) = spawn_noting_registration(backend.clone(), second);
+    registered.await.expect("background registration");
+
+    let entries = backend.list_agents("parent", true, None, 50).await;
+    assert_eq!(entries.len(), 2);
+    let running = entries
+        .iter()
+        .find(|entry| entry.id == "first")
+        .expect("running entry");
+    assert_eq!(running.label.as_deref(), Some("alpha"));
+    assert_eq!(running.status, SubagentAgentStatus::Running);
+    assert_eq!(running.model.as_deref(), Some("test-model"));
+    assert_eq!(running.parent_id, "parent");
+    assert_eq!(running.depth, 1);
+    assert_eq!(running.tokens_in, 100);
+    assert_eq!(running.context_pct, 10);
+    assert_eq!(running.current_tool.as_deref(), Some("read_file"));
+
+    let queued = entries
+        .iter()
+        .find(|entry| entry.id == "second")
+        .expect("queued entry");
+    assert_eq!(queued.label.as_deref(), Some("beta"));
+    assert_eq!(queued.status, SubagentAgentStatus::Queued);
+    assert_eq!(queued.queue_position, Some(1));
+
+    harness
+        .finish_one
+        .send("first".to_owned())
+        .expect("finish first");
+    let _ = harness.completions.recv().await;
+
+    let entries = backend.list_agents("parent", true, None, 50).await;
+    let ready = entries
+        .iter()
+        .find(|entry| entry.id == "first")
+        .expect("finished entry");
+    assert_eq!(ready.status, SubagentAgentStatus::Ready);
+    assert!(ready.resumable);
+
+    let live_only = backend.list_agents("parent", false, None, 50).await;
+    assert!(
+        live_only.iter().all(|entry| entry.id != "first"),
+        "include_finished=false must drop finished rows"
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn list_agents_limits_to_the_requested_subtree() {
+    let mut harness = harness(false, std::time::Duration::from_secs(5));
+    let backend = parent_backend(&harness);
+
+    let (registered, _spawn) = spawn_noting_registration(backend.clone(), request("nested", true));
+    registered.await.expect("background registration");
+    assert_eq!(harness.started.recv().await.as_deref(), Some("nested"));
+    let _ = harness.requests.recv().await;
+
+    let entries = backend
+        .list_agents("parent", true, Some("nested"), 50)
+        .await;
+    assert!(
+        entries.is_empty(),
+        "a subtree lookup lists descendants, not the root itself"
+    );
+
+    let foreign = backend
+        .list_agents("parent", true, Some("unknown-parent"), 50)
+        .await;
+    assert!(foreign.is_empty());
     harness.actor.abort();
 }
 
@@ -3723,10 +3836,17 @@ async fn session_backend_cannot_query_or_cancel_foreign_child() {
 
 #[tokio::test]
 async fn completed_cache_evicts_oldest_entry_at_cap() {
+    // The eviction walk intentionally spawns past the default total budget;
+    // max_total_agents is constructor-set, so lift it for this test.
     let mut harness = harness_with_config(
         false,
         CoordinatorConfig {
             foreground_budget: std::time::Duration::from_secs(60),
+            limits: SubagentLimits {
+                max_concurrent: DEFAULT_MAX_CONCURRENT,
+                max_total_agents: usize::MAX,
+                behavior: LimitBehavior::Queue,
+            },
             ..CoordinatorConfig::default()
         },
     );
@@ -3774,6 +3894,7 @@ pub(in crate::implementations::grok_build::task::coordinator) fn limited(
     CoordinatorConfig {
         limits: SubagentLimits {
             max_concurrent,
+            max_total_agents: 8,
             behavior,
         },
         ..CoordinatorConfig::default()
@@ -4164,6 +4285,7 @@ async fn a_queued_spawn_auto_backgrounds_its_caller_at_the_await_budget() {
             limits: SubagentLimits {
                 max_concurrent: 1,
                 behavior: LimitBehavior::Queue,
+                max_total_agents: 8,
             },
             ..CoordinatorConfig::default()
         },
@@ -4262,6 +4384,7 @@ async fn a_dequeued_spawn_keeps_spending_its_enqueue_await_budget() {
             limits: SubagentLimits {
                 max_concurrent: 1,
                 behavior: LimitBehavior::Queue,
+                max_total_agents: 8,
             },
             ..CoordinatorConfig::default()
         },
@@ -4491,6 +4614,141 @@ async fn workflow_spawns_bypass_the_session_concurrent_limit() {
             .expect("join")
             .expect("spawn round-trips")
             .success
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn accepted_spawn_emits_the_stage0_structured_debug_line() {
+    use crate::implementations::grok_build::task::types::test_capture;
+
+    let captured = test_capture::capture();
+    let mut harness = harness(true, std::time::Duration::from_secs(5));
+    let backend = parent_backend(&harness);
+    let mut child = request("logged-child", true);
+    child.prompt = "abcd".to_owned();
+    child.subagent_type = "general-purpose".to_owned();
+    child.fork_context = true;
+    child.runtime_overrides.model = Some("model-a".to_owned());
+    child.runtime_overrides.reasoning_effort = Some("high".to_owned());
+
+    let (registered, _spawn) = spawn_noting_registration(backend, child);
+    registered.await.expect("background registration");
+    harness
+        .requests
+        .recv()
+        .await
+        .expect("runner received child");
+    let _ = harness.start.send(());
+    harness.actor.abort();
+
+    let mut events_rx = captured.events_rx;
+    let mut saw_spawn_line = false;
+    while let Ok(event) = events_rx.try_recv() {
+        if event.level == tracing::Level::DEBUG
+            && event.fields.contains("subagent spawn accepted")
+            && event.fields.contains("subagent_id=logged-child")
+            && event.fields.contains("subagent_type=general-purpose")
+            && event.fields.contains("context=fork")
+            && event.fields.contains("depth=1")
+            && event.fields.contains("background=true")
+            && event.fields.contains("prompt_bytes=4")
+            && event.fields.contains("model=model-a")
+            && event.fields.contains("effort=high")
+        {
+            saw_spawn_line = true;
+            break;
+        }
+    }
+    assert!(
+        saw_spawn_line,
+        "an accepted spawn must emit the structured baseline line"
+    );
+}
+
+#[tokio::test]
+async fn spawn_hands_the_runner_labeled_sibling_roster_for_same_parent() {
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let backend = parent_backend(&harness);
+
+    // First child carries a label and stays running, so it should appear in
+    // the second child's roster. An unlabeled sibling and a workflow child on
+    // the same session must stay out.
+    let mut labeled = request("labeled", true);
+    labeled.label = Some("auth-research".to_owned());
+    let unlabeled = request("unlabeled", true);
+    let mut workflow = request("workflow-child", true);
+    workflow.owner = SubagentOwner::workflow("run-roster");
+
+    for child in [&labeled, &unlabeled, &workflow] {
+        let (registered, _spawn) = spawn_noting_registration(backend.clone(), child.clone());
+        registered.await.expect("background registration");
+    }
+    for id in ["labeled", "unlabeled", "workflow-child"] {
+        harness
+            .requests
+            .recv()
+            .await
+            .unwrap_or_else(|| panic!("{id} reached the runner"));
+    }
+    // Drain rosters emitted by the first three spawns before the target spawn.
+    while harness.sibling_rosters.try_recv().is_ok() {}
+
+    let (registered, _spawn) = spawn_noting_registration(backend, request("target", true));
+    registered.await.expect("background registration");
+    harness
+        .requests
+        .recv()
+        .await
+        .expect("target reached the runner");
+
+    let roster = harness
+        .sibling_rosters
+        .recv()
+        .await
+        .expect("runner received the target's roster");
+    assert_eq!(
+        vec![SubagentRosterEntry {
+            id: "labeled".to_owned(),
+            label: "auth-research".to_owned(),
+            subagent_type: "explore".to_owned(),
+        }],
+        roster
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn sibling_roster_hides_siblings_of_other_sessions() {
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let parent = parent_backend(&harness);
+    let mut foreign = request("foreign", true);
+    foreign.parent_session_id = "other-session".to_owned();
+    let (registered, _spawn) = spawn_noting_registration(parent.clone(), foreign);
+    registered.await.expect("background registration");
+    harness
+        .requests
+        .recv()
+        .await
+        .expect("foreign child reached the runner");
+    while harness.sibling_rosters.try_recv().is_ok() {}
+
+    let (registered, _spawn) = spawn_noting_registration(parent, request("target", true));
+    registered.await.expect("background registration");
+    harness
+        .requests
+        .recv()
+        .await
+        .expect("target reached the runner");
+
+    let roster = harness
+        .sibling_rosters
+        .recv()
+        .await
+        .expect("runner received the target's roster");
+    assert!(
+        roster.is_empty(),
+        "another session's child must stay out: {roster:?}"
     );
     harness.actor.abort();
 }
