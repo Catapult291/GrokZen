@@ -183,6 +183,8 @@ pub(crate) struct SubagentSpawnContext {
     pub subagent_event_tx: mpsc::UnboundedSender<SubagentEvent>,
     pub parent_depth: u32,
     pub subagents_max_depth: u32,
+    /// Base commit for a freshly created isolated subagent worktree.
+    pub subagent_worktree_base: crate::config::SubagentWorktreeBase,
     pub workflow_max_concurrent_agents: usize,
     pub media_gen_batch_limits: xai_grok_tools::media_gen_limits::MediaGenBatchLimits,
     /// Inference idle timeout (secs), resolved from the parent's model config at spawn-context creation time.
@@ -1668,6 +1670,41 @@ fn parent_source_cwd(ctx: &SubagentSpawnContext) -> std::path::PathBuf {
         .map(|i| std::path::PathBuf::from(&i.cwd))
         .unwrap_or_else(|| std::path::PathBuf::from(&ctx.parent_cwd))
 }
+/// Checkout target for a freshly created isolated subagent worktree.
+///
+/// `Head` leaves the builder on its default (the source's `HEAD`).
+/// `DefaultBranch` resolves the repository's default branch to a commit SHA:
+/// a branch name would fail when that branch is already checked out in the source worktree.
+pub(crate) async fn resolve_worktree_base_ref(
+    base: crate::config::SubagentWorktreeBase,
+    source_cwd: &std::path::Path,
+) -> Option<String> {
+    if base != crate::config::SubagentWorktreeBase::DefaultBranch {
+        return None;
+    }
+    let info = xai_grok_workspace::session::git::git_info(source_cwd)
+        .await
+        .ok()?;
+    let branch = info.default_branch?;
+    for reference in [
+        format!("refs/remotes/origin/{branch}"),
+        format!("refs/heads/{branch}"),
+    ] {
+        if let Ok(sha) =
+            xai_grok_workspace::session::git::git_cli(source_cwd, &["rev-parse", &reference]).await
+        {
+            let sha = sha.trim();
+            if !sha.is_empty() {
+                return Some(sha.to_owned());
+            }
+        }
+    }
+    tracing::warn!(
+        branch,
+        "subagent worktree_base=default_branch resolved no commit; using the source HEAD"
+    );
+    None
+}
 /// Effective permission mode for a spawned subagent. Plugin agents never honor a non-default mode. Under the pin, `bypassPermissions` downgrades to `Default` so a repo/profile/`--agents` def can't restore auto-approve.
 /// Caller logs it.
 fn resolve_subagent_permission_mode(
@@ -2283,6 +2320,29 @@ fn update_subagent_meta_snapshot_ref(dir: &Path, snapshot_ref: &str, status: &st
     meta.status = status.to_string();
     write_subagent_meta(dir, &meta)
 }
+/// Drop the persisted worktree pointer after an unchanged worktree was removed,
+/// so a later resume falls back to the shared workspace instead of chasing a
+/// directory that no longer exists.
+fn update_subagent_meta_worktree_removed(dir: &Path, status: &str) -> bool {
+    let meta_path = dir.join("meta.json");
+    let mut meta = match std::fs::read_to_string(&meta_path)
+        .ok()
+        .and_then(|data| serde_json::from_str::<SubagentMeta>(&data).ok())
+    {
+        Some(meta) => meta,
+        None => {
+            tracing::warn!(
+                path = %meta_path.display(),
+                "failed to read subagent meta; removed worktree pointer not cleared"
+            );
+            return false;
+        }
+    };
+    meta.worktree_path = None;
+    meta.status = status.to_string();
+    write_subagent_meta(dir, &meta)
+}
+
 #[must_use]
 fn persist_subagent_output(dir: &Path, result: &SubagentResult) -> Option<PathBuf> {
     (result.success && !result.output.is_empty() && write_subagent_output(dir, &result.output))

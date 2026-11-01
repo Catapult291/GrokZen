@@ -1158,6 +1158,37 @@ fn subagents_max_depth_invalid_env_falls_through() {
         );
 }
 #[test]
+fn subagent_worktree_base_defaults_to_head() {
+    assert_eq!(
+        SubagentWorktreeBase::resolve(None, None),
+        SubagentWorktreeBase::Head
+    );
+    assert_eq!(SubagentWorktreeBase::Head.as_str(), "head");
+}
+#[test]
+fn subagent_worktree_base_env_beats_toml_and_accepts_aliases() {
+    assert_eq!(
+        SubagentWorktreeBase::resolve(Some("default-branch"), Some("head")),
+        SubagentWorktreeBase::DefaultBranch
+    );
+    assert_eq!(
+        SubagentWorktreeBase::resolve(None, Some("DEFAULT_BRANCH")),
+        SubagentWorktreeBase::DefaultBranch
+    );
+    assert_eq!(SubagentWorktreeBase::DefaultBranch.as_str(), "default_branch");
+}
+#[test]
+fn subagent_worktree_base_unknown_value_falls_through() {
+    assert_eq!(
+        SubagentWorktreeBase::resolve(Some("trunk"), Some("head")),
+        SubagentWorktreeBase::Head
+    );
+    assert_eq!(
+        SubagentWorktreeBase::resolve(None, Some("trunk")),
+        SubagentWorktreeBase::Head
+    );
+}
+#[test]
 #[serial_test::serial]
 fn subagents_config_parses_max_depth_from_toml() {
     without_grok_subagents(|| {

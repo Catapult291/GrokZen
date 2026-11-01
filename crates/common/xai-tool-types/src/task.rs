@@ -623,7 +623,8 @@ impl SubagentCompletedOutput {
     }
 
     /// Render the full model-facing completion block: the answer text, the
-    /// `<subagent_meta>` line, and the `<subagent_result>` resume footer.
+    /// `<subagent_meta>` line, the kept-worktree block, and the
+    /// `<subagent_result>` resume footer.
     pub fn to_model_text(&self) -> String {
         format_subagent_completed(
             &self.output,
@@ -632,8 +633,26 @@ impl SubagentCompletedOutput {
             self.turns,
             self.duration_ms,
             self.persona.as_deref(),
+            self.worktree_path.as_deref(),
         )
     }
+}
+
+/// Model-facing `<worktree_path>` + apply/discard pointers for a kept isolated
+/// worktree. Rendered whenever a completed subagent reports a worktree path:
+/// worktrees without changes are removed at completion, so a surviving path
+/// holds work the parent workspace does not have.
+pub fn format_worktree_block(worktree_path: &str) -> String {
+    format!(
+        "<worktree_path>{worktree_path}</worktree_path>\n\
+         <worktree_actions>\n\
+         The changes made by this subagent live in the isolated worktree above; \
+         the parent workspace does not contain them.\n\
+         apply: x.ai/git/worktree/apply with {{\"worktreePath\":\"{worktree_path}\",\"mode\":\"merge\"}} \
+         (mode \"overwrite\" replaces parent files).\n\
+         discard: x.ai/git/worktree/remove with {{\"worktreePath\":\"{worktree_path}\",\"force\":true}}.\n\
+         </worktree_actions>"
+    )
 }
 
 /// Plain-text CTA after a background-spawn notice.
@@ -926,7 +945,8 @@ pub fn format_subagent_backgrounded_on_turn_end(
 }
 
 /// Render the full model-facing completion block for a finished subagent:
-/// the answer text, a `<subagent_meta>` line carrying run stats, and the
+/// the answer text, a `<subagent_meta>` line carrying run stats, the
+/// `<worktree_path>` + apply/discard block when a worktree was kept, and the
 /// `<subagent_result>` resume footer.
 pub fn format_subagent_completed(
     output: &str,
@@ -935,11 +955,16 @@ pub fn format_subagent_completed(
     turns: u32,
     duration_ms: u64,
     persona: Option<&str>,
+    worktree_path: Option<&str>,
 ) -> String {
     let footer = format_resume_footer(subagent_id, persona);
+    let worktree = worktree_path
+        .map(|path| format!("\n\n{}", format_worktree_block(path)))
+        .unwrap_or_default();
     format!(
         "{output}\n\n<subagent_meta>id={subagent_id}, \
-         tool_calls={tool_calls}, turns={turns}, duration_ms={duration_ms}</subagent_meta>\n\n\
+         tool_calls={tool_calls}, turns={turns}, duration_ms={duration_ms}</subagent_meta>\
+         {worktree}\n\n\
          {footer}"
     )
 }
@@ -1907,6 +1932,46 @@ mod tests {
                 summary: String::new(),
             })
             .is_terminal()
+        );
+    }
+
+    #[test]
+    fn worktree_block_names_apply_and_discard_entries() {
+        let block = format_worktree_block("/tmp/wt");
+        assert!(block.contains("<worktree_path>/tmp/wt</worktree_path>"));
+        assert!(block.contains("x.ai/git/worktree/apply"));
+        assert!(block.contains("\"worktreePath\":\"/tmp/wt\""));
+        assert!(block.contains("x.ai/git/worktree/remove"));
+    }
+
+    #[test]
+    fn completed_text_includes_worktree_block_only_when_kept() {
+        let base = SubagentCompletedOutput {
+            output: "done".into(),
+            subagent_id: "id".into(),
+            subagent_type: "explore".into(),
+            tool_calls: 1,
+            turns: 1,
+            duration_ms: 5,
+            worktree_path: None,
+            persona: None,
+            resume_from_hint: "id".into(),
+            persona_hint: None,
+            structured: None,
+            stop_reason: String::new(),
+            partial: false,
+        };
+        assert!(!base.to_model_text().contains("<worktree_path>"));
+        let kept = SubagentCompletedOutput {
+            worktree_path: Some("/tmp/wt".into()),
+            ..base
+        };
+        let text = kept.to_model_text();
+        assert!(text.contains("<worktree_path>/tmp/wt</worktree_path>"));
+        assert!(text.contains("<worktree_actions>"));
+        assert!(
+            text.find("<worktree_actions>").unwrap() < text.find("<subagent_result>").unwrap(),
+            "worktree block must precede the resume footer"
         );
     }
 

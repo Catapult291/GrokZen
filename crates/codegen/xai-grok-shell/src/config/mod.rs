@@ -60,6 +60,10 @@ pub struct SubagentsConfig {
     /// Cumulative subagents one root session may create (`[subagents] max_total_agents`).
     #[serde(default)]
     pub max_total_agents: Option<i64>,
+    /// Base commit for isolated subagent worktrees: `"head"` (default) or `"default_branch"`
+    /// (`[subagents] worktree_base`).
+    #[serde(default)]
+    pub worktree_base: Option<String>,
     /// Concurrent subagent turn-sampling limit. See [`Self::resolve_sampling_limit`].
     #[serde(default)]
     pub sampling_limit: Option<i64>,
@@ -93,6 +97,7 @@ impl Default for SubagentsConfig {
             max_depth: None,
             max_concurrent: None,
             max_total_agents: None,
+            worktree_base: None,
             sampling_limit: None,
             limit_behavior: None,
             workflow_max_concurrent: None,
@@ -103,6 +108,51 @@ impl Default for SubagentsConfig {
         }
     }
 }
+/// Base commit for a subagent's isolated worktree (`[subagents] worktree_base`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SubagentWorktreeBase {
+    /// Check the source worktree out at its current `HEAD` (default).
+    #[default]
+    Head,
+    /// Check out the repository's default branch instead of the parent's `HEAD`.
+    DefaultBranch,
+}
+
+impl SubagentWorktreeBase {
+    pub const ENV: &'static str = "GROK_SUBAGENTS_WORKTREE_BASE";
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Head => "head",
+            Self::DefaultBranch => "default_branch",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "head" => Some(Self::Head),
+            "default_branch" | "default" => Some(Self::DefaultBranch),
+            _ => None,
+        }
+    }
+
+    /// Precedence: env > TOML > [`Self::Head`]. Unknown values warn and fall through.
+    pub(crate) fn resolve(env: Option<&str>, config: Option<&str>) -> Self {
+        for (source, raw) in [("env", env), ("config", config)] {
+            let Some(raw) = raw else { continue };
+            match Self::parse(raw) {
+                Some(base) => return base,
+                None => tracing::warn!(
+                    source,
+                    value = %raw,
+                    "invalid subagents worktree_base (expected \"head\" or \"default_branch\"); ignoring"
+                ),
+            }
+        }
+        Self::Head
+    }
+}
+
 impl SubagentsConfig {
     fn discover_personas_in_dir(&mut self, dir: &std::path::Path) {
         if !dir.is_dir() {

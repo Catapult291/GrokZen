@@ -730,7 +730,8 @@ pub(crate) fn terminal_subagent_result(snap: &SubagentSnapshot) -> TaskOutputRes
                 snap.subagent_id, snap.duration_ms,
             );
             if let Some(wt) = &worktree_path {
-                output.push_str(&format!("\n<worktree_path>{wt}</worktree_path>"));
+                output.push_str("\n\n");
+                output.push_str(&xai_tool_types::format_worktree_block(wt));
             }
             output.push_str("\n\n");
             output.push_str(&xai_tool_types::format_resume_footer(

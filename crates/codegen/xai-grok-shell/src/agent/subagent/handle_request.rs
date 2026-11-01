@@ -616,6 +616,7 @@ pub(crate) async fn run_shell_child(
         };
         return child_run_output(failure_result(&request, &message), completion_data, None);
     }
+    let mut worktree_base_commit: Option<String> = None;
     let worktree_path = if let Some(ref source) = resume_source {
         if effective_runtime.isolation != xai_tool_types::SubagentIsolationMode::None
             && source.worktree_path.is_none()
@@ -673,6 +674,8 @@ pub(crate) async fn run_shell_child(
         }
     } else if effective_runtime.isolation != xai_tool_types::SubagentIsolationMode::None {
         let source_cwd = parent_source_cwd(&ctx);
+        let worktree_base =
+            super::resolve_worktree_base_ref(ctx.subagent_worktree_base, &source_cwd).await;
         let dest = match crate::session::worktree::worktree_base_dir_for_source(&source_cwd) {
             Ok(base) => base.join(format!("subagent-{}", request.id)),
             Err(e) => {
@@ -697,13 +700,23 @@ pub(crate) async fn run_shell_child(
             Parent::Explicit(spawn_prepare_span.span())
         );
         let create_span = worktree_create_span.span().clone();
+        let creation_base = worktree_base.clone();
         let created = match tokio::task::spawn_blocking(move || {
             create_span.in_scope(|| {
+                // A non-HEAD base needs a clean checkout: the source's dirty state belongs to HEAD.
+                let working_tree_mode = if creation_base.is_some() {
+                    xai_fast_worktree::WorkingTreeMode::CleanTracked
+                } else {
+                    xai_fast_worktree::WorkingTreeMode::PreserveWorkingTree
+                };
                 let mut builder = xai_fast_worktree::WorktreeBuilder::new(&source_clone, &dest)
-                    .working_tree_mode(xai_fast_worktree::WorkingTreeMode::PreserveWorkingTree)
+                    .working_tree_mode(working_tree_mode)
                     .creation_mode(creation_mode)
                     .worktree_kind(xai_fast_worktree::WorktreeKind::Subagent)
                     .session_id(subagent_id);
+                if let Some(base_ref) = creation_base {
+                    builder = builder.git_ref(base_ref);
+                }
                 if let Some(opts) =
                     crate::util::config::grove_worktree_opts_if_enabled(grove_enabled)
                 {
@@ -718,16 +731,29 @@ pub(crate) async fn run_shell_child(
         .await
         {
             Ok(Ok(report)) => {
+                if let Some(base_ref) = worktree_base.as_deref()
+                    && !report.commit.starts_with(base_ref)
+                {
+                    tracing::warn!(
+                        subagent_id = %request.id,
+                        requested_base = base_ref,
+                        commit = %report.commit,
+                        "worktree_base=default_branch was not honored by the creation strategy"
+                    );
+                }
                 tracing::info!(
                     subagent_id = %request.id,
                     worktree_path = %report.worktree_path.display(),
                     commit = %report.commit,
+                    worktree_base = %ctx.subagent_worktree_base.as_str(),
+                    worktree_base_ref = worktree_base.as_deref().unwrap_or("HEAD"),
                     resolved_strategy = report.resolved_strategy,
                     skipped = %xai_fast_worktree::render_arm_skips(&report.skipped),
                     grove_worktree = grove_enabled,
                     grove_gate_source,
                     "Created isolated worktree for subagent"
                 );
+                worktree_base_commit = Some(report.commit);
                 Some(report.worktree_path)
             }
             Ok(Err(e)) => {
@@ -761,6 +787,17 @@ pub(crate) async fn run_shell_child(
         None
     };
     let worktree_freshly_created = resume_source.is_none() && worktree_path.is_some();
+    // A preserved working tree starts dirty; completion compares against this
+    // capture so inherited dirt does not read as subagent work.
+    let worktree_baseline_status = match worktree_path
+        .as_deref()
+        .filter(|_| worktree_freshly_created)
+    {
+        Some(path) => xai_grok_workspace::worktree::subagent_worktree_status(path)
+            .await
+            .ok(),
+        None => None,
+    };
     if let Some(root) = &spawn_root {
         let isolation = if worktree_path.is_some() {
             "worktree"
@@ -2401,7 +2438,60 @@ pub(crate) async fn run_shell_child(
     let mut disposed_snapshot_ref: Option<String> = None;
     let mut worktree_removed = false;
     if let Some(ref wt_path) = worktree_path {
-        if snapshot_dispose_enabled {
+        // A resumed worktree predates this run and may already carry edits.
+        let changed = if worktree_freshly_created {
+            match xai_grok_workspace::worktree::subagent_worktree_has_changes(
+                wt_path,
+                worktree_base_commit.as_deref(),
+                worktree_baseline_status.as_deref(),
+            )
+            .await
+            {
+                Ok(changed) => changed,
+                Err(e) => {
+                    tracing::warn!(
+                        subagent_id = %request.id,
+                        worktree_path = %wt_path.display(),
+                        error = %e,
+                        "Could not read subagent worktree changes; keeping the worktree"
+                    );
+                    true
+                }
+            }
+        } else {
+            true
+        };
+        if !changed {
+            match xai_grok_workspace::worktree::remove_subagent_worktree(wt_path).await {
+                Ok(()) => {
+                    tracing::info!(
+                        subagent_id = %request.id,
+                        worktree_path = %wt_path.display(),
+                        "Removed unchanged subagent worktree"
+                    );
+                    worktree_removed = true;
+                    if terminal_persistence_allowed
+                        && !super::update_subagent_meta_worktree_removed(
+                            &subagent_meta_dir,
+                            &final_status,
+                        )
+                    {
+                        tracing::warn!(
+                            subagent_id = %request.id,
+                            "removed worktree pointer not cleared from subagent meta"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        subagent_id = %request.id,
+                        worktree_path = %wt_path.display(),
+                        error = %e,
+                        "Unchanged subagent worktree could not be removed; leaving it for review"
+                    );
+                }
+            }
+        } else if snapshot_dispose_enabled {
             let disposal = dispose_worktree_after_completion(
                 wt_path,
                 &resolve_subagent_source_repo(&ctx),
@@ -2416,7 +2506,7 @@ pub(crate) async fn run_shell_child(
             tracing::info!(
                 subagent_id = %request.id,
                 worktree_path = %wt_path.display(),
-                "Worktree preserved for review"
+                "Worktree has changes and was kept for apply/discard"
             );
         }
     }
