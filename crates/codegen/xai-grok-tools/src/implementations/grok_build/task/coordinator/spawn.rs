@@ -94,6 +94,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             .admit(&request, running, total_for_root)
         {
             AdmissionDecision::Start => {
+                self.metrics.record_spawn(&request.subagent_type);
                 self.log_spawn_accepted(&request, "started");
                 self.start_child(
                     *request,
@@ -107,6 +108,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 )
             }
             AdmissionDecision::Enqueue => {
+                self.metrics.record_spawn(&request.subagent_type);
                 self.log_spawn_accepted(&request, "queued");
                 debug_assert!(
                     !request.owner.is_workflow(),

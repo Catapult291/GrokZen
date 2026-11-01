@@ -38,6 +38,7 @@ use super::coordinator_state::{
     background_at_deadline, background_if_caller_gone, completed_snapshot, hand_off_to_background,
     sleep_until, workflow_outstanding,
 };
+use super::metrics::SubagentMetrics;
 use super::types::{
     ActiveAgentMessageOutcome, AgentAddress, HandedOffForegroundSubagent, SpawnedSubagentRef,
     SubagentCancelOutcome, SubagentCancelTarget, SubagentDescribeOutcome, SubagentEvent,
@@ -74,6 +75,8 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     runner: R,
     config: CoordinatorConfig,
     admission: Admission,
+    /// Process-local rollup logged at actor shutdown (see [`SubagentMetrics`]).
+    metrics: SubagentMetrics,
     queued: SpawnQueue,
     /// When the queued sweep last ran; bounds how stale an out-of-band
     /// token cancel of a queued spawn can get (see [`Self::next_deadline`]).
@@ -276,6 +279,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             terminal_published_rx,
             runner,
             admission: Admission::new(config.limits),
+            metrics: SubagentMetrics::default(),
             queued: SpawnQueue::default(),
             last_queued_reap: tokio::time::Instant::now(),
             draining_queued: false,
@@ -398,6 +402,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             self.evict_completed_overflow();
         }
 
+        self.metrics.log_summary();
         self.cancel_all_children();
         self.active_messages.clear();
     }
@@ -920,6 +925,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 deadline,
             } => (Some(queued_for), deadline),
         };
+        if let Some(queued_for) = queued_for {
+            self.metrics.record_queue_wait(queued_for);
+        }
         // Wake passes the completed record's spawner; a fresh spawn takes the
         // graph advertise target (main's lineage source of truth).
         let spawner_session_id =
@@ -1295,6 +1303,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             ),
         };
 
+        self.metrics
+            .record_terminal(&output.result, launched, started_at.elapsed());
         output.result.subagent_type = request.subagent_type.clone();
         let persisted_output_ref = self.runner.persisted_output_ref(&output.completion_data);
         let completion_age = self.next_completion_age;

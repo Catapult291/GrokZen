@@ -2344,9 +2344,12 @@ pub(crate) async fn run_shell_child(
     let mut completed = xai_grok_telemetry::events::SubagentCompleted {
         subagent_id: request.id.clone(),
         parent_session_id: request.parent_session_id.clone(),
+        subagent_type: request.subagent_type.clone(),
         owner: telemetry_owner_kind(&request),
         workflow_run_id: request.owner.workflow_run_id().map(str::to_string),
         outcome,
+        stop_reason: (!result.stop_reason.is_empty()).then(|| result.stop_reason.clone()),
+        partial: result.partial,
         duration_ms: result.duration_ms,
         tool_calls: result.tool_calls,
         tokens_used: if telemetry_tokens > 0 {
@@ -2533,7 +2536,10 @@ pub(crate) async fn run_shell_child(
             "effective_model": tracker_model_id,
             "success": success,
             "cancelled": result.cancelled,
+            "stop_reason": &result.stop_reason,
+            "partial": result.partial,
             "duration_ms": result.duration_ms,
+            "tokens_used": telemetry_tokens,
             "turns": result.turns,
             "tool_calls": result.tool_calls,
             "output_preview": preview,
