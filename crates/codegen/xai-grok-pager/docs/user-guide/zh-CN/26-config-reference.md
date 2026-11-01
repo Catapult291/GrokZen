@@ -197,7 +197,7 @@ Grok Build 还会按以下层级读取配置；后列层级优先，但 requirem
 
 | 键 | 类型／取值 | Requirements | 托管 | 说明 |
 | --- | --- | --- | --- | --- |
-| `features.active_agent_messages` | `boolean` | `pin` | `user` | 启用或禁用 `active_agent_messages`；默认 false。也对应 `GROK_ACTIVE_AGENT_MESSAGES`。 |
+| `features.active_agent_messages` | `boolean` | `pin` | `user` | 启用或禁用 `active_agent_messages`；默认 true。也对应 `GROK_ACTIVE_AGENT_MESSAGES`。 |
 | `features.ask_user_question` | `boolean` | `pin` | `user` | 启用或禁用 `ask_user_question`；默认 true。也对应 `GROK_ASK_USER_QUESTION`。 |
 | `features.auto_wake` | `boolean` | `pin` | `user` | 启用或禁用 `auto_wake`；默认 true。也对应 `GROK_AUTO_WAKE`。 |
 | `features.backend_tools` | `boolean` | `pin` | `user` | 启用或禁用 `backend_tools`；默认 true。也对应 `GROK_BACKEND_SEARCH`。 |
@@ -539,11 +539,13 @@ Grok Build 还会按以下层级读取配置；后列层级优先，但 requirem
 | 键 | 类型／取值 | Requirements | 托管 | 说明 |
 | --- | --- | --- | --- | --- |
 | `subagents.enabled` | `boolean` | `pin` | `user` | 子智能体／任务工具总开关。也对应 `GROK_SUBAGENTS`。 |
-| `subagents.limit_behavior` | `queue / fail` | `yes` | `user` | 达到并发子智能体上限时的处理方式。 |
-| `subagents.max_concurrent` | `integer` | `yes` | `user` | 最大并发子智能体数。 |
-| `subagents.max_depth` | `integer` | `yes` | `user` | 最大嵌套深度（至少为 1）。 |
+| `subagents.limit_behavior` | `queue / fail` | `yes` | `user` | 达到并发子智能体上限时的处理方式；默认 `queue`。也对应 `GROK_SUBAGENT_LIMIT_BEHAVIOR`。 |
+| `subagents.max_concurrent` | `integer` | `yes` | `user` | 最大并发运行的子智能体数；默认 32，小于 1 会压到 1。也对应 `GROK_MAX_CONCURRENT_SUBAGENTS`。 |
+| `subagents.max_depth` | `integer` | `yes` | `user` | 最大嵌套深度（至少为 1）；默认 2，即根会话（0）→ 子级（1）→ 孙级（2）。也对应 `GROK_SUBAGENTS_MAX_DEPTH`。 |
+| `subagents.max_total_agents` | `integer` | `yes` | `user` | 单个根会话累计可创建的子智能体数；排队、运行、已完成都计入。默认 16，小于 1 会压到 1。也对应 `GROK_SUBAGENTS_MAX_TOTAL_AGENTS`。 |
 | `subagents.models.<name>` | `string` | `yes` | `user` | 每种子智能体的模型 ID 覆盖。 |
 | `subagents.toggle.<name>` | `boolean` | `yes` | `user` | 启用或禁用某种子智能体类型；省略时默认启用。 |
+| `subagents.worktree_base` | `head / default_branch` | `yes` | `user` | 隔离子智能体工作树的基点；默认 `head`（父工作树当前 HEAD）。也对应 `GROK_SUBAGENTS_WORKTREE_BASE`。 |
 
 ### `telemetry`
 

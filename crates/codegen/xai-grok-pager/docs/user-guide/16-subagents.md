@@ -60,17 +60,22 @@ The parent receives the child's output -- usually a summary -- when the child fi
 
 ## Built-in Agent Types
 
-Built-in types still exist as host types. The model cannot pick them by name. An omitted `subagent_type` is `general-purpose`.
+Built-in types can be selected by name. An omitted `subagent_type` still means `general-purpose`. A type is left out of the enum when `[subagents.toggle]` disables it, the parent's `Agent(...)` allowlist excludes it, or a custom agent shadows its name.
 
-| Type              | Description                                          |
-| ----------------- | ---------------------------------------------------- |
-| `general-purpose` | Default type. Full-capability agent for any task.    |
-| `explore`         | Research agent. Searches, reads, greps, and runs shell commands, but does not edit files. Use it for codebase investigation. |
-| `plan`            | Planning agent. Explores the codebase and produces a structured implementation plan; does not edit files. |
+| Type | Pick it for | Toolset | Default effort / max_turns |
+| --- | --- | --- | --- |
+| `general-purpose` | Mixed research and implementation, multi-step tasks; the default when unsure. | All tools (read/write, execute, search, web, plan). | Inherit session / 40 |
+| `explore` | Investigation only: find files, read code, trace call paths, change nothing. | Read-only: read, list, `search_code`, `resolve_context`, `find_symbol`, `find_references`, `goto_definition`, `get_diagnostics`; no shell. | `low` / 12 |
+| `plan` | Implementation design: explore the code and produce a step-by-step plan. | Read-only tools plus `todo_write`; no shell or edits. | `medium` / 20 |
+| `implementer` | Implement and self-verify: edit code, run tests, builds, or linters. | Full read/write/execute toolset (no workflow). | Inherit session / 40 |
 
-Project- or user-defined agents can add new types or shadow these built-ins by name.
+Selection guidance: `explore` for investigation only, `plan` for design only, `implementer` for implementation plus verification, `general-purpose` for mixed work or an unclear boundary. Custom types are selected by name, for example `my-plugin:reviewer`.
 
-`spawn_subagent` has an optional `subagent_type` enum when plugin, project, or user agents exist. Its values are those agents, for example `my-plugin:reviewer`. Built-in names and xAI-bundled agents are not listed. If a parent's `tools` list restricts spawning with `Agent(...)`, the enum shows only the allowed types. An unknown type fails the call with the list of valid types.
+The schema lists built-ins first, in the order above, then project, user, and plugin agents. If a parent's `tools` list restricts spawning with `Agent(...)`, the enum shows only the allowed types. An unknown type fails the call with the list of valid types.
+
+### `thoroughness`
+
+`thoroughness` applies to `explore` only: `quick` (obvious matches), `medium` (also check nearby call sites and conventions), `very_thorough` (trace every relevant path and report edge cases). Grok Build writes it as the first line of the child prompt, `Thoroughness: <level>.`. Other types log a warning and ignore it.
 
 ---
 
@@ -149,22 +154,37 @@ If a persona is requested but cannot be resolved -- it is not found, has no inst
 
 The main agent calls the `spawn_subagent` tool. Its parameters:
 
-| Parameter           | Description                                                       |
-| ------------------- | ---------------------------------------------------------------- |
-| `prompt`            | The full task prompt for the subagent.                           |
-| `description`       | A short label for the task (3-5 words).                          |
-| `run_in_background` | Run in the background and return a subagent ID. Defaults to `true`. |
-| `isolation`         | `none` (shared workspace, the default) or `worktree` (isolated git worktree). |
-| `resume_from`       | Continue a completed subagent's conversation. Pass its subagent ID. |
-| `cwd`               | Working directory for the subagent. Mutually exclusive with `isolation: worktree`; ignored when `resume_from` is set (the resumed child inherits its source's directory). |
+| Parameter | Description |
+| --- | --- |
+| `prompt` | The full task prompt for the subagent. With `output_schema`, require it to end with a single JSON value matching the schema. |
+| `description` | A short description of the task. |
+| `label` | A 3-5 word display label used by `list_agents` and the subagent UI; omitted means the id is used. |
+| `subagent_type` | `general-purpose` (default), `explore`, `plan`, `implementer`, or a custom type name. |
+| `thoroughness` | `explore` only: `quick`, `medium`, or `very_thorough`. Ignored by other types. |
+| `background` | Defaults to `true`: return a subagent ID immediately, retrieve the result later with `get_command_or_subagent_output`, and get notified on completion. Set `false` to wait in the foreground; a wait over the foreground budget moves the child to the background and returns its ID. |
+| `isolation` | `none` (shared workspace, the default) or `worktree` (isolated git worktree). |
+| `context` | `fresh` (the default, empty transcript) or `fork` (seed the child with the parent's conversation). A forked child inherits the parent model and runs read-only unless its type is `implementer`; ignored when `resume_from` is set. |
+| `output_schema` | Optional JSON Schema constraining the subagent's final answer. See below. |
+| `resume_from` | Continue a finished subagent's conversation. Pass its subagent ID. |
+| `cwd` | Working directory for the subagent. Mutually exclusive with `isolation: worktree`; ignored when `resume_from` is set (the resumed child inherits its source's directory). |
+| `model` | Optional model slug. Inherits the parent model by default; ignored when `resume_from` is set (the source model is pinned). |
 
 When you run a subagent in the background, retrieve its result later with `get_command_or_subagent_output`.
 
+### `output_schema`
+
+With a JSON Schema object, the child's last turn must end with a single JSON value, and Grok Build validates it against the schema:
+
+- Supported keywords: `type`, `properties`, `required`, `items`, `enum`, `additionalProperties`, `minItems`, `maxItems`, `minLength`, `maxLength`, `minimum`, `maximum`, `description`, `$defs`, `definitions`, `$ref`.
+- A schema with any other keyword or an invalid shape (for example a bare `true`/`false`) fails before spawn, so no child tokens are spent.
+- If validation fails, or the child produces no JSON, the subagent fails and reports the reason.
+- A validated result is returned in the result's `structured` field so the parent and workflows can destructure it. Without `output_schema`, the subagent returns free text exactly as before.
+
 ### Sending messages to subagents
 
-The `send_subagent_message` tool is off by default. Enable it with `GROK_ACTIVE_AGENT_MESSAGES` or `[features] active_agent_messages`.
+The `send_subagent_message` tool is on by default. Disable it with `GROK_ACTIVE_AGENT_MESSAGES=0` or `[features] active_agent_messages = false` (a kill switch).
 
-The root session can send a follow-up to a subagent it owns. When the flag is on, a granted child also receives the tool:
+The root session can send a follow-up to a subagent it owns. A granted child also receives the tool, and its prompt gets an `<agent-roster>` block listing the main agent and any named siblings:
 
 - `subagent_id: "parent"` targets that child's active parent subagent.
 - A durable agent id targets another local subagent. An eligible completed subagent resumes with the same identity.
@@ -191,11 +211,33 @@ The transcript shows each send as a one-line `Message` row: a verb for the outco
 
 The collapsed row never shows the message or the reason. **Right** (or `l`/`e` in vim mode) expands the row to show the requested delivery, the full message text, and the reason of a rejected or unconfirmed send; **Left** (or `h`) collapses it again. **Enter**, **Ctrl+F**, or a double-click on the row opens that subagent's view, exactly as on its `Subagent` row (Right/Left still fold it). If the subagent was never spawned in this session (a headless `grok export`, or an id from another session), the row names it `subagent …xxxxxxxx` from the last 8 characters of its id, shows the raw `Subagent ID:` when expanded, and cannot open it.
 
+### Listing subagents (`list_agents`)
+
+`list_agents` enumerates the subagents this session spawned, so the model does not have to remember ids.
+
+| Parameter | Description |
+| --- | --- |
+| `include_finished` | Include finished subagents. Defaults to `true`. |
+| `parent_id` | Restrict the result to descendants of this subagent id; omitted lists the whole session tree. |
+| `limit` | Maximum rows, 1-50. Defaults to 50. |
+
+Each row carries `id`, `label`, `type`, `status`, `model`, `parent_id`, `depth`, `elapsed_ms`, `tokens_in`, `tokens_out`, `context_pct`, `current_tool`, `queue_position`, and `resumable`.
+
+| `status` | Meaning |
+| --- | --- |
+| `queued` | Admitted, waiting for a concurrency slot. |
+| `running` | Running a turn. |
+| `idle` | Online, between turns. |
+| `ready` | Finished with a resumable session kept. |
+| `completed` / `failed` / `cancelled` | Terminal. |
+
+A row with `resumable: true` (usually `ready`) can be continued with `resume_from`; a `failed` or `cancelled` row may keep only a partial record, so resuming it is not guaranteed. Use `id` with `send_subagent_message` to message a live row, or `kill_command_or_subagent` to stop it. Subagents owned by a workflow do not appear in the list.
+
 ---
 
 ## Capability Modes
 
-Capability mode is not a spawn argument. A child's tools come from its **agent type** and any **role / definition default**. `general-purpose` is unrestricted (`all`). The built-in `explore` and `plan` types read, search, and run shell commands but cannot edit files.
+Capability mode is not a spawn argument. A child's tools come from its **agent type** and any **role / definition default**. `general-purpose` and `implementer` use full toolsets; the built-in `explore` and `plan` types read and search but cannot run shell commands or edit files.
 
 | Mode         | Read | Write | Execute | Description                                  |
 | ------------ | ---- | ----- | ------- | -------------------------------------------- |
@@ -210,12 +252,19 @@ Capability mode is not a spawn argument. A child's tools come from its **agent t
 
 ### resume_from
 
-The `resume_from` parameter lets a new subagent continue where a completed subagent left off, which is useful for multi-stage workflows:
+The `resume_from` parameter lets a new subagent continue where a finished subagent left off, which is useful for multi-stage workflows:
 
 1. Spawn a research subagent to investigate a problem.
 2. Spawn a second subagent with `resume_from` set to the first subagent's ID, so it picks up with the full research context.
 
-The new subagent inherits the source's transcript, tool state, and model; its system prompt and tools are re-rendered from the current agent definition. The source must be completed (not running), belong to the current session, and use the same agent type.
+Boundaries:
+
+- The source must be finished (`completed` / `failed` / `cancelled`) and belong to the current parent session; its session record must still be in the current workspace's session directory. `resumable` in `list_agents` reflects this.
+- A still-running source no longer fails outright: the `prompt` is queued as a follow-up with `send_subagent_message`'s `queue` semantics and runs as the child's next turn; the call returns an explanatory text result.
+- The resumed child inherits the source's transcript, tool state, model, and subagent type. A passed `subagent_type` or `model` is ignored, and the system prompt and tools are re-rendered from the current definition. If the current definition lacks a tool the source used, that is only logged as a warning.
+- The source transcript must fit the model's context window; a transcript over the resume limit fails with a message to compact first or use a larger-context model.
+- A child truncated at `max_turns` returns `partial = true` and can be continued with `resume_from`.
+- `context` and `cwd` are ignored when `resume_from` is set.
 
 ### MCP inheritance
 
@@ -261,9 +310,13 @@ For tasks that modify files, run a subagent in an isolated git worktree with `is
 
 - The subagent works in its own copy of the working tree.
 - Its changes stay isolated from the parent until you merge them.
-- The subagent's result includes the worktree path.
+- At completion, a worktree with no changes is removed and its path is cleared from the subagent record.
+- A worktree with changes is kept, and the result carries `<worktree_path>` and `<worktree_actions>`:
+  - apply: `x.ai/git/worktree/apply` with `{"worktreePath": "…", "mode": "merge"}` (`mode: "overwrite"` replaces parent files instead).
+  - discard: `x.ai/git/worktree/remove` with `{"worktreePath": "…", "force": true}`.
+- With `[features] subagent_worktree_snapshot` enabled, a changed worktree is snapshotted and then removed.
 
-Grok Build manages worktrees through the `x.ai/git/worktree/*` extension methods, including an apply operation that merges changes back into the main working directory.
+The worktree base is controlled by `[subagents] worktree_base`: `head` (the default, the parent worktree's current `HEAD`) or `default_branch`. The `GROK_SUBAGENTS_WORKTREE_BASE` environment variable takes precedence over the config file.
 
 ---
 
@@ -283,6 +336,18 @@ explore = "grok-4.6"                 # route explore to a specific model
 ```
 
 Per-type model overrides apply for any parent. Without an override, a subagent inherits the parent's model.
+
+### Depth, total, and concurrency
+
+```toml
+[subagents]
+max_depth = 2            # default 2; 1 means only the root session can spawn
+max_total_agents = 16    # cumulative per root session (queued, running, and finished all count)
+max_concurrent = 32      # concurrently running
+limit_behavior = "queue" # queue (default) or fail
+```
+
+Environment variables: `GROK_SUBAGENTS_MAX_DEPTH`, `GROK_SUBAGENTS_MAX_TOTAL_AGENTS`, `GROK_MAX_CONCURRENT_SUBAGENTS`, `GROK_SUBAGENT_LIMIT_BEHAVIOR`. Zero does not disable these limits; values below 1 are clamped to 1.
 
 ### Model Selection by the Agent
 
@@ -400,7 +465,11 @@ The parent's scrollback keeps showing the subagent's status after you close.
 
 ## Depth Limits
 
-Only the top-level session spawns subagents. A subagent cannot spawn its own subagents: the maximum nesting depth is one. If a subagent calls `spawn_subagent`, the call fails with a depth-limit error. This keeps the agent tree flat and prevents runaway spawning.
+Subagents can spawn further subagents, nested up to two levels by default: root session (depth 0) → first-level child (depth 1) → second-level child (depth 2). `[subagents] max_depth` (or `GROK_SUBAGENTS_MAX_DEPTH`) changes the cap; `1` allows only the root session to spawn.
+
+At the depth cap, `spawn_subagent` stays visible and the call returns an explicit depth-limit error (`Subagent depth limit exceeded (current depth: …, max: …)`) instead of the tool silently disappearing.
+
+Two more caps apply: `max_total_agents` (default 16) cumulative children per root session, and `max_concurrent` (default 32) running at once. A spawn over the cumulative cap is rejected with a message to collect existing results or reuse one with `resume_from`; a spawn over the concurrency cap queues by default, or fails immediately with `limit_behavior = "fail"`.
 
 ---
 
