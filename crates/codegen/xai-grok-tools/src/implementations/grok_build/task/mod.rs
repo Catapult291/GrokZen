@@ -344,6 +344,9 @@ impl xai_tool_runtime::Tool for TaskTool {
         xai_tool_protocol::ToolCapabilities {
             is_read_only: false,
             tool_scope: Some(xai_tool_protocol::ToolScope::Write),
+            // Spawns are non-blocking after admission; allow a same-step fan-out
+            // without treating each call as an exclusive barrier (plan §6.1).
+            max_concurrency: Some(16),
             ..Default::default()
         }
     }
