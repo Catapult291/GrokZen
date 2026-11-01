@@ -2,6 +2,8 @@
 
 > 约束：只使用一个 harness（Grok Build 本体）和一个模型。本文不涉及多 provider、外部 harness、跨模型路由。
 >
+> 后续收尾、阶段 6 验收缺口与第 5 节测试计划的分步交接见 [`SUBAGENT-COMPLETION-PLAN.md`](SUBAGENT-COMPLETION-PLAN.md)。
+>
 > 目标：在同一模型下，让子代理**选得对、管得住、读得清、接得回**。
 
 ---
