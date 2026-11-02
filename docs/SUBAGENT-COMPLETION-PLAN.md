@@ -173,7 +173,7 @@ git grep -n "MAX_TURNS\|max_turns" crates/codegen/xai-grok-tools/src/implementat
 
 ```bash
 cargo test -p xai-grok-tools --lib task::
-cargo test -p xai-grok-shell --lib agent::subagent -- --skip wake::
+cargo test -p xai-grok-shell --lib agent::subagent
 ```
 
 **提交**：`test(subagent): max_turns partial 可续跑（§5 单测）`
@@ -254,7 +254,7 @@ cargo test -p xai-grok-tools --lib task::
   - `worktree::tests::sync_fork_response_includes_strategy_report`（断言 `Grove→copy must keep a fallback reason`，疑似 Windows 上 Grove 不可用）
 - `xai-grok-tools`：
   - `types::skill_discovery_tracker::skill_path_suggestion::tests::rewrites_worktree_paths_to_display_cwd_but_preserves_external_paths`
-- `xai-grok-shell`：`agent::subagent` 下 `wake::` 三例在 debug 构建有既有栈溢出，使用 `-- --skip wake::`（见 `eaf0fe70` 提交说明）。
+- `xai-grok-shell`：`agent::subagent` 下 `wake::` 三例在 debug 构建有既有栈溢出；已于 2026-11-02 修复，整套不再需要 `--skip wake::`（见 §5）。
 
 **查因结论（2026-11-02）**：
 
@@ -262,7 +262,7 @@ cargo test -p xai-grok-tools --lib task::
 - `create_uses_the_path_captured_before_cwd_changes`：**测试代码 bug（全平台）**。`PathBuf::ends_with("/captured")` 会把 `/captured` 解析为 `[RootDir, "captured"]`，任何绝对路径的尾部组件都无法匹配（`created` 实为 `String`，原断言按字符串意图书写）。已改为叶子组件比较 `Path::new(&created).file_name()`。
 - `sync_fork_response_includes_strategy_report`：**Windows 环境跳过**。`xai-fast-worktree/src/worktree/execute.rs` 的 `grove_arm` 在本构建是无桩实现（恒 `Ok(None)` 且不写入 `ArmSkip`），Windows 上它是唯一快速路径，Grove 请求必然落到 copy 且无 fallback reason 可断言；Linux 上 overlay/btrfs 先胜出故 CI 不触发。两处 fallback-reason 断言已加 `#[cfg(not(windows))]` 并注明原因，断言本体保留。
 - `skill_path_suggestion`：**真实回归（基线漏记）**。实现里 `!skill_path.is_absolute()` 在 Windows 上拒绝 `/repo/...` 形 rooted 路径，导致该模块 10 例中 7 例失败（基线只记录了 1 例）。守卫意图是"跳过相对路径注册"，已改为跨平台等价的 `!skill_path.has_root()`，7 例全部恢复。
-- `wake::` 三例：debug 构建栈溢出（`STATUS_STACK_OVERFLOW`，2026-11-02 现场复现取证），维持 `--skip wake::` 既有做法；收紧属测试基建行为变更，留待后续决定。
+- `wake::` 三例：**已修复**。`wake.rs` 的测试通过真实协调器驱动 `run_shell_child`，debug 构建单次 poll 超过 libtest 默认 2 MiB 线程栈（生产会由 `SESSION_THREAD_STACK_SIZE` 的 8 MiB 会话线程承载）。测试改为在 8 MiB 线程上建 current-thread runtime 执行，五例（原记录三例）不再栈溢出；`--skip wake::` 已移除。
 
 **做法**：
 
@@ -286,7 +286,7 @@ cargo check -p xai-grok-shell --lib
 
 # 单测
 cargo test -p xai-grok-tools --lib task::
-cargo test -p xai-grok-shell --lib agent::subagent -- --skip wake::
+cargo test -p xai-grok-shell --lib agent::subagent
 cargo test -p xai-grok-shell --lib config::tests::subagent
 cargo test -p xai-grok-workspace --lib worktree
 cargo test -p xai-tool-types
@@ -311,7 +311,8 @@ rustfmt --edition 2024 --check <changed-file>
 | 2026-11-02 | 任务 D max_turns partial 可续跑 | 通过 | `cargo test -p xai-grok-tools --lib task::`（370 passed，0 failed，新增 2 例）；`cargo test -p xai-grok-shell --lib agent::subagent -- --skip wake::`（289 passed）；提交 `73e4cc18` |
 | 2026-11-02 | 任务 E 控制面 spawn→list→send→interrupt→resume 流程 | 通过 | `cargo test -p xai-grok-tools --lib task::`（371 passed，0 failed，新增 1 例 `control_plane_flow_spawn_list_send_interrupt_then_resume`）；提交 `d6a53015` |
 | 2026-11-02 | 任务 F 端到端验证（explore→implementer→workflow） | 通过（2 项残余见任务 F 验证记录） | 真实会话 + glm-5.3-flash(cline)：explore 定位正确、implementer 修复后 unittest 全绿（主会话复核）；workflow `complete` 带符合 `output_schema` 的结构化输出；`unified.jsonl` 三条 `subagent completed` 均含 `subagent_type`/`stop_reason`/`partial`；`list_agents` 运行态/终态字段实测一致 |
-| 2026-11-02 | 任务 G 既有失败基线 | 通过（3 项修复，1 项环境跳过，1 项维持既有 skip） | `cargo test -p xai-grok-workspace --lib worktree`（116 passed，0 failed）；`cargo test -p xai-grok-workspace --lib trust::`（54 passed）；`cargo test -p xai-grok-tools --lib skill_path_suggestion`（10 passed，0 failed，修复 7 例）；`cargo test -p xai-grok-permission-rules`（全绿）；`cargo test -p xai-grok-shell --lib agent::subagent -- --skip wake::`（289 passed）；`wake::` 栈溢出现场复现（`STATUS_STACK_OVERFLOW`，维持 skip） |
+| 2026-11-02 | 任务 G 既有失败基线 | 通过（3 项修复，1 项环境跳过，1 项 wake 栈溢出后续修复） | `cargo test -p xai-grok-workspace --lib worktree`（116 passed，0 failed）；`cargo test -p xai-grok-workspace --lib trust::`（54 passed）；`cargo test -p xai-grok-tools --lib skill_path_suggestion`（10 passed，0 failed，修复 7 例）；`cargo test -p xai-grok-permission-rules`（全绿）；`cargo test -p xai-grok-shell --lib agent::subagent -- --skip wake::`（289 passed）；`wake::` 栈溢出现场复现（`STATUS_STACK_OVERFLOW`），修复记录见下一行 |
+| 2026-11-02 | `wake::` debug 栈溢出 | 通过 | `cargo test -p xai-grok-shell --lib agent::subagent`（297 passed，0 failed，含 8 例 `wake::`）；测试改在 8 MiB 线程执行，`--skip wake::` 已移除；两例 worktree 断言改为先弄脏工作树再验证 6.2 的快照处置路径 |
 | 2026-11-02 | §5 测试计划全量核对 + SubagentResult 缺省反序列化 | 通过 | 逐项核对 §5 清单：model_policy 合并/排序/allowlist（`model_policy_tests.rs` 7 例）、thoroughness（`task_tool_input_thoroughness_round_trips_and_omits_when_absent` + TaskTool explore 首行注入）、`output_schema` spawn 前失败（`invalid_output_schema_rejected_before_spawn`）、context 映射（任务 C）、状态映射（`every_status_serializes_to_its_wire_name` + `every_completion_kind_maps_to_the_terminal_contract`）、流程/深度/总量/并发/fork 集成与端到端见任务 A–F 均已有覆盖；唯一缺口为 `SubagentCompletedOutput` 的 `structured`/`stop_reason`/`partial` 反序列化方向，新增 `subagent_completed_output_defaults_stop_reason_and_partial_for_legacy_callers` 补齐；`cargo test -p xai-tool-types --lib`（116 passed，新增 1 例）；`cargo test -p xai-grok-tools --lib task::`（371 passed）等五组验收命令全部 0 failed；提交 `41b46045` |
 
 ## 6. 提交约定
