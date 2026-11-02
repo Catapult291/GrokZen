@@ -139,6 +139,7 @@ pub enum PermissionDecisionReason {
     OpaqueShell,
     HookAsk,
     RequesterGone,
+    Hardline,
 }
 
 impl PermissionDecisionReason {
@@ -168,6 +169,7 @@ impl PermissionDecisionReason {
         Self::OpaqueShell,
         Self::HookAsk,
         Self::RequesterGone,
+        Self::Hardline,
     ];
 }
 
@@ -200,6 +202,7 @@ impl TryFrom<&str> for PermissionDecisionReason {
             "opaque_shell" => Self::OpaqueShell,
             "hook_ask" => Self::HookAsk,
             "requester_gone" => Self::RequesterGone,
+            "hardline" => Self::Hardline,
             _ => return Err(()),
         })
     }

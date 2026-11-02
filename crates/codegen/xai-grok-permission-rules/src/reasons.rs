@@ -23,6 +23,8 @@ pub const BASH_REQUEST_FLOOR: &str = "bash_request_floor";
 pub const OPAQUE_SHELL: &str = "opaque_shell";
 pub const HOOK_ASK: &str = "hook_ask";
 pub const REQUESTER_GONE: &str = "requester_gone";
+/// Unconditional refusal before YOLO/grants/classifier (destructive targets).
+pub const HARDLINE: &str = "hardline";
 
 pub const ALL: &[&str] = &[
     YOLO,
@@ -50,4 +52,5 @@ pub const ALL: &[&str] = &[
     OPAQUE_SHELL,
     HOOK_ASK,
     REQUESTER_GONE,
+    HARDLINE,
 ];
