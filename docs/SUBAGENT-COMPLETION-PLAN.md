@@ -40,7 +40,7 @@
 | 文档与代码默认值一致 | **已验收** | 抽查 `background=true`、`max_depth=2`、`max_total_agents=16`、`max_concurrent=32`、`worktree_base=head`，中英文档与代码一致 | 无 |
 | 6.4 指标 | **已完成** | 7 个 metrics 单测；`cargo check` tools/shell 通过 | 无 |
 
-结论：**任务 A、B 已完成，阶段 6 验收缺口已补齐**。剩余任务 F（端到端验证）与 G（既有失败基线）见 §3。
+结论：**任务 A、B 已完成，阶段 6 验收缺口已补齐**。剩余任务 G（既有失败基线）见 §3；任务 F（端到端验证）已完成，验证记录见 §3 与 §5。
 
 ## 3. 剩余任务（按执行顺序）
 
@@ -217,7 +217,7 @@ cargo test -p xai-grok-tools --lib task::
 
 ### 任务 F（P2）：阶段 6 端到端验证（手工，非 CI）
 
-**状态**：待办
+**状态**：已完成（2026-11-02，验证记录见下方与 §5）
 
 **目标**：用真实会话和模型跑一轮“explore 调查 → implementer 实现 → workflow 汇总结构化结果”，验证 `list_agents` 输出与 TUI/内部 snapshot 一致。
 
@@ -229,6 +229,13 @@ cargo test -p xai-grok-tools --lib task::
 4. 结果写入本文件 §5（验证记录），不要只留在对话里。
 
 **注意**：这一项依赖本机模型链路与真实会话，测试套件无法替代。
+
+**验证记录（2026-11-02，Grok Build 1.0.26，模型 glm-5.3-flash(cline)）**：
+
+1. 夹具：`%TEMP%\subagent-e2e\tinylib`（Python，`add` 误写为减法，`test_add` 失败）。explore（后台，只读）定位根因正确；implementer 修复后 2 个测试通过，主会话独立复核 `python -m unittest` 全绿、`git diff` 仅 1 行。
+2. `list_agents` 实测：运行中返回 `running`，完成后 `ready` 且 `resumable: true`；`tokens_in/tokens_out` 运行中为 0、完成后有值；`label/type/model/depth/elapsed_ms` 全程正确。`current_tool` / `queue_position` 为可选列，本次无排队且未观察到非空值。TUI Ctrl+G / dashboard 的同屏对照未做（会话内无法渲染 TUI）；两者与 `list_agents` 同源是阶段 5 的既有保证。
+3. workflow 汇总：内联 Rhai 脚本 `agent()` + `output_schema`（repo/bug_summary/fix_summary/tests_passed），运行 `complete`，journal 记录结构化输出且 `tests_passed=true`。发现两点：对象形 `args` 经客户端序列化成 JSON 字符串传入，而引擎未注册 `json_parse`，脚本内无法解析（改用脚本内嵌数据绕过）；workflow 的 `agent()` 子代理不出现在会话 `list_agents` 中（workflow pool 独立计数），完成时其本地日志 `subagent_type` 记为 `general-purpose`。
+4. 6.4 完成事件：`~/.grok/logs/unified.jsonl` 三条 `subagent completed`（explore / implementer / workflow 子代理）均带 `subagent_type` / `stop_reason="end_turn"` / `partial=false` / `tokens_used`。`subagent metrics summary` 在协调器 actor 退出（正常关闭会话）时输出，本会话尚在运行，留待关闭后确认。
 
 ---
 
@@ -295,6 +302,7 @@ rustfmt --edition 2024 --check <changed-file>
 | 2026-11-02 | 任务 C context=fork 映射 | 通过 | `cargo test -p xai-grok-tools --lib task::`（368 passed，0 failed，新增 3 例）；提交 `d376fca1` |
 | 2026-11-02 | 任务 D max_turns partial 可续跑 | 通过 | `cargo test -p xai-grok-tools --lib task::`（370 passed，0 failed，新增 2 例）；`cargo test -p xai-grok-shell --lib agent::subagent -- --skip wake::`（289 passed）；提交 `73e4cc18` |
 | 2026-11-02 | 任务 E 控制面 spawn→list→send→interrupt→resume 流程 | 通过 | `cargo test -p xai-grok-tools --lib task::`（371 passed，0 failed，新增 1 例 `control_plane_flow_spawn_list_send_interrupt_then_resume`）；提交 `d6a53015` |
+| 2026-11-02 | 任务 F 端到端验证（explore→implementer→workflow） | 通过（2 项残余见任务 F 验证记录） | 真实会话 + glm-5.3-flash(cline)：explore 定位正确、implementer 修复后 unittest 全绿（主会话复核）；workflow `complete` 带符合 `output_schema` 的结构化输出；`unified.jsonl` 三条 `subagent completed` 均含 `subagent_type`/`stop_reason`/`partial`；`list_agents` 运行态/终态字段实测一致 |
 
 ## 6. 提交约定
 
