@@ -3357,6 +3357,18 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// Worktree paths registered under `repo`, canonicalized so the assertion
+    /// does not depend on the slash style `git worktree list` prints.
+    fn registered_worktrees(repo: &Path) -> Vec<std::path::PathBuf> {
+        git_out(repo, &["worktree", "list", "--porcelain"])
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .map(|path| {
+                dunce::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path))
+            })
+            .collect()
+    }
+
     /// Create a source repo (one committed file) plus a worktree of it.
     fn repo_with_worktree(temp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
         use xai_test_utils::git::{git_commit_all, init_git_repo};
@@ -3393,6 +3405,40 @@ mod tests {
         assert!(
             !wt.exists(),
             "worktree dir should be removed after snapshot"
+        );
+    }
+
+    /// Completion path for an untouched worktree: nothing to snapshot, yet the
+    /// directory must still be removed and its registration dropped.
+    #[tokio::test]
+    async fn unchanged_worktree_is_removed_and_unregistered() {
+        xai_test_utils::require_git!();
+        let temp = tempfile::TempDir::new().unwrap();
+        let (repo, wt) = repo_with_worktree(&temp);
+
+        let wt_canonical = dunce::canonicalize(&wt).unwrap();
+        assert!(
+            registered_worktrees(&repo).contains(&wt_canonical),
+            "fresh worktree must be registered in the source repo"
+        );
+        let baseline = subagent_worktree_status(&wt).await.unwrap();
+        let base = git_out(&wt, &["rev-parse", "HEAD"]);
+        assert!(
+            !subagent_worktree_has_changes(&wt, Some(&base), Some(&baseline))
+                .await
+                .unwrap(),
+            "a fresh worktree with no edits must read as unchanged"
+        );
+
+        remove_subagent_worktree(&wt).await.unwrap();
+
+        assert!(
+            !wt.exists(),
+            "an unchanged worktree directory must be removed at completion"
+        );
+        assert!(
+            !registered_worktrees(&repo).contains(&wt_canonical),
+            "removed worktree must no longer appear in git worktree list"
         );
     }
 

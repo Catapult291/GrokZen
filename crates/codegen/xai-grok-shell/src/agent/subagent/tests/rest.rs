@@ -472,6 +472,20 @@ fn snapshot_test_meta(id: &str) -> SubagentMeta {
         ..base_meta()
     }
 }
+/// Dropping an unchanged worktree's pointer makes a later resume fall back to
+/// the shared workspace instead of a directory that no longer exists.
+#[test]
+fn update_subagent_meta_worktree_removed_clears_the_pointer() {
+    let dir = tempfile::TempDir::new().unwrap();
+    assert!(write_subagent_meta(dir.path(), &snapshot_test_meta("sa-clear")));
+    assert!(update_subagent_meta_worktree_removed(dir.path(), "completed"));
+    let reread: SubagentMeta = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("meta.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(reread.worktree_path.is_none());
+    assert_eq!(reread.status, "completed");
+}
 /// The follow-up writer persists `snapshot_ref` into an already-finalized meta.json.
 /// `durable_resume_source_for` then rehydrates the disposed worktree from it.
 #[test]
