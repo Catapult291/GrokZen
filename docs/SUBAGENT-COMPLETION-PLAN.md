@@ -115,7 +115,7 @@ cargo test -p xai-grok-workspace --lib worktree
 
 ### 任务 C（P1）：补 §5 单测缺口 — `context: fork` 映射
 
-**状态**：待办
+**状态**：已完成（`d376fca1`）
 
 **目标**：覆盖 `TaskToolInput.context` 到 `SubagentRequest` 的映射与只读默认。
 
@@ -288,6 +288,7 @@ rustfmt --edition 2024 --check <changed-file>
 | 2026-11-02 | 6.2 worktree_base 配置 | 通过 | `cargo test -p xai-grok-shell --lib subagent_worktree_base`（3 passed） |
 | 2026-11-02 | 6.1 双前台 spawn 并行 | 通过 | `cargo test -p xai-grok-tools --lib task::coordinator`（166 passed）；`cargo test -p xai-grok-tools --lib task::`（365 passed）；提交 `a9d97135` |
 | 2026-11-02 | 6.2 空 worktree 删除与清指针 | 通过 | `cargo test -p xai-grok-workspace --lib worktree`（112 passed，4 个任务 G 已知基线失败）；`cargo test -p xai-grok-shell --lib agent::subagent -- --skip wake::`（289 passed）；提交 `f61f131a` |
+| 2026-11-02 | 任务 C context=fork 映射 | 通过 | `cargo test -p xai-grok-tools --lib task::`（368 passed，0 failed，新增 3 例）；提交 `d376fca1` |
 
 ## 6. 提交约定
 
