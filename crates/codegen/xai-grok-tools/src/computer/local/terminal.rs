@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::fs::File;
@@ -72,6 +73,35 @@ fn reply_grace_from_env() -> Duration {
 
 /// Upper bound for control calls that must never block a cancel path.
 const CONTROL_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often the watchdog inspects actor progress. Env:
+/// `GROK_TERMINAL_WATCHDOG_INTERVAL_MS`.
+const WATCHDOG_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Longest silent gap tolerated while commands are live. The loop ticks at
+/// 100ms, so a gap this large means the loop itself is blocked. Env:
+/// `GROK_TERMINAL_WATCHDOG_STALL_MS`.
+const ACTOR_STALL_THRESHOLD: Duration = Duration::from_secs(30);
+
+/// Deadline for one output-file or task-log operation: a wedged filesystem
+/// must not pin the actor loop.
+const IO_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn watchdog_interval_from_env() -> Duration {
+    std::env::var("GROK_TERMINAL_WATCHDOG_INTERVAL_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(WATCHDOG_INTERVAL)
+}
+
+fn actor_stall_threshold_from_env() -> Duration {
+    std::env::var("GROK_TERMINAL_WATCHDOG_STALL_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(ACTOR_STALL_THRESHOLD)
+}
 
 /// `timeout + grace`, capped at the background maximum when the sum overflows
 /// (`Duration::MAX` timeouts).
@@ -173,11 +203,136 @@ fn decode_output_chunk(bytes: &[u8], decoder: Option<&mut StreamDecoder>, last: 
     decoder.decode(bytes, last)
 }
 
+/// What the actor was holding when its loop last stamped progress.
+#[derive(Clone)]
+struct LiveProcess {
+    tool_call_id: String,
+    pid: Option<u32>,
+    output_file: PathBuf,
+    elapsed: Duration,
+}
+
+#[derive(Default)]
+struct WatchState {
+    last_progress: Option<Instant>,
+    running: Vec<LiveProcess>,
+}
+
+struct StallReport {
+    stalled_for: Duration,
+    running: Vec<LiveProcess>,
+}
+
+/// Actor liveness shared with separately spawned [`run_actor_watchdog`]; the
+/// actor owns the state, the watchdog only reads it. Lock hold times are a few
+/// clones, never across an await.
+#[derive(Default)]
+struct ActorWatch {
+    state: std::sync::Mutex<WatchState>,
+    /// Latched per stall episode so one stall logs once; cleared by the next stamp.
+    reported: AtomicBool,
+}
+
+impl ActorWatch {
+    /// Stamp progress and republish the running set. Only the running set gates
+    /// stall reports: an idle actor rightly makes no progress.
+    fn publish(&self, processes: &HashMap<String, ProcessState>) {
+        let running: Vec<LiveProcess> = processes
+            .values()
+            .filter(|p| p.is_running())
+            .map(|p| LiveProcess {
+                tool_call_id: p.tool_call_id.clone(),
+                pid: p.child.id(),
+                output_file: p.output_file.clone(),
+                elapsed: p.start_time.elapsed(),
+            })
+            .collect();
+        let resumed = self.reported.swap(false, Ordering::Relaxed);
+        match self.state.lock() {
+            Ok(mut state) => {
+                state.last_progress = Some(Instant::now());
+                state.running = running;
+            }
+            Err(_) => return,
+        }
+        if resumed {
+            tracing::info!("terminal.actor.recovered");
+        }
+    }
+
+    /// `Some` at most once per stall episode, and only while a command is live.
+    fn stall_if_due(&self, threshold: Duration) -> Option<StallReport> {
+        let Ok(state) = self.state.lock() else {
+            return None;
+        };
+        if state.running.is_empty() {
+            return None;
+        }
+        let stalled_for = state.last_progress?.elapsed();
+        if stalled_for < threshold {
+            return None;
+        }
+        let running = state.running.clone();
+        drop(state);
+        if self.reported.swap(true, Ordering::Relaxed) {
+            return None;
+        }
+        Some(StallReport {
+            stalled_for,
+            running,
+        })
+    }
+}
+
+/// Reports an actor loop that stopped stamping progress while commands were
+/// live. The watchdog exits when the actor does (its `done` sender drops).
+async fn run_actor_watchdog(
+    watch: Arc<ActorWatch>,
+    done: oneshot::Receiver<()>,
+    interval: Duration,
+    threshold: Duration,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // The first tick is immediate; the actor may still be starting up.
+    ticker.tick().await;
+    tokio::pin!(done);
+    loop {
+        tokio::select! {
+            _ = &mut done => return,
+            _ = ticker.tick() => {
+                if let Some(report) = watch.stall_if_due(threshold) {
+                    let running: Vec<String> = report
+                        .running
+                        .iter()
+                        .map(|p| {
+                            format!(
+                                "{} pid={:?} file={} elapsed_ms={}",
+                                p.tool_call_id,
+                                p.pid,
+                                p.output_file.display(),
+                                p.elapsed.as_millis()
+                            )
+                        })
+                        .collect();
+                    tracing::error!(
+                        stalled_ms = report.stalled_for.as_millis() as u64,
+                        running = ?running,
+                        "terminal.actor.stalled"
+                    );
+                }
+            }
+        }
+    }
+}
+
 struct ActorSettings {
     completed_task_ttl: Duration,
     foreground_block_budget: Duration,
     output_file_cap: u64,
     tick_interval: Duration,
+    watchdog_interval: Duration,
+    stall_threshold: Duration,
 }
 
 impl Default for ActorSettings {
@@ -187,6 +342,8 @@ impl Default for ActorSettings {
             foreground_block_budget: FOREGROUND_BLOCK_BUDGET,
             output_file_cap: MAX_OUTPUT_FILE_BYTES,
             tick_interval: notification_interval(),
+            watchdog_interval: WATCHDOG_INTERVAL,
+            stall_threshold: ACTOR_STALL_THRESHOLD,
         }
     }
 }
@@ -196,6 +353,8 @@ impl ActorSettings {
         Self {
             foreground_block_budget: foreground_block_budget_from_env(),
             output_file_cap: output_file_cap_from_env(),
+            watchdog_interval: watchdog_interval_from_env(),
+            stall_threshold: actor_stall_threshold_from_env(),
             ..Self::default()
         }
     }
@@ -320,6 +479,12 @@ enum TerminalCommand {
     BackgroundForegroundCommands {
         owner_session_id: Option<String>,
         reply: oneshot::Sender<Vec<BackgroundedForeground>>,
+    },
+
+    /// Test-only: blocks the actor loop so the watchdog can observe a stall.
+    #[cfg(test)]
+    TestStallActor {
+        duration: Duration,
     },
 
     WaitForCompletion {
@@ -516,12 +681,29 @@ impl ProcessState {
     }
 
     async fn flush_and_truncate_output_file(&mut self) {
-        if let Some(ref mut file) = self.file_handle {
-            let _ = file.flush().await;
-            if self.total_bytes as u64 > MAX_RETAINED_OUTPUT_FILE_BYTES {
-                let _ = file.set_len(MAX_RETAINED_OUTPUT_FILE_BYTES).await;
-                // Seek to new end so post-exit drain appends correctly.
-                let _ = file.seek(std::io::SeekFrom::End(0)).await;
+        let Some(file) = self.file_handle.as_mut() else {
+            return;
+        };
+        let tool_call_id = self.tool_call_id.as_str();
+        if tokio::time::timeout(IO_TIMEOUT, file.flush())
+            .await
+            .is_err()
+        {
+            tracing::warn!(tool_call_id, "terminal.actor.output_flush_timeout");
+        }
+        if self.total_bytes as u64 > MAX_RETAINED_OUTPUT_FILE_BYTES {
+            if tokio::time::timeout(IO_TIMEOUT, file.set_len(MAX_RETAINED_OUTPUT_FILE_BYTES))
+                .await
+                .is_err()
+            {
+                tracing::warn!(tool_call_id, "terminal.actor.output_truncate_timeout");
+            }
+            // Seek to new end so post-exit drain appends correctly.
+            if tokio::time::timeout(IO_TIMEOUT, file.seek(std::io::SeekFrom::End(0)))
+                .await
+                .is_err()
+            {
+                tracing::warn!(tool_call_id, "terminal.actor.output_seek_timeout");
             }
         }
     }
@@ -590,6 +772,18 @@ impl ProcessState {
             output_encoding: self.output_encoding.clone(),
             is_backgrounded: self.bg_status.is_backgrounded(),
             detach: self.detach,
+        }
+    }
+
+    /// Snapshot read bounded by [`IO_TIMEOUT`]: a wedged log read degrades to
+    /// the metadata-only row instead of pinning the actor loop.
+    async fn to_task_snapshot_bounded(&self, task_id: &str) -> TaskSnapshot {
+        match tokio::time::timeout(IO_TIMEOUT, self.to_task_snapshot(task_id)).await {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                tracing::warn!(task_id, "terminal.actor.snapshot_timeout");
+                self.to_task_snapshot_metadata(task_id)
+            }
         }
     }
 
@@ -718,6 +912,9 @@ struct LocalTerminalActor {
 
     #[cfg(unix)]
     login_env: Option<HashMap<String, String>>,
+
+    /// Liveness shared with the watchdog task.
+    watch: Arc<ActorWatch>,
 }
 
 impl LocalTerminalActor {
@@ -735,12 +932,14 @@ impl LocalTerminalActor {
         session_scope: Option<crate::util::ProcessScope>,
         shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
         sandbox_launch: Option<Arc<dyn crate::sandbox_launch::SandboxLaunch>>,
+        watch: Arc<ActorWatch>,
     ) -> Self {
         let ActorSettings {
             completed_task_ttl,
             foreground_block_budget,
             output_file_cap,
             tick_interval,
+            ..
         } = settings;
         Self {
             cmd_rx,
@@ -771,11 +970,17 @@ impl LocalTerminalActor {
             static_shell: None,
             #[cfg(unix)]
             login_env: None,
+            watch,
         }
     }
 
     fn sandbox_hook(&self) -> Option<&dyn crate::sandbox_launch::SandboxLaunch> {
         self.sandbox_launch.as_deref()
+    }
+
+    /// Stamp the watchdog; also republishes which commands the loop is holding.
+    fn publish_progress(&self) {
+        self.watch.publish(&self.processes);
     }
 
     async fn spawn_command(
@@ -1066,6 +1271,7 @@ impl LocalTerminalActor {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
+            self.publish_progress();
             let waiter_deadline = self.next_waiter_deadline();
             tokio::select! {
                 // Bias commands (cancel, kill) over ticking so kills are handled
@@ -1130,7 +1336,7 @@ impl LocalTerminalActor {
                     process.output_buffer.extend_from_slice(&decoded);
                     process.total_bytes += decoded.len();
                     if let Some(ref mut file) = process.file_handle {
-                        let _ = file.write_all(&decoded).await;
+                        append_output_bounded(&process.tool_call_id, file, &decoded).await;
                     }
                     process.maybe_truncate();
                 }
@@ -1167,7 +1373,7 @@ impl LocalTerminalActor {
             }
             TerminalCommand::GetTask { task_id, reply } => {
                 let snapshot = match self.processes.get(&task_id) {
-                    Some(p) => Some(p.to_task_snapshot(&task_id).await),
+                    Some(p) => Some(p.to_task_snapshot_bounded(&task_id).await),
                     None => self.completed_task_snapshots.get(&task_id).cloned(),
                 };
                 let _ = reply.send(snapshot);
@@ -1196,7 +1402,7 @@ impl LocalTerminalActor {
                     Vec::with_capacity(self.processes.len() + self.completed_task_snapshots.len());
                 for (id, p) in &self.processes {
                     if include_output {
-                        snapshots.push(p.to_task_snapshot(id).await);
+                        snapshots.push(p.to_task_snapshot_bounded(id).await);
                     } else {
                         snapshots.push(p.to_task_snapshot_metadata(id));
                     }
@@ -1259,6 +1465,10 @@ impl LocalTerminalActor {
             TerminalCommand::KillForegroundCommandsByOwner { owner_session_id } => {
                 self.kill_foreground_commands_by_owner(&owner_session_id)
                     .await;
+            }
+            #[cfg(test)]
+            TerminalCommand::TestStallActor { duration } => {
+                tokio::time::sleep(duration).await;
             }
             TerminalCommand::KillTasksByOwner {
                 owner_session_id,
@@ -1438,7 +1648,7 @@ impl LocalTerminalActor {
         let mut any_delivered = false;
         if let Some(mut waiters) = self.completion_waiters.remove(terminal_id) {
             let snapshot = match self.processes.get(terminal_id) {
-                Some(p) => Some(p.to_task_snapshot(terminal_id).await),
+                Some(p) => Some(p.to_task_snapshot_bounded(terminal_id).await),
                 None => None,
             };
             if let Some(last) = waiters.pop() {
@@ -1610,7 +1820,7 @@ impl LocalTerminalActor {
         process.block_waited = true;
 
         if process.is_complete() {
-            let snapshot = process.to_task_snapshot(&task_id).await;
+            let snapshot = process.to_task_snapshot_bounded(&task_id).await;
             if reply.send(Some(snapshot)).is_err() {
                 // Dropped receiver: the model never saw the result; don't suppress auto-wake.
                 process.block_waited = prev_block_waited;
@@ -1635,8 +1845,10 @@ impl LocalTerminalActor {
         let task_ids: Vec<String> = self.processes.keys().cloned().collect();
 
         for task_id in &task_ids {
+            self.publish_progress();
             self.poll_process(task_id).await;
         }
+        self.publish_progress();
 
         // Drop the strong `Arc` at reap so the scope's `Weak` dies (see
         // `ProcessState::process_group`); after the loop so every reap path is caught.
@@ -1761,17 +1973,21 @@ impl LocalTerminalActor {
                     process.state_dump_handle.take()
                 };
                 if let Some(handle) = handle {
-                    match handle.await {
-                        Ok(Ok(dump)) => {
+                    // The dump reader is off-actor; a wedged pipe must not pin the loop.
+                    match tokio::time::timeout(IO_TIMEOUT, handle).await {
+                        Ok(Ok(Ok(dump))) => {
                             if let Some(ref mut state) = self.shell_state {
                                 state.update_from_dump(&dump);
                             }
                         }
-                        Ok(Err(e)) => {
+                        Ok(Ok(Err(e))) => {
                             tracing::debug!("failed to read shell state dump: {e}");
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             tracing::debug!("shell state dump task panicked: {e}");
+                        }
+                        Err(_) => {
+                            tracing::warn!(task_id, "terminal.actor.state_dump_timeout");
                         }
                     }
                 }
@@ -1790,7 +2006,7 @@ impl LocalTerminalActor {
 
             if completed && let Some(waiters) = self.completion_waiters.remove(&task_id) {
                 let snapshot = match self.processes.get(&task_id) {
-                    Some(p) => Some(p.to_task_snapshot(&task_id).await),
+                    Some(p) => Some(p.to_task_snapshot_bounded(&task_id).await),
                     None => None,
                 };
                 let mut any_delivered = false;
@@ -1830,7 +2046,7 @@ impl LocalTerminalActor {
                 continue;
             }
             let snapshot = match self.processes.get(&task_id) {
-                Some(p) => Some(p.to_task_snapshot(&task_id).await),
+                Some(p) => Some(p.to_task_snapshot_bounded(&task_id).await),
                 None => None,
             };
             if let Some(waiters) = self.completion_waiters.get_mut(&task_id) {
@@ -1884,7 +2100,7 @@ impl LocalTerminalActor {
                     self.sandbox_hook(),
                     &crate::sandbox_launch::CallId::tool(&process.tool_call_id),
                 );
-                let snapshot = process.to_task_snapshot(&task_id).await;
+                let snapshot = process.to_task_snapshot_bounded(&task_id).await;
                 process.notification_handle.send_task_complete(snapshot);
             }
         }
@@ -2076,8 +2292,7 @@ impl LocalTerminalActor {
             process.output_buffer.extend_from_slice(&new_bytes);
             process.total_bytes += new_bytes.len();
             if let Some(ref mut file) = process.file_handle {
-                let _ = file.write_all(&new_bytes).await;
-                let _ = file.flush().await;
+                append_output_bounded(&process.tool_call_id, file, &new_bytes).await;
             }
         }
 
@@ -2755,6 +2970,19 @@ impl LocalTerminalBackend {
         })
     }
 
+    /// Short watchdog periods so stall detection is observable in a test.
+    #[cfg(test)]
+    pub(crate) fn new_with_watchdog(
+        watchdog_interval: Duration,
+        stall_threshold: Duration,
+    ) -> Self {
+        Self::new_for_test(ActorSettings {
+            watchdog_interval,
+            stall_threshold,
+            ..Default::default()
+        })
+    }
+
     /// Pinned to the constants rather than the env overrides (test-only).
     #[cfg(test)]
     fn new_for_test(settings: ActorSettings) -> Self {
@@ -2793,6 +3021,13 @@ impl LocalTerminalBackend {
                 })
                 .unwrap_or(false);
 
+        let watchdog_interval = settings.watchdog_interval;
+        let stall_threshold = settings.stall_threshold;
+        let watch = Arc::new(ActorWatch::default());
+        let actor_watch = Arc::clone(&watch);
+        // Dropping this sender when the actor exits ends the watchdog task.
+        let (watch_done_tx, watch_done_rx) = oneshot::channel::<()>();
+
         let cancel_token_clone = cancel_token.clone();
         let actor_fut = async move {
             let (cgroup_guard, memory_monitor) = match memory_config {
@@ -2817,14 +3052,20 @@ impl LocalTerminalBackend {
                 session_scope,
                 shell_env_policy,
                 sandbox_launch,
+                actor_watch,
             );
             actor.run().await;
+            drop(watch_done_tx);
         };
 
+        let watchdog_fut =
+            run_actor_watchdog(watch, watch_done_rx, watchdog_interval, stall_threshold);
         if local_set_host {
             tokio::task::spawn_local(actor_fut);
+            tokio::task::spawn_local(watchdog_fut);
         } else {
             tokio::spawn(actor_fut);
+            tokio::spawn(watchdog_fut);
         }
 
         Self {
@@ -3331,6 +3572,24 @@ fn send_sigkill_to_group(process: &mut ProcessState) {
         let _ = pg.kill();
     }
     let _ = process.child.start_kill();
+}
+
+/// Appends to the task log under [`IO_TIMEOUT`]. On expiry the bytes remain in
+/// the ring buffer only and the actor loop moves on.
+async fn append_output_bounded(task_id: &str, file: &mut File, bytes: &[u8]) {
+    let write = async {
+        file.write_all(bytes).await?;
+        file.flush().await
+    };
+    match tokio::time::timeout(IO_TIMEOUT, write).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::debug!(task_id, error = %e, "terminal.output_write_failed"),
+        Err(_) => tracing::warn!(
+            task_id,
+            bytes = bytes.len(),
+            "terminal.actor.output_write_timeout"
+        ),
+    }
 }
 
 /// Drains the taken pipes off the actor, then hands the output and the
@@ -4092,6 +4351,49 @@ mod tests {
             KillOutcome::NotFound
         );
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// A blocked loop with a live command must be reported, so the next
+    /// incident names what the actor was holding instead of going silent.
+    #[tokio::test]
+    async fn watchdog_reports_stalled_actor() {
+        use crate::implementations::grok_build::task::types::test_capture;
+
+        let captured = test_capture::capture();
+        let backend = LocalTerminalBackend::new_with_watchdog(
+            Duration::from_millis(20),
+            Duration::from_millis(80),
+        );
+        let bg = backend
+            .run_background(make_request("sleep 60"))
+            .await
+            .expect("spawn");
+
+        // Let the loop publish the running task before blocking it.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        backend
+            .cmd_tx
+            .send(TerminalCommand::TestStallActor {
+                duration: Duration::from_millis(600),
+            })
+            .await
+            .expect("queue stall");
+
+        let mut events = captured.events_rx;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut stalled = false;
+        while Instant::now() < deadline && !stalled {
+            match tokio::time::timeout(Duration::from_millis(100), events.recv()).await {
+                Ok(Some(event)) => {
+                    stalled = event.level == tracing::Level::ERROR
+                        && event.fields.contains("terminal.actor.stalled");
+                }
+                Ok(None) => break,
+                Err(_) => {}
+            }
+        }
+        assert!(stalled, "watchdog must log terminal.actor.stalled");
+        let _ = backend.kill_task(&bg.task_id).await;
     }
 
     #[tokio::test]
