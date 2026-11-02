@@ -38,6 +38,8 @@ cargo fmt --all --check
 
 Windows 完整包还携带 `rg.exe`，搜索入口优先使用旁载工具，缺失时回退到系统 `PATH`。单独编译出的 EXE 不等于通过完整包校验的发布产物。
 
+Windows 上的删除操作统一走 [safe-delete](SAFE-DELETE.md)：权限层 hardline 拒绝盘根与系统目录，脚本校验允许根后执行真正的删除。
+
 ## 仓库结构
 
 | 路径 | 内容 |

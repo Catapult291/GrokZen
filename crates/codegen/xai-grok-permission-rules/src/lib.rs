@@ -12,6 +12,7 @@ pub mod exec_risk;
 pub mod folder_trust;
 pub mod gate_preflight;
 pub mod git_content_filters;
+pub mod hardline;
 pub mod managed_policy;
 pub mod policy;
 pub mod project_config;

@@ -819,6 +819,37 @@ pub fn spawn_permission_manager_with_pin(
                         continue;
                     }
 
+                    // Unconditional delete guard. `always-approve` never prompts,
+                    // and grants/classifier can be satisfied by the command text,
+                    // so this must precede every allow path.
+                    let hardline_command = match &access {
+                        AccessKind::Bash(command) | AccessKind::DetachBackground { command } => {
+                            Some(command.as_str())
+                        }
+                        _ => None,
+                    };
+                    if let Some(command) = hardline_command
+                        && let Some(hit) =
+                            xai_grok_permission_rules::hardline::detect_hardline(command)
+                    {
+                        tracing::info!(
+                            tool = ?tool_name,
+                            code = hit.code,
+                            "permission hardline: destructive target rejected before YOLO"
+                        );
+                        let decision = Decision::PolicyDeny(format!(
+                            "hardline: {} — this command is not allowed through the agent; run it outside the agent if needed",
+                            hit.reason
+                        ));
+                        let event =
+                            emit_event(&decision, false, false, None, Some(reasons::HARDLINE));
+                        let _ = respond_to.send(PermissionResolution {
+                            decision,
+                            event: Some(event),
+                        });
+                        continue;
+                    }
+
                     if yolo_mode && !shell_forced_prompt && !hook_forced_prompt {
                         tracing::debug!("YOLO mode: auto-approving permission request");
                         let decision = Decision::Allow;
@@ -6554,7 +6585,12 @@ mod tests {
                 mgr.set_yolo_mode(true);
                 assert!(mgr.is_yolo_mode());
                 assert!(!mgr.is_auto_mode(), "enabling yolo clears auto");
-                let d = decide(&mgr, AccessKind::Bash("rm -rf /".into()), dummy_update).await;
+                let d = decide(
+                    &mgr,
+                    AccessKind::Bash("rm -rf ./build".into()),
+                    dummy_update,
+                )
+                .await;
                 assert!(
                     matches!(d, Decision::Allow),
                     "yolo must allow without classifier, got {d:?}"
@@ -6633,10 +6669,10 @@ mod tests {
                 assert!(event.classifier_latency_ms.is_some());
                 assert_eq!(event.auto_denials_consecutive, Some(0));
                 assert_eq!(event.auto_denials_total, Some(0));
-                let d = decide(&mgr, AccessKind::Bash("rm -rf /".into()), dummy_update).await;
+                let d = decide(&mgr, AccessKind::Bash("chmod 777 .".into()), dummy_update).await;
                 assert!(
                     matches!(d, Decision::Reject(_)),
-                    "dangerous rm -rf / must still prompt, got {d:?}"
+                    "flagged chmod must still prompt, got {d:?}"
                 );
                 let event = events.try_recv().expect("event must be emitted");
                 assert_eq!(
@@ -7632,6 +7668,137 @@ mod tests {
                     prompts.borrow().len(),
                     0,
                     "approve-all-bash must not prompt under classifier Block"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn yolo_bash_hardline_denies_without_prompt() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, _e) =
+                    manager_with_recording_client(&cwd, None, client, ClientType::GrokPager);
+                mgr.set_yolo_mode(true);
+                for _ in 0..20 {
+                    if mgr.is_yolo_mode() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+
+                for command in [
+                    "rm -rf /c/",
+                    "Remove-Item C:\\ -Recurse -Force",
+                    "cmd /c rd /s /q C:\\",
+                ] {
+                    let decision = decide(&mgr, AccessKind::Bash(command.into()), tool_call()).await;
+                    assert!(
+                        matches!(&decision, Decision::PolicyDeny(reason) if reason.starts_with("hardline:")),
+                        "`{command}` must be hardline-denied, got {decision:?}"
+                    );
+                }
+                assert_eq!(
+                    prompts.borrow().len(),
+                    0,
+                    "hardline must reject without prompting"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn yolo_bash_non_hardline_still_allows() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, _e) =
+                    manager_with_recording_client(&cwd, None, client, ClientType::GrokPager);
+                mgr.set_yolo_mode(true);
+                for _ in 0..20 {
+                    if mgr.is_yolo_mode() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+
+                for command in ["rm -rf ./build", "Remove-Item .\\build -Recurse -Force"] {
+                    let decision =
+                        decide(&mgr, AccessKind::Bash(command.into()), tool_call()).await;
+                    assert!(
+                        matches!(decision, Decision::Allow),
+                        "`{command}` must stay allowed under YOLO, got {decision:?}"
+                    );
+                }
+                assert_eq!(prompts.borrow().len(), 0);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn hardline_denies_detach_background() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, _e) =
+                    manager_with_recording_client(&cwd, None, client, ClientType::GrokPager);
+                mgr.set_yolo_mode(true);
+                for _ in 0..20 {
+                    if mgr.is_yolo_mode() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+
+                let decision = decide(
+                    &mgr,
+                    AccessKind::DetachBackground {
+                        command: "rm -rf /c/".into(),
+                    },
+                    tool_call(),
+                )
+                .await;
+                assert!(
+                    matches!(&decision, Decision::PolicyDeny(reason) if reason.starts_with("hardline:")),
+                    "detached hardline command must be denied, got {decision:?}"
+                );
+                assert_eq!(prompts.borrow().len(), 0);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn hardline_denies_despite_exact_grant() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let command = "rm -rf /c/";
+                let state = PermissionState {
+                    allowed_bash_commands: HashSet::from([command.to_string()]),
+                    ..Default::default()
+                };
+                persist_state(&cwd, &state, None).await;
+
+                let (mgr, _e) = test_manager(&cwd, true, None);
+                let decision = decide(&mgr, AccessKind::Bash(command.into()), tool_call()).await;
+                assert!(
+                    matches!(&decision, Decision::PolicyDeny(reason) if reason.starts_with("hardline:")),
+                    "an exact grant must not bypass hardline, got {decision:?}"
                 );
             })
             .await;
