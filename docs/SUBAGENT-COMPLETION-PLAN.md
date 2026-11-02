@@ -40,7 +40,7 @@
 | 文档与代码默认值一致 | **已验收** | 抽查 `background=true`、`max_depth=2`、`max_total_agents=16`、`max_concurrent=32`、`worktree_base=head`，中英文档与代码一致 | 无 |
 | 6.4 指标 | **已完成** | 7 个 metrics 单测；`cargo check` tools/shell 通过 | 无 |
 
-结论：**任务 A、B 已完成，阶段 6 验收缺口已补齐**。剩余任务 G（既有失败基线）见 §3；任务 F（端到端验证）已完成，验证记录见 §3 与 §5。
+结论：**任务 A、B 已完成，阶段 6 验收缺口已补齐**。任务 G（既有失败基线）与任务 F（端到端验证）均已完成，见 §3 与 §5。
 
 ## 3. 剩余任务（按执行顺序）
 
@@ -241,7 +241,7 @@ cargo test -p xai-grok-tools --lib task::
 
 ### 任务 G（P1）：处理既有测试失败基线
 
-**状态**：待办
+**状态**：已完成（见 §5 验证记录，提交哈希见 git log）
 
 **目标**：把与阶段 6 无关的既有失败查清，避免后续测试计划被噪声淹没。
 
@@ -255,6 +255,14 @@ cargo test -p xai-grok-tools --lib task::
 - `xai-grok-tools`：
   - `types::skill_discovery_tracker::skill_path_suggestion::tests::rewrites_worktree_paths_to_display_cwd_but_preserves_external_paths`
 - `xai-grok-shell`：`agent::subagent` 下 `wake::` 三例在 debug 构建有既有栈溢出，使用 `-- --skip wake::`（见 `eaf0fe70` 提交说明）。
+
+**查因结论（2026-11-02）**：
+
+- trust 两例：**真实回归**。`xai-grok-permission-rules/src/worktree.rs` 的只读副本 `get()` 用 `contains('/')` 判路径，而写入侧 `WorktreeDb::get`（`xai-fast-worktree/src/db/mod.rs`）已修为 `std::path::is_separator` + `has_root` 并在注释里写明旧行为是 bug（`C:\...` 反斜杠路径全部漏进 id/label 分支）。Windows 上 grok-managed worktree 的 trust 塌缩因此完全失效（用户会被按 worktree 重复询问信任）。已对齐写入侧语义修复，并把固化旧行为的 `key_without_slash_uses_id_then_label_not_path` 测试改为分平台断言 `path_key_dispatch_matches_worktree_db_get`。
+- `create_uses_the_path_captured_before_cwd_changes`：**测试代码 bug（全平台）**。`PathBuf::ends_with("/captured")` 会把 `/captured` 解析为 `[RootDir, "captured"]`，任何绝对路径的尾部组件都无法匹配（`created` 实为 `String`，原断言按字符串意图书写）。已改为叶子组件比较 `Path::new(&created).file_name()`。
+- `sync_fork_response_includes_strategy_report`：**Windows 环境跳过**。`xai-fast-worktree/src/worktree/execute.rs` 的 `grove_arm` 在本构建是无桩实现（恒 `Ok(None)` 且不写入 `ArmSkip`），Windows 上它是唯一快速路径，Grove 请求必然落到 copy 且无 fallback reason 可断言；Linux 上 overlay/btrfs 先胜出故 CI 不触发。两处 fallback-reason 断言已加 `#[cfg(not(windows))]` 并注明原因，断言本体保留。
+- `skill_path_suggestion`：**真实回归（基线漏记）**。实现里 `!skill_path.is_absolute()` 在 Windows 上拒绝 `/repo/...` 形 rooted 路径，导致该模块 10 例中 7 例失败（基线只记录了 1 例）。守卫意图是"跳过相对路径注册"，已改为跨平台等价的 `!skill_path.has_root()`，7 例全部恢复。
+- `wake::` 三例：debug 构建栈溢出（`STATUS_STACK_OVERFLOW`，2026-11-02 现场复现取证），维持 `--skip wake::` 既有做法；收紧属测试基建行为变更，留待后续决定。
 
 **做法**：
 
@@ -303,6 +311,7 @@ rustfmt --edition 2024 --check <changed-file>
 | 2026-11-02 | 任务 D max_turns partial 可续跑 | 通过 | `cargo test -p xai-grok-tools --lib task::`（370 passed，0 failed，新增 2 例）；`cargo test -p xai-grok-shell --lib agent::subagent -- --skip wake::`（289 passed）；提交 `73e4cc18` |
 | 2026-11-02 | 任务 E 控制面 spawn→list→send→interrupt→resume 流程 | 通过 | `cargo test -p xai-grok-tools --lib task::`（371 passed，0 failed，新增 1 例 `control_plane_flow_spawn_list_send_interrupt_then_resume`）；提交 `d6a53015` |
 | 2026-11-02 | 任务 F 端到端验证（explore→implementer→workflow） | 通过（2 项残余见任务 F 验证记录） | 真实会话 + glm-5.3-flash(cline)：explore 定位正确、implementer 修复后 unittest 全绿（主会话复核）；workflow `complete` 带符合 `output_schema` 的结构化输出；`unified.jsonl` 三条 `subagent completed` 均含 `subagent_type`/`stop_reason`/`partial`；`list_agents` 运行态/终态字段实测一致 |
+| 2026-11-02 | 任务 G 既有失败基线 | 通过（3 项修复，1 项环境跳过，1 项维持既有 skip） | `cargo test -p xai-grok-workspace --lib worktree`（116 passed，0 failed）；`cargo test -p xai-grok-workspace --lib trust::`（54 passed）；`cargo test -p xai-grok-tools --lib skill_path_suggestion`（10 passed，0 failed，修复 7 例）；`cargo test -p xai-grok-permission-rules`（全绿）；`cargo test -p xai-grok-shell --lib agent::subagent -- --skip wake::`（289 passed）；`wake::` 栈溢出现场复现（`STATUS_STACK_OVERFLOW`，维持 skip） |
 
 ## 6. 提交约定
 

@@ -62,9 +62,11 @@ fn schema_supported(conn: &Connection) -> bool {
     matches!(version, Ok(v) if v.parse::<u32>() == Ok(SCHEMA_VERSION))
 }
 
-/// Matches `WorktreeDb::get`, including Windows paths without `/` falling through to the id and label lookups
+/// Matches `WorktreeDb::get`: any path separator (including `\` on Windows) or a rooted path is treated as a path; only bare ids and labels fall through to the id and label lookups.
 fn get(conn: &Connection, id_or_path: &str) -> rusqlite::Result<Option<PathBuf>> {
-    if id_or_path.contains('/') {
+    let is_path =
+        id_or_path.chars().any(std::path::is_separator) || Path::new(id_or_path).has_root();
+    if is_path {
         let canon = crate::trust::canonicalize_or_owned(Path::new(id_or_path));
         return get_one(conn, GET_BY_PATH, &canon.to_string_lossy());
     }
@@ -243,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn key_without_slash_uses_id_then_label_not_path() {
+    fn path_key_dispatch_matches_worktree_db_get() {
         let reg = registry();
         let backslash_path = r"C:\grok\worktrees\repo\wt";
         insert(
@@ -253,6 +255,15 @@ mod tests {
             "1",
             Some(r#"{"label":"wt"}"#),
         );
+        // Mirror `WorktreeDb::get`: a key carrying the platform separator is a
+        // path, so on Windows the backslash form reaches the path lookup; on
+        // unix a backslash string is a bare id/label key and falls through.
+        #[cfg(windows)]
+        assert_eq!(
+            get(&reg.conn, backslash_path).unwrap(),
+            Some(PathBuf::from("/src/wt-id"))
+        );
+        #[cfg(not(windows))]
         assert_eq!(get(&reg.conn, backslash_path).unwrap(), None);
         assert_eq!(
             get(&reg.conn, "wt-id").unwrap(),
