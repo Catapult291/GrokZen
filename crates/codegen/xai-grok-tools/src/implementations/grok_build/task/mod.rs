@@ -3023,6 +3023,182 @@ mod tests {
         handle.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn fork_context_with_explore_defaults_to_read_only() {
+        let (backend, mut rx) = make_backend();
+        let mut resources = Resources::new();
+        resources.insert(backend);
+        resources.insert(SubagentDepthCounter(0));
+        resources.insert(SessionIdResource("parent".to_string()));
+        resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
+
+        let shared = resources.into_shared();
+        let handle = tokio::spawn(async move {
+            let request = unwrap_spawn(rx.recv().await.unwrap());
+            assert!(
+                request.fork_context,
+                "context=fork on a fresh spawn must set fork_context"
+            );
+            assert_eq!(
+                request.runtime_overrides.capability_mode,
+                Some(SubagentCapabilityMode::ReadOnly),
+                "forked non-implementer child must default to read-only"
+            );
+            request
+                .respond_with(|request| SubagentResult {
+                    success: true,
+                    output: "ok".into(),
+                    subagent_id: request.id.clone(),
+                    child_session_id: request.id.clone(),
+                    ..Default::default()
+                })
+                .unwrap();
+        });
+
+        let _ = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(shared),
+            TaskToolInput {
+                label: None,
+                description: "d".into(),
+                prompt: "p".into(),
+                subagent_type: "explore".into(),
+                subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
+                run_in_background: false,
+                capability_mode: None,
+                isolation: None,
+                context: Some(SubagentContextMode::Fork),
+                resume_from: None,
+                cwd: None,
+                model: None,
+                workspace: None,
+                task_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fork_context_with_implementer_skips_read_only_default() {
+        let (backend, mut rx) = make_backend();
+        let mut resources = Resources::new();
+        resources.insert(backend);
+        resources.insert(SubagentDepthCounter(0));
+        resources.insert(SessionIdResource("parent".to_string()));
+        resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
+
+        let shared = resources.into_shared();
+        let handle = tokio::spawn(async move {
+            let request = unwrap_spawn(rx.recv().await.unwrap());
+            assert!(
+                request.fork_context,
+                "context=fork on a fresh spawn must set fork_context"
+            );
+            assert_eq!(
+                request.runtime_overrides.capability_mode, None,
+                "forked implementer child must keep the caller-controlled capability mode"
+            );
+            request
+                .respond_with(|request| SubagentResult {
+                    success: true,
+                    output: "ok".into(),
+                    subagent_id: request.id.clone(),
+                    child_session_id: request.id.clone(),
+                    ..Default::default()
+                })
+                .unwrap();
+        });
+
+        let _ = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(shared),
+            TaskToolInput {
+                label: None,
+                description: "d".into(),
+                prompt: "p".into(),
+                subagent_type: "implementer".into(),
+                subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
+                run_in_background: false,
+                capability_mode: None,
+                isolation: None,
+                context: Some(SubagentContextMode::Fork),
+                resume_from: None,
+                cwd: None,
+                model: None,
+                workspace: None,
+                task_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fork_context_yields_to_resume_from() {
+        let (backend, mut rx) = make_backend();
+        let mut resources = Resources::new();
+        resources.insert(backend);
+        resources.insert(SubagentDepthCounter(0));
+        resources.insert(SessionIdResource("parent".to_string()));
+        resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
+
+        let shared = resources.into_shared();
+        let handle = tokio::spawn(async move {
+            let request = unwrap_spawn(rx.recv().await.unwrap());
+            assert_eq!(request.resume_from.as_deref(), Some("prev-id"));
+            assert!(
+                !request.fork_context,
+                "resume_from wins over context=fork; resume must stay fresh"
+            );
+            assert_eq!(
+                request.runtime_overrides.capability_mode, None,
+                "no fork default without fork_context"
+            );
+            request
+                .respond_with(|request| SubagentResult {
+                    success: true,
+                    output: "resumed".into(),
+                    subagent_id: request.id.clone(),
+                    child_session_id: request.id.clone(),
+                    ..Default::default()
+                })
+                .unwrap();
+        });
+
+        let _ = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(shared),
+            TaskToolInput {
+                label: None,
+                description: "resume".into(),
+                prompt: "continue".into(),
+                subagent_type: "explore".into(),
+                subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
+                run_in_background: false,
+                capability_mode: None,
+                isolation: None,
+                context: Some(SubagentContextMode::Fork),
+                resume_from: Some("prev-id".into()),
+                cwd: None,
+                model: None,
+                workspace: None,
+                task_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        handle.await.unwrap();
+    }
+
     #[test]
     fn resume_from_defaults_to_none() {
         let input: TaskToolInput =
