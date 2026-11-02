@@ -3140,10 +3140,16 @@ impl TerminalBackend for LocalTerminalBackend {
     }
 
     async fn kill_foreground_commands(&self) {
-        let _ = self
+        // Control commands must never block the cancel path on a full channel.
+        if let Err(error) = self
             .cmd_tx
-            .send(TerminalCommand::KillForegroundCommands)
-            .await;
+            .try_send(TerminalCommand::KillForegroundCommands)
+        {
+            tracing::warn!(
+                %error,
+                "terminal.kill_foreground_commands.send_failed"
+            );
+        }
     }
 
     async fn kill_all_background_tasks(&self) {
@@ -3181,12 +3187,19 @@ impl TerminalBackend for LocalTerminalBackend {
     }
 
     async fn kill_foreground_commands_by_owner(&self, owner_session_id: &str) {
-        let _ = self
+        // Control commands must never block the cancel path on a full channel.
+        if let Err(error) = self
             .cmd_tx
-            .send(TerminalCommand::KillForegroundCommandsByOwner {
+            .try_send(TerminalCommand::KillForegroundCommandsByOwner {
                 owner_session_id: owner_session_id.to_string(),
             })
-            .await;
+        {
+            tracing::warn!(
+                %error,
+                owner_session_id,
+                "terminal.kill_foreground_commands_by_owner.send_failed"
+            );
+        }
     }
 
     async fn kill_all_background_tasks_by_owner(&self, owner_session_id: &str) {
