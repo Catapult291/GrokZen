@@ -1783,6 +1783,62 @@ async fn teardown_session_children_spares_other_sessions() {
     harness.actor.abort();
 }
 
+/// Stage 6.1: two foreground spawns from the same step must overlap in the
+/// coordinator, and finishing one must not wait for the other.
+#[tokio::test]
+async fn parallel_foreground_spawns_overlap_and_finish_independently() {
+    const START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let backend = harness.backend.clone();
+
+    let first = tokio::spawn({
+        let backend = backend.clone();
+        async move { backend.spawn(request("a", false), None).await }
+    });
+    let second = tokio::spawn({
+        let backend = backend.clone();
+        async move { backend.spawn(request("b", false), None).await }
+    });
+
+    // Neither child may be held behind the other: both reach `started` before
+    // any completion signal is sent.
+    let mut started = std::collections::HashSet::new();
+    for _ in 0..2 {
+        let id = tokio::time::timeout(START_TIMEOUT, harness.started.recv())
+            .await
+            .expect("both foreground spawns must start before either finishes")
+            .expect("started channel open");
+        started.insert(id);
+    }
+    assert_eq!(
+        started,
+        ["a".to_owned(), "b".to_owned()].into_iter().collect()
+    );
+
+    // Complete only `a`; `b`'s spawn must still be in flight.
+    let _ = harness.finish_one.send("a".to_owned());
+    let a = tokio::time::timeout(START_TIMEOUT, first)
+        .await
+        .expect("finishing a must return its spawn")
+        .unwrap()
+        .unwrap();
+    assert!(a.success && !a.cancelled);
+    assert!(
+        !second.is_finished(),
+        "finishing a must not complete b's spawn"
+    );
+
+    let _ = harness.finish_one.send("b".to_owned());
+    let b = tokio::time::timeout(START_TIMEOUT, second)
+        .await
+        .expect("finishing b must return its spawn")
+        .unwrap()
+        .unwrap();
+    assert!(b.success && !b.cancelled);
+    harness.actor.abort();
+}
+
 #[tokio::test]
 async fn teardown_holds_admission_until_children_drain_then_reopens() {
     // The child stays active after cancellation, so admission remains blocked until teardown finishes.
