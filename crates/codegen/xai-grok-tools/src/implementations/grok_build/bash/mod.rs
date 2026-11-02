@@ -1533,6 +1533,60 @@ impl BashTool {
         ))
     }
 
+    /// Upper bound for the lookups that run after a backgrounded notification
+    /// was already handed to the client. A wedged `resources` lock here must
+    /// not keep the tool future (and with it the whole turn) pending forever.
+    const BACKGROUND_FINALIZE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// [`Self::background_retrieval_hint`] with a hard bound and a literal fallback.
+    async fn background_retrieval_hint_bounded(
+        resources: &SharedResources,
+        task_id: &str,
+    ) -> String {
+        match tokio::time::timeout(
+            Self::BACKGROUND_FINALIZE_TIMEOUT,
+            Self::background_retrieval_hint(resources, task_id),
+        )
+        .await
+        {
+            Ok(Ok(hint)) => hint,
+            Ok(Err(err)) => {
+                tracing::warn!(task_id, error = %err, "background retrieval hint unavailable");
+                Self::fallback_background_retrieval_hint(task_id)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    task_id,
+                    "background retrieval hint timed out; using fallback"
+                );
+                Self::fallback_background_retrieval_hint(task_id)
+            }
+        }
+    }
+
+    fn fallback_background_retrieval_hint(task_id: &str) -> String {
+        format!("Use get_task_output with task_ids=[\"{task_id}\"] when you need the output.")
+    }
+
+    /// [`Self::execute_param_name`] with the same hard bound.
+    async fn execute_param_name_bounded(resources: &SharedResources, canonical: &str) -> String {
+        match tokio::time::timeout(
+            Self::BACKGROUND_FINALIZE_TIMEOUT,
+            Self::execute_param_name(resources, canonical),
+        )
+        .await
+        {
+            Ok(name) => name,
+            Err(_) => {
+                tracing::warn!(
+                    param = canonical,
+                    "bash param-name lookup timed out; using canonical name"
+                );
+                canonical.to_string()
+            }
+        }
+    }
+
     /// The client-facing name for one of this tool's params, looked up by its schema property key.
     /// This reads the param map directly. A template render of a missing key returns an empty `Ok`.
     async fn execute_param_name(resources: &SharedResources, canonical: &str) -> String {
@@ -2313,7 +2367,8 @@ impl xai_tool_runtime::Tool for BashTool {
                 detach: input.detach,
             });
 
-            let retrieval_hint = Self::background_retrieval_hint(&resources, &task_id).await?;
+            let retrieval_hint =
+                Self::background_retrieval_hint_bounded(&resources, &task_id).await;
 
             Ok(BashToolOutput::Background(BackgroundTaskStarted {
                 task_id: task_id.clone(),
@@ -2441,7 +2496,8 @@ impl xai_tool_runtime::Tool for BashTool {
                 });
 
                 let retrieval_hint =
-                    Self::background_retrieval_hint(&resources, tool_call_id.as_str()).await?;
+                    Self::background_retrieval_hint_bounded(&resources, tool_call_id.as_str())
+                        .await;
 
                 let summary = if auto_backgrounded {
                     let desc = input.description.trim();
@@ -2453,7 +2509,7 @@ impl xai_tool_runtime::Tool for BashTool {
                     let wait_ms = Self::resolved_auto_bg_wait_ms(&params, timeout);
                     if single_knob {
                         let block_param =
-                            Self::execute_param_name(&resources, "block_until_ms").await;
+                            Self::execute_param_name_bounded(&resources, "block_until_ms").await;
                         block_expired_summary(label, wait_ms, &block_param, tool_call_id.as_str())
                     } else {
                         auto_backgrounded_summary(label, wait_ms)
@@ -2565,6 +2621,22 @@ impl xai_tool_runtime::Tool for BashTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A wedged `SharedResources` lock must not keep the post-background
+    /// finalization — and with it the tool future — pending past the bound.
+    #[tokio::test(start_paused = true)]
+    async fn background_finalize_timeout_yields_a_fallback_hint() {
+        let resources: crate::types::resources::SharedResources = std::sync::Arc::new(
+            tokio::sync::Mutex::new(crate::types::resources::Resources::new()),
+        );
+        let _held = resources.lock().await;
+        let hint = BashTool::background_retrieval_hint_bounded(&resources, "task-123").await;
+        assert!(
+            hint.contains("task-123"),
+            "fallback hint must name the task: {hint}"
+        );
+    }
+
     #[test]
     fn bash_timeout_schema_defaults_to_120s() {
         let schema = serde_json::to_value(schemars::schema_for!(BashToolInput)).unwrap();
