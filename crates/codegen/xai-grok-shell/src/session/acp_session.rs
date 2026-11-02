@@ -381,6 +381,9 @@ fn backdate_edit_hold(
 /// Credentials (api_key, optional extra access key, client_version) live in the `credentials` sync mutex on `SessionActor`.
 pub(crate) struct State {
     pub(crate) running_task: Option<AgentTask>,
+    /// Cooperative-cancellation handle for the current turn's tool calls.
+    /// Replaced on promotion and cancelled before the turn task is aborted.
+    pub(crate) turn_cancel: tokio_util::sync::CancellationToken,
     finalization_gate: FinalizationGate,
     pub(crate) message_delivery: parent_message::MessageDeliveryState,
     pub(crate) pending_inputs: VecDeque<InputItem>,

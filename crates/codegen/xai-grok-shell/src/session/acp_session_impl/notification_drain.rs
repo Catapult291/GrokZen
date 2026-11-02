@@ -422,6 +422,9 @@ impl SessionActor {
         // Bump the epoch here rather than in `handle_prompt`: a cancel reads the slot as soon as
         // `running_task` is set on the next line.
         let epoch = self.turn_report.start_next_turn();
+        // A fresh token per turn: a late cancel from the previous turn must not
+        // touch tool calls that belong to the newly promoted one.
+        state.turn_cancel = tokio_util::sync::CancellationToken::new();
         let (publication_release, start_gate) = if initial_child_prompt_ready.is_some() {
             let (release, released) = oneshot::channel();
             (Some(release), Some(released))

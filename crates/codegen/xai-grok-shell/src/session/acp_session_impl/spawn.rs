@@ -653,6 +653,7 @@ pub(crate) async fn spawn_session_actor(
     chat_state_handle.update_credentials(credentials);
     let state = TokioMutex::new(State {
         running_task: None,
+        turn_cancel: tokio_util::sync::CancellationToken::new(),
         finalization_gate: Default::default(),
         message_delivery: Default::default(),
         pending_inputs: VecDeque::new(),

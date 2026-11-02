@@ -717,11 +717,15 @@ impl SessionActor {
             self.promote_queued_as_interjections().await;
         }
         let pending_interjections = self.pending_interjections.clone();
-        let (parent_interject, running_turn) = {
+        let (parent_interject, running_turn, turn_cancel) = {
             let state = self.state.lock().await;
             (
                 state.message_delivery.interject_signal(),
                 state.running_task.as_ref().map(|task| task.epoch),
+                state
+                    .running_task
+                    .as_ref()
+                    .map(|_| state.turn_cancel.clone()),
             )
         };
         let session_id: Arc<str> = Arc::from(&*self.session_info.id.0);
@@ -792,6 +796,7 @@ impl SessionActor {
                     .and_then(|p| p.as_ref())
                     .and_then(|path| file_locks.get(path).cloned());
                 let tools_execute_span = tracing::Span::current();
+                let turn_cancel = turn_cancel.clone();
                 async move {
                     let exec_start = std::time::Instant::now();
                     let tool_span = crate::session::telemetry::tool_execution_span(
@@ -833,6 +838,7 @@ impl SessionActor {
                         let workflow_validate_only_param = workflow_validate_only_param.clone();
                         let latest_slot = std::sync::Arc::clone(&latest_slot);
                         let origin = origin.clone();
+                        let turn_cancel = turn_cancel.clone();
                         async move {
                             let slot =
                                 xai_grok_tools::types::source_summary::SourceSummarySlot::new();
@@ -849,6 +855,7 @@ impl SessionActor {
                                     &session_id,
                                     origin,
                                     slot,
+                                    turn_cancel,
                                 )
                                 .await
                             };

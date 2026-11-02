@@ -155,6 +155,7 @@ fn monitor_event_notification(task_id: &str) -> PendingNotification {
 fn pending_notification_cap_keeps_newest_entries() {
     let mut state = State {
         running_task: None,
+        turn_cancel: tokio_util::sync::CancellationToken::new(),
         finalization_gate: Default::default(),
         message_delivery: Default::default(),
         pending_inputs: std::collections::VecDeque::new(),
