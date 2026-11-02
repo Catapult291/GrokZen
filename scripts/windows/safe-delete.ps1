@@ -181,6 +181,10 @@ if ($Path -match '^[\\/]') {
     Stop-Rejected -Message 'root-relative paths are not allowed' -Original $Path -ReasonText $Reason
 }
 
+if (-not [IO.Path]::IsPathRooted($Path)) {
+    Stop-Rejected -Message 'relative paths are not allowed; pass an absolute path' -Original $Path -ReasonText $Reason
+}
+
 try {
     $resolved = ConvertTo-NormalizedPath $Path
 }

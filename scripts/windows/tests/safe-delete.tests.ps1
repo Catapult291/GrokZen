@@ -200,6 +200,23 @@ function Test-RejectRelativePath {
     Assert-Equal 2 $result.ExitCode 'reject relative path: exit 2'
 }
 
+function Test-RejectBareRelativePath {
+    $sb = New-TestSandbox
+    $target = Join-Path $sb.Root 'build'
+    New-Item -ItemType Directory -Path $target -Force | Out-Null
+
+    Push-Location $sb.Root
+    try {
+        $result = Invoke-SafeDelete -TargetPath 'build' -AllowedRoot $sb.Root -LogFile $sb.Log
+    }
+    finally {
+        Pop-Location
+    }
+
+    Assert-Equal 2 $result.ExitCode 'reject bare relative path: exit 2'
+    Assert-True (Test-Path -LiteralPath $target) 'reject bare relative path: target untouched'
+}
+
 function Test-RejectWildcard {
     $sb = New-TestSandbox
     $keep = Join-Path $sb.Root 'keep.txt'
@@ -384,6 +401,7 @@ try {
     Invoke-Test 'reject drive root' { Test-RejectDriveRoot }
     Invoke-Test 'reject system directory' { Test-RejectWindowsDirectory }
     Invoke-Test 'reject relative path' { Test-RejectRelativePath }
+    Invoke-Test 'reject bare relative path' { Test-RejectBareRelativePath }
     Invoke-Test 'reject wildcard' { Test-RejectWildcard }
     Invoke-Test 'reject UNC path' { Test-RejectUnc }
     Invoke-Test 'reject device namespace' { Test-RejectDeviceNamespace }
