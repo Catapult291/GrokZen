@@ -147,7 +147,9 @@ cargo test -p xai-grok-tools --lib task::
 
 ### 任务 D（P1）：补 §5 单测缺口 — `max_turns` partial 可续跑
 
-**状态**：待办
+**状态**：已完成（`73e4cc18`）
+
+**实现发现（未决）**：coordinator 的 RootSession ChildId wake 路径（`resolve_owned_child_id` → `resolve_inactive_child_id` → `wake_completed_child`，即生产 `send_active_message` 对 ChildId 目标实际走的路径）不检查 `wake_eligible`，`stop_reason=CANCELLED` 的完成记录也会被唤醒；`wake_eligible` 只在 GrantedChild 完成目标（agent_targets.rs:94）与 Agent 型目标（agent_targets.rs:212）路径及 `resumable` 列生效。`coordinator.rs:1335` 的注释「Any other cancel path still refuses wakes」与该路径的实际行为不符。对照用例因此直接断言 `CompletedChild.wake_eligible` 字段。是否收紧 RootSession 路径属行为变更，留待后续决定。
 
 **目标**：断言 `stop_reason = max_turns`、`partial = true` 的子代理仍可续跑（`send_subagent_message` / wake 或 `resume_from`），不被当成普通取消。
 
@@ -289,6 +291,7 @@ rustfmt --edition 2024 --check <changed-file>
 | 2026-11-02 | 6.1 双前台 spawn 并行 | 通过 | `cargo test -p xai-grok-tools --lib task::coordinator`（166 passed）；`cargo test -p xai-grok-tools --lib task::`（365 passed）；提交 `a9d97135` |
 | 2026-11-02 | 6.2 空 worktree 删除与清指针 | 通过 | `cargo test -p xai-grok-workspace --lib worktree`（112 passed，4 个任务 G 已知基线失败）；`cargo test -p xai-grok-shell --lib agent::subagent -- --skip wake::`（289 passed）；提交 `f61f131a` |
 | 2026-11-02 | 任务 C context=fork 映射 | 通过 | `cargo test -p xai-grok-tools --lib task::`（368 passed，0 failed，新增 3 例）；提交 `d376fca1` |
+| 2026-11-02 | 任务 D max_turns partial 可续跑 | 通过 | `cargo test -p xai-grok-tools --lib task::`（370 passed，0 failed，新增 2 例）；`cargo test -p xai-grok-shell --lib agent::subagent -- --skip wake::`（289 passed）；提交 `73e4cc18` |
 
 ## 6. 提交约定
 
