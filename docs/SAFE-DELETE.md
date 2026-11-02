@@ -37,7 +37,7 @@ YOLO 与 grant 之前调用它；即使用户此前授予了完全相同的命�
 | `posix_system_dir_delete` | `/home`、`/root`、`/etc`、`/usr`、`/var`、`/boot`、`/bin`、`/sbin`、`/lib` 及其 `/*` |
 | `home_dir_delete` | `~`、`$HOME`、`${HOME}` |
 | `windows_drive_root` | `C:\`、`C:/`、`/c/`、`\\?\C:\`、`\\.\C:` |
-| `windows_system_dir_delete` | `C:\Windows`、`C:\Program Files`、`C:\Program Files (x86)`、`C:\ProgramData` 本身，以及它们的一级 `/*` 通配 |
+| `windows_system_dir_delete` | `C:\Windows`、`C:\Program Files`、`C:\Program Files (x86)`、`C:\ProgramData` 及其全部子目录 |
 | `windows_user_home_delete` | `C:\Users`、`C:\Users\<name>`（不含其子目录） |
 | `mkfs` | `mkfs`、`mkfs.ext4` 等 |
 | `raw_device_write` | `dd of=/dev/sd*`、`nvme*`、`hd*`、`mmcblk*`、`vd*`、`xvd*`，以及 `> /dev/sd*` 等裸设备重定向 |
@@ -49,9 +49,14 @@ YOLO 与 grant 之前调用它；即使用户此前授予了完全相同的命�
 | `boot_config_write` | `bcdedit /set` |
 | `cipher_wipe` | `cipher /w` |
 
+系统目录按整棵子树匹配，`C:\Windows\System32`、`C:\Program Files\<app>`、
+`C:\ProgramData\<vendor>` 都会命中；`C:\Windows\Temp` 这类清理目标也在拒绝范围内，
+需要在代理外处理。
+
 明确不命中的情况：`rm -rf ./build`、`Remove-Item .\build -Recurse -Force`、
-`rm -rf /home/user/project`、`C:\Users\me\Documents`、`git clean -fdx`、
-`git reset --hard`，以及引号里的文本（如 `echo "rm -rf /"`）。
+`rm -rf /home/user/project`、`C:\Users\me\Documents`、`C:\WindowsOld`、
+`C:\ProgramData2`、`git clean -fdx`、`git reset --hard`，以及引号里的文本
+（如 `echo "rm -rf /"`）。
 
 hardline 不解析任意变量：`$HOME`、`$env:USERPROFILE`、`%USERPROFILE%`、
 `$env:SystemDrive`、`%SystemDrive%` 按已知根处理，`$TARGET` / `%DIR%` 不进入检测。
@@ -136,9 +141,6 @@ always-approve 的直通路径。紧凑规则中的 `Bash(...)` 按命令文本�
   脚本的变量删除仍可能发生。
 - **永久删除。** 路径写错但在允许根内时没有归档可恢复；重要数据由用户自己的
   备份覆盖。
-- **系统目录的更深子目录。** hardline 只匹配 `C:\Windows` 等目录本身和一级
-  `/*` 通配，`C:\Windows\System32`、`C:\Program Files\<app>` 这类更深的目标不在
-  检测内；`safe-delete.ps1` 会拒绝它们，但绕过脚本直接删除时 hardline 不兜底。
 - **解释器与多层嵌套。** `python -c`、`node -e`、自定义二进制，以及超过两层
   `cmd /c` / `pwsh -Command` 的嵌套不在 hardline 的词法覆盖内。
 - **编码命令。** `powershell -EncodedCommand` / `pwsh -enc` 的内容不可审计，
