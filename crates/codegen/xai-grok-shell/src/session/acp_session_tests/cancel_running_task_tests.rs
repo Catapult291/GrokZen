@@ -115,6 +115,7 @@ fn persist_ack_waits_for_disk_flush_before_success() {
                 is_chat_kind: false,
                 state: TokioMutex::new(State {
                     running_task: None,
+                    turn_cancel: tokio_util::sync::CancellationToken::new(),
                     finalization_gate: Default::default(),
                     message_delivery: Default::default(),
                     pending_inputs: VecDeque::new(),
@@ -656,6 +657,7 @@ fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history() {
                 is_chat_kind: false,
                 state: TokioMutex::new(State {
                     running_task: None,
+                    turn_cancel: tokio_util::sync::CancellationToken::new(),
                     finalization_gate: Default::default(),
                     message_delivery: Default::default(),
                     pending_inputs: VecDeque::new(),
@@ -957,6 +959,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
             );
             let state = TokioMutex::new(State {
                 running_task: None,
+                turn_cancel: tokio_util::sync::CancellationToken::new(),
                 finalization_gate: Default::default(),
                 message_delivery: Default::default(),
                 pending_inputs: VecDeque::new(),
@@ -2530,6 +2533,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
             );
             let state = TokioMutex::new(State {
                 running_task: None,
+                turn_cancel: tokio_util::sync::CancellationToken::new(),
                 finalization_gate: Default::default(),
                 message_delivery: Default::default(),
                 pending_inputs: VecDeque::new(),

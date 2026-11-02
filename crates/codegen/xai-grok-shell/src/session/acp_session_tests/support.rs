@@ -304,6 +304,7 @@ async fn create_test_actor_inner(
         Some(xai_grok_tools::reminders::task_completion::TaskWakeSuppressed::default());
     let state = TokioMutex::new(State {
         running_task: None,
+        turn_cancel: tokio_util::sync::CancellationToken::new(),
         finalization_gate: Default::default(),
         message_delivery: Default::default(),
         pending_inputs: VecDeque::new(),
