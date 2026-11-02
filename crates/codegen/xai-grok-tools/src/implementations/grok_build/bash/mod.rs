@@ -2369,7 +2369,38 @@ impl xai_tool_runtime::Tool for BashTool {
 
             let command_wait_span =
                 tracing::info_span!("bash.command_wait", output_bytes = tracing::field::Empty,);
-            let result = match backend.run(request).await {
+            // Cooperative cancellation (P1-3): when the session mounts a
+            // per-turn token, an Esc cancel must end the call immediately and
+            // best-effort kill the foreground process, even while `backend.run`
+            // is still parked on a wedged terminal actor.
+            let cancellation = ctx
+                .extensions
+                .get::<xai_tool_runtime::Cancellation>()
+                .map(|c| c.0.clone());
+            let result = if let Some(token) = cancellation {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => {
+                        // Fire-and-forget: the cancel path must never block on
+                        // the same actor that wedged the run.
+                        let kill_backend = backend.clone();
+                        let kill_id = tool_call_id.as_str().to_owned();
+                        tokio::spawn(async move {
+                            kill_backend.kill_task(&kill_id).await;
+                        });
+                        let tool_id = xai_tool_protocol::ToolId::new("run_terminal_command")
+                            .expect("valid tool id");
+                        return Err(xai_tool_runtime::ToolError::cancelled(
+                            tool_id,
+                            format!("command \"{}\" was cancelled by the user", input.command),
+                        ));
+                    }
+                    result = backend.run(request) => result,
+                }
+            } else {
+                backend.run(request).await
+            };
+            let result = match result {
                 Ok(r) => r,
                 Err(e) => {
                     notification_handle.send_failed(BashExecutionFailed {
@@ -2611,6 +2642,7 @@ mod tests {
     };
     use crate::types::resources::Resources;
     use crate::types::tool_metadata::test_ctx;
+    use crate::types::tool_metadata::test_ctx_with_call_id;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -2873,11 +2905,14 @@ mod tests {
 
     // ─── Test helpers ───
 
-    fn make_resources(mock: MockTerminal) -> Resources {
+    fn make_resources(mock: impl TerminalBackend + 'static) -> Resources {
         make_resources_with_params(mock, BashParams::default())
     }
 
-    fn make_resources_with_params(mock: MockTerminal, params: BashParams) -> Resources {
+    fn make_resources_with_params(
+        mock: impl TerminalBackend + 'static,
+        params: BashParams,
+    ) -> Resources {
         let mut resources = Resources::new();
         let backend: Arc<dyn TerminalBackend> = Arc::new(mock);
         resources.insert(Terminal(backend));
@@ -2952,6 +2987,127 @@ mod tests {
                 .insert(xai_tool_runtime::BehaviorVersion(v.to_string()));
         }
         ctx
+    }
+
+    // ─── P1-3 cooperative cancellation tests ───
+
+    /// Foreground backend that never completes and records `kill_task` calls,
+    /// standing in for a wedged terminal actor.
+    struct HangingTerminal {
+        killed: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TerminalBackend for HangingTerminal {
+        async fn run(
+            &self,
+            _request: TerminalRunRequest,
+        ) -> Result<TerminalRunResult, ComputerError> {
+            std::future::pending::<()>().await;
+            unreachable!("pending() never resolves")
+        }
+
+        async fn run_background(
+            &self,
+            _request: TerminalRunRequest,
+        ) -> Result<BackgroundHandle, ComputerError> {
+            panic!("cancellation tests never take the background path")
+        }
+
+        async fn get_task(&self, _task_id: &str) -> Option<TaskSnapshot> {
+            None
+        }
+
+        async fn kill_task(&self, task_id: &str) -> KillOutcome {
+            self.killed.lock().unwrap().push(task_id.to_string());
+            KillOutcome::Killed
+        }
+
+        async fn wait_for_completion(
+            &self,
+            _task_id: &str,
+            _timeout: Option<Duration>,
+        ) -> Option<TaskSnapshot> {
+            None
+        }
+
+        async fn list_tasks(&self) -> Vec<TaskSnapshot> {
+            vec![]
+        }
+    }
+
+    /// MockTerminal whose foreground `run` never returns + a cancel token →
+    /// `run` returns promptly with `Cancelled`, and the foreground process is
+    /// killed with the tool call's id.
+    #[tokio::test]
+    async fn cancel_token_unblocks_stuck_foreground_run_and_kills_process() {
+        let killed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let resources = make_resources(HangingTerminal {
+            killed: killed.clone(),
+        });
+        let ctx = test_ctx_with_call_id(resources.into_shared(), "bash-cancel-test");
+        let token = tokio_util::sync::CancellationToken::new();
+        let mut ctx = ctx;
+        ctx.extensions
+            .insert(xai_tool_runtime::Cancellation(token.clone()));
+
+        let task =
+            tokio::spawn(
+                async move { BashTool::run(&BashTool, ctx, make_input("sleep 3600")).await },
+            );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        token.cancel();
+
+        let error = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("cancelled call must return promptly")
+            .expect("tool task must not panic")
+            .expect_err("cancel must surface as a tool error");
+        assert_eq!(
+            error.kind,
+            xai_tool_runtime::ToolErrorKind::Cancelled,
+            "unexpected error: {error}"
+        );
+
+        // Fire-and-forget kill: poll briefly for the spawned kill task.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while killed.lock().unwrap().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "kill_task was never called"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            killed.lock().unwrap().as_slice(),
+            ["bash-cancel-test"],
+            "kill must target the tool call's own foreground command"
+        );
+    }
+
+    /// A mounted token that never fires must not disturb the normal run path.
+    #[tokio::test]
+    async fn cancel_token_left_untriggered_keeps_normal_run_path() {
+        let (mock, captured) = MockTerminal::success_capturing("ok", 0);
+        let resources = make_resources(mock);
+        let mut ctx = test_ctx(resources.into_shared());
+        ctx.extensions.insert(xai_tool_runtime::Cancellation(
+            tokio_util::sync::CancellationToken::new(),
+        ));
+
+        let output = BashTool::run(&BashTool, ctx, make_input("echo ok"))
+            .await
+            .expect("normal run must succeed");
+        match output {
+            BashToolOutput::Foreground(result) => {
+                assert_eq!(result.exit_code, 0);
+            }
+            other => panic!("expected foreground output, got {other:?}"),
+        }
+        assert!(
+            captured.lock().unwrap().is_some(),
+            "backend.run must still be awaited normally"
+        );
     }
 
     // ─── Streaming (BashTool::execute) test scaffolding ─── `test_ctx` stamps
