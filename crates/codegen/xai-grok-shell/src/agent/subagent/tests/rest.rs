@@ -359,6 +359,7 @@ fn resumed_from_none_not_serialized_in_meta() {
         subagent_id: "sa-fresh".into(),
         parent_session_id: "p".into(),
         child_session_id: "c".into(),
+        effective_tools: None,
         subagent_type: "explore".into(),
         description: "d".into(),
         prompt: "p".into(),
@@ -433,6 +434,7 @@ fn base_meta() -> SubagentMeta {
         attempt_id: None,
         parent_session_id: "parent".into(),
         child_session_id: "child".into(),
+        effective_tools: None,
         subagent_type: "general-purpose".into(),
         description: "task".into(),
         prompt: "do work".into(),
@@ -460,6 +462,7 @@ fn snapshot_test_meta(id: &str) -> SubagentMeta {
         subagent_id: id.into(),
         parent_session_id: "session-A".into(),
         child_session_id: format!("child-{id}"),
+        effective_tools: None,
         status: "completed".into(),
         completed_at: Some(chrono::Utc::now()),
         duration_ms: Some(1),
@@ -468,6 +471,20 @@ fn snapshot_test_meta(id: &str) -> SubagentMeta {
         worktree_path: Some("/tmp/grok-wt/subagent-x".into()),
         ..base_meta()
     }
+}
+/// Dropping an unchanged worktree's pointer makes a later resume fall back to
+/// the shared workspace instead of a directory that no longer exists.
+#[test]
+fn update_subagent_meta_worktree_removed_clears_the_pointer() {
+    let dir = tempfile::TempDir::new().unwrap();
+    assert!(write_subagent_meta(dir.path(), &snapshot_test_meta("sa-clear")));
+    assert!(update_subagent_meta_worktree_removed(dir.path(), "completed"));
+    let reread: SubagentMeta = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("meta.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(reread.worktree_path.is_none());
+    assert_eq!(reread.status, "completed");
 }
 /// The follow-up writer persists `snapshot_ref` into an already-finalized meta.json.
 /// `durable_resume_source_for` then rehydrates the disposed worktree from it.
@@ -706,6 +723,7 @@ fn subagent_session_metadata_roundtrip() {
         subagent_id: "sa-1".into(),
         parent_session_id: "parent-1".into(),
         child_session_id: "child-1".into(),
+        effective_tools: None,
         description: "test task".into(),
         prompt: "do something".into(),
         status: "completed".into(),
@@ -757,6 +775,7 @@ fn subagent_session_metadata_non_forked() {
         subagent_id: "sa-2".into(),
         parent_session_id: "parent-2".into(),
         child_session_id: "child-2".into(),
+        effective_tools: None,
         subagent_type: "explore".into(),
         description: "search code".into(),
         prompt: "find auth".into(),
@@ -808,6 +827,7 @@ fn upload_lifecycle_spawn_then_completion_preserves_fields() {
         subagent_id: "sa-lifecycle".into(),
         parent_session_id: "parent-1".into(),
         child_session_id: "child-1".into(),
+        effective_tools: None,
         description: "test task".into(),
         prompt: "do something".into(),
         effective_context_source: Some("forked".into()),
@@ -878,6 +898,7 @@ fn upload_lifecycle_failure_preserves_error() {
         subagent_id: "sa-fail".into(),
         parent_session_id: "p".into(),
         child_session_id: "c".into(),
+        effective_tools: None,
         subagent_type: "explore".into(),
         description: "d".into(),
         prompt: "p".into(),
@@ -918,6 +939,7 @@ fn session_metadata_session_kind_for_resumed() {
         subagent_id: "sa-resume".into(),
         parent_session_id: "p".into(),
         child_session_id: "c".into(),
+        effective_tools: None,
         description: "d".into(),
         prompt: "p".into(),
         effective_context_source: Some("resumed".into()),
@@ -1001,6 +1023,7 @@ fn resume_source_worktree_reuse() {
     let source_with_worktree = ResumeSourceData {
         subagent_id: "sub-wt".into(),
         child_session_id: "child-wt".into(),
+        effective_tools: None,
         child_cwd: "/tmp/worktree".into(),
         worktree_path: Some(
             PathBuf::from("/home/user/.grok/worktrees/myrepo/subagent-sub-wt"),
@@ -1021,6 +1044,7 @@ fn resume_source_worktree_reuse() {
     let source_without_worktree = ResumeSourceData {
         subagent_id: "sub-no-wt".into(),
         child_session_id: "child-no-wt".into(),
+        effective_tools: None,
         child_cwd: "/workspace".into(),
         worktree_path: None,
         snapshot_ref: None,
@@ -1065,6 +1089,7 @@ fn resume_inherited_cwd_requires_existing_non_worktree_dir() {
     let present = ResumeSourceData {
         subagent_id: "sub-present".into(),
         child_session_id: "child-present".into(),
+        effective_tools: None,
         child_cwd: existing.clone(),
         worktree_path: None,
         snapshot_ref: None,
@@ -1094,6 +1119,7 @@ fn select_override_cwd_resume_never_falls_through_to_request_cwd() {
     let source = ResumeSourceData {
         subagent_id: "sub-wt".into(),
         child_session_id: "child-wt".into(),
+        effective_tools: None,
         child_cwd: "/tmp/whatever".into(),
         worktree_path: Some(
             PathBuf::from("/home/user/.grok/worktrees/repo/subagent-sub-wt"),
@@ -1197,6 +1223,7 @@ fn durable_fallback_roundtrips_child_cwd_and_worktree() {
         subagent_id: "sa-dur".into(),
         parent_session_id: "parent-dur".into(),
         child_session_id: "child-dur".into(),
+        effective_tools: None,
         description: "d".into(),
         prompt: "p".into(),
         status: "completed".into(),
@@ -1229,6 +1256,7 @@ fn durable_fallback_rejects_running_status() {
         subagent_id: "sa-running".into(),
         parent_session_id: "parent-x".into(),
         child_session_id: "child-running".into(),
+        effective_tools: None,
         subagent_type: "explore".into(),
         description: "d".into(),
         prompt: "p".into(),
@@ -1310,6 +1338,7 @@ fn running_test_meta(id: &str, parent_session_id: &str) -> SubagentMeta {
         subagent_id: id.into(),
         parent_session_id: parent_session_id.into(),
         child_session_id: format!("child-{id}"),
+        effective_tools: None,
         subagent_type: "explore".into(),
         child_cwd: Some("/workspace".into()),
         ..base_meta()
@@ -1318,6 +1347,7 @@ fn running_test_meta(id: &str, parent_session_id: &str) -> SubagentMeta {
 fn inspection(id: &str, status: SubagentSnapshotStatus) -> SubagentInspection {
     SubagentInspection {
         snapshot: SubagentSnapshot {
+            label: None,
             subagent_id: id.to_string(),
             description: "task".to_string(),
             subagent_type: "explore".to_string(),
@@ -1325,6 +1355,7 @@ fn inspection(id: &str, status: SubagentSnapshotStatus) -> SubagentInspection {
             started_at_epoch_ms: 0,
             duration_ms: 50,
             persona: None,
+            ..Default::default()
         },
         parent_session_id: "parent-x".to_string(),
         child_session_id: format!("child-{id}"),
@@ -1577,9 +1608,6 @@ async fn live_reconcile_skips_live_coordinator_child() {
                             SubagentSnapshotStatus::Running {
                                 turn_count: 1,
                                 tool_call_count: 0,
-                                tokens_used: 0,
-                                context_window_tokens: 0,
-                                context_usage_pct: 0,
                                 tools_used: Vec::new(),
                                 error_count: 0,
                             },
@@ -1895,6 +1923,7 @@ fn resume_rejects_conflicting_subagent_type() {
     let source = ResumeSourceData {
         subagent_id: "sub-gp".into(),
         child_session_id: "child-gp".into(),
+        effective_tools: None,
         child_cwd: "/workspace".into(),
         worktree_path: None,
         snapshot_ref: None,
@@ -1913,6 +1942,7 @@ fn resume_rejects_conflicting_persona() {
     let source = ResumeSourceData {
         subagent_id: "sub-impl".into(),
         child_session_id: "child-impl".into(),
+        effective_tools: None,
         child_cwd: "/workspace".into(),
         worktree_path: None,
         snapshot_ref: None,
@@ -1929,6 +1959,7 @@ fn resume_allows_matching_identity() {
     let source = ResumeSourceData {
         subagent_id: "sub-ok".into(),
         child_session_id: "child-ok".into(),
+        effective_tools: None,
         child_cwd: "/workspace".into(),
         worktree_path: None,
         snapshot_ref: None,
@@ -1945,6 +1976,7 @@ fn resume_identity_does_not_gate_on_model() {
     let source = ResumeSourceData {
         subagent_id: "sub-model".into(),
         child_session_id: "child-model".into(),
+        effective_tools: None,
         child_cwd: "/workspace".into(),
         worktree_path: None,
         snapshot_ref: None,
@@ -2021,6 +2053,7 @@ fn provenance_carries_resumed_from() {
 #[test]
 fn notification_subagent_spawned_includes_resumed_from() {
     let notification = SessionUpdate::SubagentSpawned {
+        label: None,
         attempt_id: None,
         subagent_id: "sa-resumed".into(),
         parent_session_id: "parent".into(),
@@ -2050,6 +2083,7 @@ fn notification_subagent_spawned_includes_resumed_from() {
     assert!(json.get("role").is_none_or(serde_json::Value::is_null), "{json}");
     assert!(json.get("model").is_none_or(serde_json::Value::is_null), "{json}");
     let fresh = SessionUpdate::SubagentSpawned {
+        label: None,
         attempt_id: None,
         subagent_id: "sa-fresh".into(),
         parent_session_id: "p".into(),

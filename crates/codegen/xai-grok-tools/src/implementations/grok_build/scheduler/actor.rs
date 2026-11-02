@@ -739,6 +739,7 @@ impl SchedulerActor {
             id: subagent_id.clone(),
             prompt: framed_prompt,
             description,
+            label: None,
             subagent_type: "general-purpose".to_string(),
             parent_session_id,
             parent_prompt_id: None,
@@ -2116,6 +2117,7 @@ mod tests {
         status: SubagentSnapshotStatus,
     ) -> crate::implementations::grok_build::task::types::SubagentSnapshot {
         crate::implementations::grok_build::task::types::SubagentSnapshot {
+            label: None,
             subagent_id: subagent_id.into(),
             description: "loop: watch ci".into(),
             subagent_type: "general-purpose".into(),
@@ -2123,6 +2125,7 @@ mod tests {
             started_at_epoch_ms: 0,
             duration_ms: 100,
             persona: None,
+            ..Default::default()
         }
     }
 
@@ -2243,9 +2246,6 @@ mod tests {
             SubagentSnapshotStatus::Running {
                 turn_count: 1,
                 tool_call_count: 2,
-                tokens_used: 0,
-                context_window_tokens: 0,
-                context_usage_pct: 0,
                 tools_used: vec![],
                 error_count: 0,
             },
@@ -2329,9 +2329,6 @@ mod tests {
             SubagentSnapshotStatus::Running {
                 turn_count: 1,
                 tool_call_count: 1,
-                tokens_used: 0,
-                context_window_tokens: 0,
-                context_usage_pct: 0,
                 tools_used: vec![],
                 error_count: 0,
             },
@@ -2421,21 +2418,20 @@ mod tests {
         assert_eq!(q1.subagent_id, first_id, "guard queries the kept anchor");
         let _ = q1.respond_to.send(Some(
             crate::implementations::grok_build::task::types::SubagentSnapshot {
+                label: None,
                 subagent_id: first_id.clone(),
                 description: "loop: watch ci".into(),
                 subagent_type: "general-purpose".into(),
                 status: SubagentSnapshotStatus::Running {
                     turn_count: 1,
                     tool_call_count: 1,
-                    tokens_used: 0,
-                    context_window_tokens: 0,
-                    context_usage_pct: 0,
                     tools_used: vec![],
                     error_count: 0,
                 },
                 started_at_epoch_ms: 0,
                 duration_ms: 100,
                 persona: None,
+                ..Default::default()
             },
         ));
 
@@ -2446,6 +2442,7 @@ mod tests {
         };
         let _ = q2.respond_to.send(Some(
             crate::implementations::grok_build::task::types::SubagentSnapshot {
+                label: None,
                 subagent_id: first_id.clone(),
                 description: "loop: watch ci".into(),
                 subagent_type: "general-purpose".into(),
@@ -2458,6 +2455,7 @@ mod tests {
                 started_at_epoch_ms: 0,
                 duration_ms: 100,
                 persona: None,
+                ..Default::default()
             },
         ));
         answer_loop_unit_active(&mut subagent_rx, false).await;

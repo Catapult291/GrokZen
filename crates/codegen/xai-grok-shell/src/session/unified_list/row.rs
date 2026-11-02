@@ -97,6 +97,7 @@ pub fn conversation_to_row(c: Conversation, reg: &FacetRegistry) -> UnifiedRow {
         model_id: None,
         num_messages: 0,
         last_active_at: modify_time.clone(),
+        last_reply_at: None,
         branch: None,
         repo_name: None,
         worktree_label: None,
@@ -117,9 +118,14 @@ pub fn conversation_to_row(c: Conversation, reg: &FacetRegistry) -> UnifiedRow {
 }
 
 fn effective_local_ts(m: &MergedSession) -> Option<String> {
-    m.last_active_at
+    m.last_reply_at
         .as_deref()
         .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .or_else(|| {
+            m.last_active_at
+                .as_deref()
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        })
         .or_else(|| chrono::DateTime::parse_from_rfc3339(&m.updated_at).ok())
         .map(|dt| dt.to_rfc3339())
 }

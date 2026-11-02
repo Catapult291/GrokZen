@@ -32,7 +32,7 @@ fn test_snapshot(
     request: &SubagentRequest,
     result: &SubagentResult,
 ) -> SubagentSnapshot {
-    terminal_snapshot(request, result, None, None, 0)
+    terminal_snapshot(request, result, None, None, 0, None, None, None, false)
 }
 #[test]
 fn v2_disables_legacy_agent_memory_scope() {
@@ -688,6 +688,7 @@ fn should_auto_wake_subagent_truth_table() {
     let wakeable = AutoWakeInputs {
         run_in_background: true,
         cancelled: false,
+        max_turns_partial: false,
         auto_wake_enabled: true,
         block_waited: false,
         explicitly_killed: false,
@@ -695,6 +696,13 @@ fn should_auto_wake_subagent_truth_table() {
         parent_channel_open: true,
     };
     assert!(should_auto_wake_subagent(wakeable));
+    // A max-turns cutoff stays wakeable even though the result is stamped
+    // cancelled: the child session is intact and resumable.
+    assert!(should_auto_wake_subagent(AutoWakeInputs {
+        cancelled: true,
+        max_turns_partial: true,
+        ..wakeable
+    }));
     let suppressed = [
         AutoWakeInputs {
             run_in_background: false,
@@ -731,6 +739,7 @@ fn should_auto_wake_subagent_truth_table() {
 }
 fn auto_wake_test_request(id: &str) -> SubagentRequest {
     SubagentRequest {
+        label: None,
         id: id.into(),
         prompt: String::new(),
         description: "explore".into(),
@@ -1635,6 +1644,7 @@ fn fork_context_normalized_only_for_summarized() {
 }
 fn bootstrap_test_request(fork_context: bool) -> SubagentRequest {
     SubagentRequest {
+        label: None,
         id: "bootstrap-test".into(),
         prompt: "plan".into(),
         description: "d".into(),
@@ -1679,6 +1689,7 @@ async fn bootstrap_in_place_resume_reads_existing_transcript() {
     let source = xai_grok_subagent_resolution::ResumeSourceData {
         subagent_id: "same-child".to_owned(),
         child_session_id: "same-child".to_owned(),
+        effective_tools: None,
         child_cwd: child.cwd.clone(),
         worktree_path: None,
         snapshot_ref: None,

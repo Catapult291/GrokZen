@@ -2914,6 +2914,23 @@ impl MvpAgent {
             .inspect(subagent_id)
             .await
     }
+    /// Enumerate a session's subagent tree with live progress (`x.ai/subagent` control plane).
+    /// Same transport as [`Self::list_running_subagents`] via the shared coordinator channel;
+    /// the coordinator actor answers `SubagentEvent::ListAgents` directly.
+    pub(crate) async fn list_subagents(
+        &self,
+        parent_session_id: &str,
+        include_finished: bool,
+        parent_id: Option<&str>,
+        limit: usize,
+    ) -> Vec<xai_grok_tools::implementations::grok_build::task::types::SubagentAgentEntry> {
+        use xai_grok_tools::implementations::grok_build::task::backend::SubagentBackend;
+        xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
+                self.subagent_event_tx.event_sender().0,
+            )
+            .list_agents(parent_session_id, include_finished, parent_id, limit)
+            .await
+    }
     pub(crate) async fn query_subagent(
         &self,
         subagent_id: &str,

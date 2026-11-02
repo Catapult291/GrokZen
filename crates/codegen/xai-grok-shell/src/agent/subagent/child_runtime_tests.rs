@@ -137,6 +137,7 @@ impl ChildRunner for SnapshotProbeRunner {
 
 fn request() -> SubagentRequest {
     SubagentRequest {
+        label: None,
         id: "child".to_owned(),
         prompt: String::new(),
         description: String::new(),

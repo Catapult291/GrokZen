@@ -64,6 +64,29 @@ fn picker_keeps_old_conversation_past_cutoff() {
     );
 }
 #[test]
+fn picker_reads_last_reply_at_from_the_wire() {
+    let now = chrono::Utc::now();
+    let reply = (now - chrono::Duration::hours(2)).to_rfc3339();
+    let payload = serde_json::json!({
+        "sessions": [{
+            "sessionId": "local_reply",
+            "cwd": "/Users/me/xai",
+            "summary": "has a reply",
+            "source": "local",
+            "updatedAt": now.to_rfc3339(),
+            "lastActiveAt": now.to_rfc3339(),
+            "lastReplyAt": reply,
+        }]
+    });
+    let entries = parse(payload);
+    let entry = entries.first().expect("entry");
+    assert_eq!(
+        entry.last_reply_at,
+        Some(reply.parse().expect("valid timestamp"))
+    );
+}
+
+#[test]
 fn picker_drops_local_with_missing_updated_at() {
     let payload = serde_json::json!({
         "sessions": [{
@@ -413,6 +436,7 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
         model_id: Some("grok-4".to_string()),
         num_messages: 3,
         last_active_at: Some(updated),
+        last_reply_at: None,
         branch: None,
         repo_name: "repo-app".to_string(),
         worktree_label: Some("wt".to_string()),
@@ -436,4 +460,32 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
     assert_eq!(roster.last_change_unix_ms, updated.timestamp_millis());
     assert_eq!(roster.origin.kind, "local");
     assert_eq!(roster.origin.host.as_deref(), Some("box"));
+}
+
+#[test]
+fn dormant_roster_row_pins_last_reply_over_newer_activity() {
+    let replied = chrono::Utc::now() - chrono::Duration::days(2);
+    let reopened = chrono::Utc::now();
+    let entry = SessionPickerEntry {
+        id: "sess-2".to_string(),
+        summary: "Reopened history".to_string(),
+        updated_at: reopened,
+        created_at: replied,
+        cwd: "/repo/app".to_string(),
+        hostname: None,
+        source: "local".to_string(),
+        model_id: None,
+        num_messages: 2,
+        last_active_at: Some(reopened),
+        last_reply_at: Some(replied),
+        branch: None,
+        repo_name: "repo-app".to_string(),
+        worktree_label: None,
+        last_turn_summary: None,
+        last_recap: None,
+        session_kind: None,
+        card_detail: None,
+    };
+    let roster = session_picker_entry_to_roster(entry);
+    assert_eq!(roster.last_change_unix_ms, replied.timestamp_millis());
 }

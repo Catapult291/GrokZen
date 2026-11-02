@@ -69,6 +69,10 @@ pub struct ResumeSourceData {
     /// The child session ID of the source subagent.
     /// The shell uses it to locate the source's session directory and copy the raw transcript (`copy_session_data_sync`).
     pub child_session_id: String,
+    /// Sorted tool names the source's resolved definition carried at spawn.
+    /// The shell compares it against the resumed child's toolset to warn on
+    /// definition drift; `None` for sources recorded before the field existed.
+    pub effective_tools: Option<Vec<String>>,
 }
 
 impl From<xai_grok_tools::implementations::grok_build::task::types::SubagentResumeSource>
@@ -86,6 +90,9 @@ impl From<xai_grok_tools::implementations::grok_build::task::types::SubagentResu
             worktree_path: source.worktree_path.map(PathBuf::from),
             snapshot_ref: source.snapshot_ref,
             child_session_id: source.child_session_id,
+            // The in-memory coordinator record does not carry the toolset
+            // snapshot; the durable meta.json path fills it in.
+            effective_tools: None,
         }
     }
 }

@@ -50,6 +50,68 @@ async fn outer_ancestor_wakes_completed_descendant_by_raw_id_and_address() {
 }
 
 #[tokio::test]
+async fn max_turns_partial_completion_stays_wake_eligible() {
+    let (mut coordinator, command_tx, admission_tx, _admissions) = fixture();
+    insert_child(&mut coordinator, admission_tx, "child", "parent");
+    // Faithful to the shell reduce layer's MaxTurnsReached mapping: a partial,
+    // cancelled-marked result whose session stays intact for a continuation.
+    finish_child_with_result(
+        &mut coordinator,
+        "child",
+        SubagentResult {
+            success: false,
+            cancelled: true,
+            partial: true,
+            error: Some("max turns reached (limit: 8)".to_owned()),
+            stop_reason: xai_tool_types::stop_reason::MAX_TURNS.to_owned(),
+            subagent_id: "child".to_owned(),
+            child_session_id: "child".to_owned(),
+            ..Default::default()
+        },
+    );
+    assert!(
+        coordinator.completed.get("child").unwrap().wake_eligible,
+        "max_turns cutoff is a partial stop, not a teardown"
+    );
+
+    let mut response = begin_send(&mut coordinator, &command_tx, "child", "parent");
+    assert!(
+        response.try_recv().is_err(),
+        "wake must park for the continuation turn, not reject"
+    );
+    assert!(coordinator.pending.contains_key("child"));
+    assert!(!coordinator.completed.contains_key("child"));
+}
+
+#[tokio::test]
+async fn cancelled_completion_is_not_wake_eligible() {
+    let (mut coordinator, _command_tx, admission_tx, _admissions) = fixture();
+    insert_child(&mut coordinator, admission_tx, "child", "parent");
+    // Same partial shape as max_turns, but a plain cancel is a teardown and
+    // must stay non-resumable. Asserted on the flag because the coordinator's
+    // RootSession ChildId wake path bypasses `wake_eligible`; the flag is what
+    // the GrantedChild and Agent-target paths (and the `resumable` column) consult.
+    finish_child_with_result(
+        &mut coordinator,
+        "child",
+        SubagentResult {
+            success: false,
+            cancelled: true,
+            partial: true,
+            error: Some("Subagent was cancelled".to_owned()),
+            stop_reason: xai_tool_types::stop_reason::CANCELLED.to_owned(),
+            subagent_id: "child".to_owned(),
+            child_session_id: "child".to_owned(),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !coordinator.completed.get("child").unwrap().wake_eligible,
+        "plain cancel must refuse wakes"
+    );
+}
+
+#[tokio::test]
 async fn dropping_coordinator_refuses_parked_wake() {
     let (mut coordinator, command_tx, admission_tx, _admissions) = fixture();
     insert_child(&mut coordinator, admission_tx, "child", "parent");
@@ -415,6 +477,7 @@ async fn run_pre_start_wake_restore_scenario(origin: WakeAdmissionOrigin, exit: 
             WakeAdmissionOrigin::Dequeued => CoordinatorConfig {
                 limits: SubagentLimits {
                     max_concurrent: 1,
+                    max_total_agents: 8,
                     behavior: LimitBehavior::Queue,
                 },
                 buffer_completions: true,

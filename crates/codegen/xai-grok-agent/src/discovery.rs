@@ -271,7 +271,8 @@ fn by_name_in_cwd_with_home(
     by_name_with_home(name, home, grok_home)
 }
 
-/// These are the pre-defined agent profiles (`general-purpose`, `explore`, `plan`) that the Task tool can launch.
+/// These are the pre-defined agent profiles (`general-purpose`, `explore`, `plan`, `implementer`)
+/// that the Task tool can launch.
 /// User/project-level agent files can shadow these by name.
 pub fn builtin_subagents() -> Vec<AgentDefinition> {
     BuiltinAgentName::subagent_variants()
@@ -1038,13 +1039,14 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_returns_3_builtins_when_no_user_agents() {
+    fn test_merge_returns_4_builtins_when_no_user_agents() {
         let entries = merge_subagents(vec![], &HashMap::new());
-        assert_eq!(entries.len(), 3);
+        assert_eq!(entries.len(), 4);
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"general-purpose"));
         assert!(names.contains(&"explore"));
         assert!(names.contains(&"plan"));
+        assert!(names.contains(&"implementer"));
         for entry in &entries {
             assert!(
                 matches!(&entry.source, SubagentSource::Builtin(_)),
@@ -1059,7 +1061,7 @@ mod tests {
     fn test_merge_filters_toggled_off_builtins() {
         let toggle = HashMap::from([("plan".to_string(), false)]);
         let entries = merge_subagents(vec![], &toggle);
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 3);
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"general-purpose"));
         assert!(names.contains(&"explore"));
@@ -1074,7 +1076,7 @@ mod tests {
             AgentScope::Project,
         )];
         let entries = merge_subagents(discovered, &HashMap::new());
-        assert_eq!(entries.len(), 4);
+        assert_eq!(entries.len(), 5);
         let cr = entries.iter().find(|e| e.name == "code-reviewer").unwrap();
         assert_eq!(cr.description, "Reviews code");
         assert_eq!(
@@ -1095,7 +1097,7 @@ mod tests {
         )];
         let toggle = HashMap::from([("code-reviewer".to_string(), false)]);
         let entries = merge_subagents(discovered, &toggle);
-        assert_eq!(entries.len(), 3);
+        assert_eq!(entries.len(), 4);
         assert!(entries.iter().all(|e| e.name != "code-reviewer"));
     }
 
@@ -1107,7 +1109,7 @@ mod tests {
             AgentScope::Project,
         )];
         let entries = merge_subagents(discovered, &HashMap::new());
-        assert_eq!(entries.len(), 3); // The project agent replaced the built-in instead of appending
+        assert_eq!(entries.len(), 4); // The project agent replaced the built-in instead of appending
         let explore = entries.iter().find(|e| e.name == "explore").unwrap();
         assert_eq!(explore.description, "Custom explore agent");
         assert_eq!(
@@ -1144,7 +1146,7 @@ mod tests {
             AgentScope::User,
         )];
         let entries = merge_subagents(discovered, &HashMap::new());
-        assert_eq!(entries.len(), 3);
+        assert_eq!(entries.len(), 4);
         let explore = entries.iter().find(|e| e.name == "explore").unwrap();
         assert!(
             matches!(
@@ -1178,17 +1180,18 @@ mod tests {
             AgentScope::User,
         )];
         let entries = merge_subagents(discovered, &HashMap::new());
-        assert_eq!(entries.len(), 4);
+        assert_eq!(entries.len(), 5);
         // Verify ordering: built-ins first, then user
-        let [e0, e1, e2, e3] = entries.as_slice() else {
-            panic!("expected four entries: {entries:?}");
+        let [e0, e1, e2, e3, e4] = entries.as_slice() else {
+            panic!("expected five entries: {entries:?}");
         };
         assert!(matches!(&e0.source, SubagentSource::Builtin(_)));
         assert!(matches!(&e1.source, SubagentSource::Builtin(_)));
         assert!(matches!(&e2.source, SubagentSource::Builtin(_)));
-        assert_eq!(e3.name, "migration-helper");
+        assert!(matches!(&e3.source, SubagentSource::Builtin(_)));
+        assert_eq!(e4.name, "migration-helper");
         assert_eq!(
-            e3.source,
+            e4.source,
             SubagentSource::UserDefined {
                 scope: AgentScope::User
             }
@@ -1203,12 +1206,12 @@ mod tests {
             AgentScope::Bundled,
         )];
         let entries = merge_subagents(discovered, &HashMap::new());
-        let Some(e3) = entries.get(3) else {
-            panic!("expected four entries: {entries:?}");
+        let Some(e4) = entries.get(4) else {
+            panic!("expected five entries: {entries:?}");
         };
-        assert_eq!(e3.name, "bundled-helper");
+        assert_eq!(e4.name, "bundled-helper");
         assert_eq!(
-            e3.source,
+            e4.source,
             SubagentSource::UserDefined {
                 scope: AgentScope::Bundled
             }
@@ -1221,6 +1224,7 @@ mod tests {
             ("general-purpose".to_string(), false),
             ("explore".to_string(), false),
             ("plan".to_string(), false),
+            ("implementer".to_string(), false),
         ]);
         let entries = merge_subagents(vec![], &toggle);
         assert!(entries.is_empty(), "all toggled off should return empty");
@@ -1232,7 +1236,7 @@ mod tests {
         // So if a user's explore.md is invalid, discover() won't include it, and the built-in explore remains
         let discovered = vec![]; // no valid user agents discovered
         let entries = merge_subagents(discovered, &HashMap::new());
-        assert_eq!(entries.len(), 3);
+        assert_eq!(entries.len(), 4);
         let explore = entries.iter().find(|e| e.name == "explore").unwrap();
         assert!(matches!(
             &explore.source,
@@ -1288,11 +1292,17 @@ mod tests {
         );
 
         let entries = all_subagents_with_home(tmp.path(), &HashMap::new(), None, None);
-        assert_eq!(entries.len(), 4);
+        assert_eq!(entries.len(), 5);
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["general-purpose", "explore", "plan", "test-agent"]
+            vec![
+                "general-purpose",
+                "explore",
+                "plan",
+                "implementer",
+                "test-agent"
+            ]
         );
     }
 
@@ -1539,6 +1549,9 @@ mod tests {
         let toggle = HashMap::from([("test-agent".to_string(), false)]);
         let entries = all_subagents_with_home(tmp.path(), &toggle, None, None);
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, vec!["general-purpose", "explore", "plan"]);
+        assert_eq!(
+            names,
+            vec!["general-purpose", "explore", "plan", "implementer"]
+        );
     }
 }

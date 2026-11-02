@@ -342,6 +342,9 @@ fn log_limit_notice(notice: coordinator::SubagentLimitNotice) {
         SubagentLimitDecision::RejectedAtConcurrentLimit { limit } => {
             (SubagentLimitDisposition::Failed, limit as u64)
         }
+        SubagentLimitDecision::RejectedAtTotalAgentsLimit => {
+            (SubagentLimitDisposition::Failed, 0)
+        }
     };
     xai_grok_telemetry::session_ctx::log_event(SubagentLimitHit::session_concurrent(
         notice.parent_session_id,
@@ -439,6 +442,9 @@ pub(crate) fn present_child_completion(
 pub(crate) struct AutoWakeInputs {
     pub run_in_background: bool,
     pub cancelled: bool,
+    /// The child hit its turn limit: the session is intact and resumable, so
+    /// this partial result still wakes the parent with a resume hint.
+    pub max_turns_partial: bool,
     pub auto_wake_enabled: bool,
     pub block_waited: bool,
     pub explicitly_killed: bool,
@@ -450,6 +456,7 @@ impl AutoWakeInputs {
         Self {
             run_in_background: completion.disposition.backgrounded,
             cancelled: completion.result.cancelled,
+            max_turns_partial: completion.result.stop_reason == xai_tool_types::stop_reason::MAX_TURNS,
             auto_wake_enabled: completion.completion_data.auto_wake_enabled,
             block_waited: completion.disposition.waiter_delivered,
             explicitly_killed: completion.disposition.explicitly_killed,
@@ -466,10 +473,10 @@ impl AutoWakeInputs {
     }
 }
 /// Auto-wake gate. `parent_channel_open` folds the inject's no-channel bail into the decision, so a stamped `will_wake` never promises a wake the inject won't do.
-/// `cancelled` never wakes: the Ctrl+C race can background a foreground child moments before its cancel lands. Waking would prompt the model right after the user stopped everything.
+/// `cancelled` never wakes (the Ctrl+C race can background a foreground child moments before its cancel lands; waking would prompt the model right after the user stopped everything) — except a max-turns cutoff, whose session is intact and whose partial result carries a resume hint.
 pub(crate) fn should_auto_wake_subagent(inputs: AutoWakeInputs) -> bool {
     inputs.run_in_background
-        && !inputs.cancelled
+        && (!inputs.cancelled || inputs.max_turns_partial)
         && inputs.auto_wake_enabled
         && !inputs.block_waited
         && !inputs.explicitly_killed
@@ -607,6 +614,7 @@ mod address_tests {
     use tokio::sync::mpsc;
     fn spawned(agent_address: Option<String>) -> SessionUpdate {
         SessionUpdate::SubagentSpawned {
+            label: None,
             attempt_id: None,
             subagent_id: "child-1".into(),
             parent_session_id: "parent".into(),

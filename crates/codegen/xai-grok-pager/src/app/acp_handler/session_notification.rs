@@ -460,6 +460,7 @@ pub(super) fn handle_session_notification_with_origin(
             attempt_id: _,
             child_session_id,
             subagent_type,
+            label,
             description,
             persona,
             role,
@@ -580,6 +581,7 @@ pub(super) fn handle_session_notification_with_origin(
                 crate::app::subagent::SubagentChildInfo {
                     subagent_id,
                     child_session_id: child_session_id.clone(),
+                    label,
                     description: description.clone(),
                     subagent_type: subagent_type.clone(),
                 },

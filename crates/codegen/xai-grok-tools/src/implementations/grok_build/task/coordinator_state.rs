@@ -31,6 +31,9 @@ pub struct SubagentProgress {
     pub context_window_tokens: u64,
     pub context_usage_pct: u8,
     pub tools_used: Vec<String>,
+    /// Most recently invoked tool, when the runtime knows it. Defaults to
+    /// the last `tools_used` entry.
+    pub current_tool: Option<String>,
     pub error_count: u32,
 }
 
@@ -116,6 +119,17 @@ pub struct ChildRunRequest<C> {
     /// Pre-reparent spawner session, when the live address must also be
     /// advertised there. Cleared if that session cannot be targeted.
     pub spawner_session_id: Option<String>,
+    /// Same-parent siblings that carried a label when this child started.
+    /// Injected into the child prompt only when active messages are enabled.
+    pub sibling_roster: Vec<SubagentRosterEntry>,
+}
+
+/// One addressable sibling in a child's prompt roster.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentRosterEntry {
+    pub id: String,
+    pub label: String,
+    pub subagent_type: String,
 }
 
 /// Terminal output from one runtime-specific child run.
@@ -214,8 +228,14 @@ pub trait ChildRunner: 'static {
 /// What an admission limit did to a spawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubagentLimitDecision {
-    QueuedAtConcurrentLimit { limit: usize },
-    RejectedAtConcurrentLimit { limit: usize },
+    QueuedAtConcurrentLimit {
+        limit: usize,
+    },
+    RejectedAtConcurrentLimit {
+        limit: usize,
+    },
+    /// Cumulative per-root budget exhausted; the spawn is refused, never queued.
+    RejectedAtTotalAgentsLimit,
 }
 
 /// What asked for the spawn that hit a limit. Workflow-owned spawns bypass
@@ -610,12 +630,18 @@ where
 #[derive(Clone)]
 pub(super) struct RunningSeed {
     pub(super) subagent_id: String,
+    pub(super) label: Option<String>,
     pub(super) description: String,
     pub(super) subagent_type: String,
+    pub(super) model: Option<String>,
     pub(super) started_at_epoch_ms: u64,
     pub(super) duration_ms: u64,
     pub(super) persona: Option<String>,
     pub(super) parent_session_id: String,
+    /// Immediate spawner, or the root session for a direct child.
+    pub(super) parent_id: String,
+    /// Nesting depth; a direct child of the root is 1.
+    pub(super) depth: u32,
     pub(super) child_session_id: String,
     pub(super) fork_parent_prompt_id: Option<String>,
     pub(super) resumed_from: Option<String>,
@@ -625,6 +651,7 @@ pub(super) enum ProgressTarget {
     Query(oneshot::Sender<Option<SubagentSnapshot>>),
     Inspect(oneshot::Sender<Option<SubagentInspection>>),
     List { request_id: u64, index: usize },
+    ListAgents { request_id: u64, index: usize },
 }
 
 pub(super) struct ProgressFuture<F> {
@@ -659,6 +686,14 @@ pub(super) struct ListRequest {
     pub(super) slots: Vec<Option<SubagentInspection>>,
     pub(super) remaining: usize,
     pub(super) respond_to: oneshot::Sender<Vec<SubagentInspection>>,
+}
+
+/// In-flight `list_agents` fan-out: non-active entries are filled before the
+/// request is parked; active entries land from their progress futures.
+pub(super) struct ListAgentsRequest {
+    pub(super) slots: Vec<Option<super::types::SubagentAgentEntry>>,
+    pub(super) remaining: usize,
+    pub(super) respond_to: oneshot::Sender<Vec<super::types::SubagentAgentEntry>>,
 }
 
 // Both variants already hold a full child record; boxing Active would
@@ -885,12 +920,17 @@ pub(super) fn active_summary<C>(child: &ActiveChild<C>) -> ActiveSubagentSummary
 pub(super) fn running_seed<C>(child: &ActiveChild<C>) -> RunningSeed {
     RunningSeed {
         subagent_id: child.request.id.clone(),
+        label: child.request.label.clone(),
         description: child.request.description.clone(),
         subagent_type: child.request.subagent_type.clone(),
+        model: Some(child.effective_model_id.clone()),
         started_at_epoch_ms: instant_to_epoch_ms(child.started_at),
         duration_ms: child.started_at.elapsed().as_millis() as u64,
         persona: child.persona.clone(),
         parent_session_id: child.request.parent_session_id.clone(),
+        // Overridden with the graph's immediate spawner when the seed is queued.
+        parent_id: child.request.parent_session_id.clone(),
+        depth: 1,
         child_session_id: child.child_session_id.clone(),
         fork_parent_prompt_id: child.request.parent_prompt_id.clone(),
         resumed_from: child.resumed_from.clone(),
@@ -901,23 +941,37 @@ pub(super) fn running_inspection(
     seed: RunningSeed,
     progress: SubagentProgress,
 ) -> SubagentInspection {
+    let current_tool = progress
+        .current_tool
+        .clone()
+        .or_else(|| progress.tools_used.last().cloned());
     SubagentInspection {
         snapshot: SubagentSnapshot {
             subagent_id: seed.subagent_id,
+            label: seed.label,
             description: seed.description,
             subagent_type: seed.subagent_type,
             status: SubagentSnapshotStatus::Running {
                 turn_count: progress.turn_count,
                 tool_call_count: progress.tool_call_count,
-                tokens_used: progress.tokens_used,
-                context_window_tokens: progress.context_window_tokens,
-                context_usage_pct: progress.context_usage_pct,
                 tools_used: progress.tools_used,
                 error_count: progress.error_count,
             },
             started_at_epoch_ms: seed.started_at_epoch_ms,
             duration_ms: seed.duration_ms,
             persona: seed.persona,
+            model: seed.model,
+            parent_id: Some(seed.parent_id),
+            depth: Some(seed.depth),
+            tokens_in: progress.tokens_used,
+            tokens_out: 0,
+            context_used: progress.tokens_used,
+            context_window: progress.context_window_tokens,
+            context_pct: progress.context_usage_pct,
+            current_tool,
+            last_activity: None,
+            queue_position: None,
+            resumable: false,
         },
         parent_session_id: seed.parent_session_id,
         child_session_id: seed.child_session_id,
@@ -926,15 +980,31 @@ pub(super) fn running_inspection(
     }
 }
 
+/// One live entry for `list_agents`. `idle` needs a per-turn activity signal
+/// the coordinator does not carry yet, so a live child reports `Running`.
+pub(super) fn running_agent_entry(
+    seed: &RunningSeed,
+    progress: &SubagentProgress,
+) -> super::types::SubagentAgentEntry {
+    let snapshot = running_inspection(seed.clone(), progress.clone()).snapshot;
+    snapshot.agent_entry()
+}
+
 pub(super) fn pending_snapshot(child: &PendingChild) -> SubagentSnapshot {
     SubagentSnapshot {
         subagent_id: child.request.id.clone(),
+        label: child.request.label.clone(),
         description: child.request.description.clone(),
         subagent_type: child.request.subagent_type.clone(),
         status: SubagentSnapshotStatus::Initializing,
         started_at_epoch_ms: instant_to_epoch_ms(child.started_at),
         duration_ms: child.started_at.elapsed().as_millis() as u64,
         persona: child.request.runtime_overrides.persona.clone(),
+        model: None,
+        parent_id: Some(child.request.parent_session_id.clone()),
+        depth: None,
+        queue_position: None,
+        ..SubagentSnapshot::default()
     }
 }
 
@@ -953,9 +1023,11 @@ pub(super) fn pending_inspection(child: &PendingChild) -> SubagentInspection {
 pub(super) fn queued_snapshot(
     request: &SubagentRequest,
     queued_at: std::time::Instant,
+    queue_position: Option<usize>,
 ) -> SubagentSnapshot {
     SubagentSnapshot {
         subagent_id: request.id.clone(),
+        label: request.label.clone(),
         description: request.description.clone(),
         subagent_type: request.subagent_type.clone(),
         status: SubagentSnapshotStatus::Initializing,
@@ -964,15 +1036,21 @@ pub(super) fn queued_snapshot(
         started_at_epoch_ms: instant_to_epoch_ms(queued_at),
         duration_ms: queued_at.elapsed().as_millis() as u64,
         persona: request.runtime_overrides.persona.clone(),
+        model: request.runtime_overrides.model.clone(),
+        parent_id: Some(request.parent_session_id.clone()),
+        depth: None,
+        queue_position,
+        ..SubagentSnapshot::default()
     }
 }
 
 pub(super) fn queued_inspection(
     request: &SubagentRequest,
     queued_at: std::time::Instant,
+    queue_position: Option<usize>,
 ) -> SubagentInspection {
     SubagentInspection {
-        snapshot: queued_snapshot(request, queued_at),
+        snapshot: queued_snapshot(request, queued_at, queue_position),
         parent_session_id: request.parent_session_id.clone(),
         child_session_id: String::new(),
         fork_parent_prompt_id: request.parent_prompt_id.clone(),
@@ -981,12 +1059,17 @@ pub(super) fn queued_inspection(
 }
 
 /// `persona` must be the resolved one; the tool and the notices render this same snapshot.
+#[allow(clippy::too_many_arguments)]
 pub fn terminal_snapshot(
     request: &SubagentRequest,
     result: &SubagentResult,
     persisted_output: Option<&str>,
     persona: Option<String>,
     started_at_epoch_ms: u64,
+    model: Option<String>,
+    parent_id: Option<String>,
+    depth: Option<u32>,
+    resumable: bool,
 ) -> SubagentSnapshot {
     let status = if result.cancelled {
         SubagentSnapshotStatus::Cancelled {
@@ -1011,12 +1094,25 @@ pub fn terminal_snapshot(
     };
     SubagentSnapshot {
         subagent_id: request.id.clone(),
+        label: request.label.clone(),
         description: request.description.clone(),
         subagent_type: request.subagent_type.clone(),
         status,
         started_at_epoch_ms,
         duration_ms: result.duration_ms,
         persona,
+        model,
+        parent_id,
+        depth,
+        tokens_in: result.tokens_used,
+        tokens_out: result.output_tokens_used,
+        context_used: result.tokens_used,
+        context_window: 0,
+        context_pct: 0,
+        current_tool: None,
+        last_activity: Some(started_at_epoch_ms.saturating_add(result.duration_ms)),
+        queue_position: None,
+        resumable,
     }
 }
 
@@ -1030,6 +1126,10 @@ pub(super) fn completed_snapshot(
         persisted_output,
         child.persona.clone(),
         instant_to_epoch_ms(child.started_at),
+        Some(child.effective_model_id.clone()),
+        Some(child.request.parent_session_id.clone()),
+        None,
+        child.wake_eligible && child.result.success,
     )
 }
 
@@ -1086,12 +1186,25 @@ pub fn completion_summary(
     SubagentCompletionSummary {
         snapshot: SubagentSnapshot {
             subagent_id: snapshot.subagent_id.clone(),
+            label: snapshot.label.clone(),
             description: snapshot.description.clone(),
             subagent_type: snapshot.subagent_type.clone(),
             status,
             started_at_epoch_ms: snapshot.started_at_epoch_ms,
             duration_ms: snapshot.duration_ms,
             persona: snapshot.persona.clone(),
+            model: snapshot.model.clone(),
+            parent_id: snapshot.parent_id.clone(),
+            depth: snapshot.depth,
+            tokens_in: snapshot.tokens_in,
+            tokens_out: snapshot.tokens_out,
+            context_used: snapshot.context_used,
+            context_window: snapshot.context_window,
+            context_pct: snapshot.context_pct,
+            current_tool: snapshot.current_tool.clone(),
+            last_activity: snapshot.last_activity,
+            queue_position: snapshot.queue_position,
+            resumable: snapshot.resumable,
         },
         loop_task_id: request.runtime_overrides.loop_task_id.clone(),
         tool_calls: result.tool_calls,

@@ -22,6 +22,7 @@ use crate::implementations::grok_build::exit_plan_mode::ExitPlanModeInput;
 use crate::implementations::grok_build::grep::GrepSearchInput;
 use crate::implementations::grok_build::image_edit::ImageEditInput;
 use crate::implementations::grok_build::image_gen::ImageGenInput;
+use crate::implementations::grok_build::list_agents::ListAgentsInput;
 use crate::implementations::grok_build::list_dir::ListDirInput;
 use crate::implementations::grok_build::read_file::ReadFileInput;
 use crate::implementations::grok_build::search_replace::SearchReplaceInput;
@@ -68,6 +69,7 @@ pub enum ToolInput {
     Skill(SkillInput),
     MCPTool(MCPToolInput),
     TaskOutput(TaskOutputToolInput),
+    ListAgents(ListAgentsInput),
     WaitTasks(WaitTasksToolInput),
     KillTask(KillTaskToolInput),
     Task(TaskToolInput),

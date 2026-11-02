@@ -113,10 +113,17 @@ pub struct SubagentLaunched {
 pub struct SubagentCompleted {
     pub subagent_id: String,
     pub parent_session_id: String,
+    pub subagent_type: String,
     pub owner: SubagentOwnerKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workflow_run_id: Option<String>,
     pub outcome: Outcome,
+    /// Canonical `stop_reason` (`end_turn` / `max_turns` / `cancelled` /
+    /// `no_structured_result` / `error`); absent when the runtime did not stamp one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    /// The child stopped before finishing (max turns, cancel, truncation).
+    pub partial: bool,
     pub duration_ms: u64,
     pub tool_calls: u32,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -1586,6 +1586,40 @@ pub async fn remove_worktree(
     }
 }
 
+/// Capture a worktree's dirty state (`git status --porcelain`) as the baseline
+/// for later change detection. A fresh subagent worktree may start dirty when
+/// it preserves the source's uncommitted files, so its own edits have to be
+/// measured against this capture rather than against "empty".
+pub async fn subagent_worktree_status(worktree: &Path) -> Result<String> {
+    git_cli(worktree, &["status", "--porcelain"]).await
+}
+
+/// Whether a subagent worktree holds work the source repository does not:
+/// a dirty state that differs from `baseline_status`, or commits made on top
+/// of `base_commit`.
+///
+/// Used at completion to drop an untouched worktree instead of keeping it for review.
+pub async fn subagent_worktree_has_changes(
+    worktree: &Path,
+    base_commit: Option<&str>,
+    baseline_status: Option<&str>,
+) -> Result<bool> {
+    let status = subagent_worktree_status(worktree).await?;
+    let changed_against_baseline = match baseline_status {
+        Some(baseline) => status.trim() != baseline.trim(),
+        None => !status.trim().is_empty(),
+    };
+    if changed_against_baseline {
+        return Ok(true);
+    }
+    let Some(base) = base_commit.filter(|base| !base.is_empty()) else {
+        return Ok(false);
+    };
+    let range = format!("{}..HEAD", base);
+    let count = git_cli(worktree, &["rev-list", "--count", &range]).await?;
+    Ok(count.trim().parse::<u64>().unwrap_or(0) > 0)
+}
+
 /// Recreate a disposed subagent worktree at `dest` from `snapshot_ref`, using the durable snapshot stored in `source_repo`.
 /// `session_id` tags the re-registered DB record, matching the create path.
 /// Returns the rehydrated worktree path.
@@ -3323,6 +3357,18 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// Worktree paths registered under `repo`, canonicalized so the assertion
+    /// does not depend on the slash style `git worktree list` prints.
+    fn registered_worktrees(repo: &Path) -> Vec<std::path::PathBuf> {
+        git_out(repo, &["worktree", "list", "--porcelain"])
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .map(|path| {
+                dunce::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path))
+            })
+            .collect()
+    }
+
     /// Create a source repo (one committed file) plus a worktree of it.
     fn repo_with_worktree(temp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
         use xai_test_utils::git::{git_commit_all, init_git_repo};
@@ -3359,6 +3405,40 @@ mod tests {
         assert!(
             !wt.exists(),
             "worktree dir should be removed after snapshot"
+        );
+    }
+
+    /// Completion path for an untouched worktree: nothing to snapshot, yet the
+    /// directory must still be removed and its registration dropped.
+    #[tokio::test]
+    async fn unchanged_worktree_is_removed_and_unregistered() {
+        xai_test_utils::require_git!();
+        let temp = tempfile::TempDir::new().unwrap();
+        let (repo, wt) = repo_with_worktree(&temp);
+
+        let wt_canonical = dunce::canonicalize(&wt).unwrap();
+        assert!(
+            registered_worktrees(&repo).contains(&wt_canonical),
+            "fresh worktree must be registered in the source repo"
+        );
+        let baseline = subagent_worktree_status(&wt).await.unwrap();
+        let base = git_out(&wt, &["rev-parse", "HEAD"]);
+        assert!(
+            !subagent_worktree_has_changes(&wt, Some(&base), Some(&baseline))
+                .await
+                .unwrap(),
+            "a fresh worktree with no edits must read as unchanged"
+        );
+
+        remove_subagent_worktree(&wt).await.unwrap();
+
+        assert!(
+            !wt.exists(),
+            "an unchanged worktree directory must be removed at completion"
+        );
+        assert!(
+            !registered_worktrees(&repo).contains(&wt_canonical),
+            "removed worktree must no longer appear in git worktree list"
         );
     }
 
@@ -4043,6 +4123,12 @@ mod tests {
             "unexpected resolved strategy: {resolved}"
         );
         if resolved == "copy" {
+            // Windows skip: the Grove dispatch arm is an unimplemented stub in
+            // `xai-fast-worktree` (`grove_arm` returns None without recording
+            // an ArmSkip), and on Windows it is the only fast arm, so the
+            // Grove→copy fallback arrives with an empty skip list and no
+            // fallback reason to assert.
+            #[cfg(not(windows))]
             assert!(
                 strategy.fallback_reason.as_deref().is_some_and(|r| {
                     r.contains("grove-") || r.contains("Grove") || r.contains("daemon")
@@ -4050,6 +4136,8 @@ mod tests {
                 "Grove→copy must keep a fallback reason: {:?}",
                 strategy.fallback_reason
             );
+            #[cfg(windows)]
+            let _ = &strategy;
         }
         assert!(strategy.summary().contains("Requested Grove"));
         let ended =
@@ -4068,6 +4156,8 @@ mod tests {
                 .and_then(xai_grok_telemetry::events::CloneStrategy::from_strategy_str)
         );
         if ended.resolved_strategy == Some(xai_grok_telemetry::events::CloneStrategy::Copy) {
+            // Windows skip: same Grove-arm-stub reason as the strategy assertion above.
+            #[cfg(not(windows))]
             assert!(ended.fallback_reason.is_some());
         }
         let text = serde_json::to_string(&ended).unwrap();
@@ -4328,6 +4418,79 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.join("added.txt")).unwrap(),
             "NEW"
+        );
+    }
+
+    fn run_git_in(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@x")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@x")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?} {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    #[tokio::test]
+    async fn workspace_helper_reports_clean_dirty_and_committed_worktrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        run_git_in(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("README.md"), "base\n").unwrap();
+        run_git_in(&root, &["add", "README.md"]);
+        run_git_in(&root, &["commit", "-q", "-m", "base"]);
+        let base = run_git_in(&root, &["rev-parse", "HEAD"]);
+
+        let wt = tmp.path().join("wt-changes");
+        run_git_in(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "wt-changes",
+                wt.to_str().unwrap(),
+            ],
+        );
+
+        // A preserved dirty file is the baseline, not a subagent change.
+        std::fs::write(wt.join("inherited.txt"), "parent dirt\n").unwrap();
+        let baseline = subagent_worktree_status(&wt).await.unwrap();
+        assert!(!baseline.trim().is_empty());
+        assert!(
+            !subagent_worktree_has_changes(&wt, Some(&base), Some(&baseline))
+                .await
+                .unwrap(),
+            "an unchanged worktree must read as unchanged even when the baseline is dirty"
+        );
+
+        std::fs::write(wt.join("untracked.txt"), "new\n").unwrap();
+        assert!(
+            subagent_worktree_has_changes(&wt, Some(&base), Some(&baseline))
+                .await
+                .unwrap(),
+            "a new untracked file must read as changed"
+        );
+        std::fs::remove_file(wt.join("untracked.txt")).unwrap();
+
+        std::fs::write(wt.join("README.md"), "edited\n").unwrap();
+        run_git_in(&wt, &["add", "README.md"]);
+        run_git_in(&wt, &["commit", "-q", "-m", "edit"]);
+        assert!(
+            subagent_worktree_has_changes(&wt, Some(&base), Some(&baseline))
+                .await
+                .unwrap(),
+            "a commit on top of the base must read as changed"
         );
     }
 }

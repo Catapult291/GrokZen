@@ -88,6 +88,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         hook_registry: None,
         parent_depth: 0,
         subagents_max_depth: xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH,
+        subagent_worktree_base: crate::config::SubagentWorktreeBase::Head,
         workflow_max_concurrent_agents:
             crate::session::workflow::host_service::DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS,
         media_gen_batch_limits: xai_grok_tools::media_gen_limits::MediaGenBatchLimits::default(),

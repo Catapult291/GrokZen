@@ -108,6 +108,7 @@ fn prior_wake_meta(id: &str, model_id: &str) -> SubagentMeta {
         attempt_id: Some("at1.prior".to_owned()),
         parent_session_id: "setup-parent".to_owned(),
         child_session_id: id.to_owned(),
+        effective_tools: None,
         subagent_type: "general-purpose".to_owned(),
         description: "prior description".to_owned(),
         prompt: "prior prompt".to_owned(),
@@ -128,6 +129,31 @@ fn prior_wake_meta(id: &str, model_id: &str) -> SubagentMeta {
         snapshot_ref: Some("refs/grok/subagents/prior".to_owned()),
         effective_model_id: Some(model_id.to_owned()),
     }
+}
+
+/// Run a wake test body on the 8 MiB session stack.
+///
+/// These tests drive `run_shell_child` through the real coordinator on a
+/// current-thread runtime. A debug-build poll of that call chain needs more
+/// than the 2 MiB libtest thread stack; production runs it on the session
+/// thread sized by `SESSION_THREAD_STACK_SIZE` (8 MiB), so the tests do too.
+fn on_session_stack<Fut>(test: fn() -> Fut)
+where
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    std::thread::Builder::new()
+        .name("subagent-wake-test".to_owned())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread test runtime")
+                .block_on(test());
+        })
+        .expect("spawn wake test thread")
+        .join()
+        .expect("wake test thread panicked");
 }
 
 async fn assert_wake_setup_failure_preserves_prior_durable_state(
@@ -263,8 +289,12 @@ async fn assert_wake_setup_failure_preserves_prior_durable_state(
     assert!(gateway_rx.try_recv().is_err());
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn wake_setup_failures_preserve_prior_durable_state_and_lifecycle() {
+#[test]
+fn wake_setup_failures_preserve_prior_durable_state_and_lifecycle() {
+    on_session_stack(wake_setup_failures_preserve_prior_durable_state_and_lifecycle_body);
+}
+
+async fn wake_setup_failures_preserve_prior_durable_state_and_lifecycle_body() {
     tokio::task::LocalSet::new()
         .run_until(async {
             assert_wake_setup_failure_preserves_prior_durable_state(|meta_dir| {
@@ -304,8 +334,12 @@ async fn acknowledge_parent_usage(mut parent_cmd_rx: mpsc::UnboundedReceiver<Ses
     }
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn unpublished_wake_completion_preserves_prior_durable_state_and_worktree() {
+#[test]
+fn unpublished_wake_completion_preserves_prior_durable_state_and_worktree() {
+    on_session_stack(unpublished_wake_completion_preserves_prior_durable_state_and_worktree_body);
+}
+
+async fn unpublished_wake_completion_preserves_prior_durable_state_and_worktree_body() {
     xai_test_utils::require_git!();
     use crate::session::storage::StorageAdapter;
     use xai_grok_tools::implementations::grok_build::task::backend::{
@@ -456,8 +490,14 @@ async fn unpublished_wake_completion_preserves_prior_durable_state_and_worktree(
         .await;
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn ordinary_spawn_with_failed_metadata_write_persists_output_and_disposes_worktree() {
+#[test]
+fn ordinary_spawn_with_failed_metadata_write_persists_output_and_disposes_worktree() {
+    on_session_stack(
+        ordinary_spawn_with_failed_metadata_write_persists_output_and_disposes_worktree_body,
+    );
+}
+
+async fn ordinary_spawn_with_failed_metadata_write_persists_output_and_disposes_worktree_body() {
     xai_test_utils::require_git!();
     use xai_grok_tools::implementations::grok_build::task::backend::{
         ChannelBackend, SubagentBackend,
@@ -484,6 +524,9 @@ async fn ordinary_spawn_with_failed_metadata_write_persists_output_and_disposes_
                 &server,
                 RunShellChildHarnessConfig::new(meta_dir.clone(), InitialAttemptBehavior::Normal),
             );
+            let worktree = crate::session::worktree::worktree_base_dir_for_source(&repo)
+                .expect("worktree base dir")
+                .join(format!("subagent-{id}"));
             ctx.parent_cwd = repo;
             ctx.fail_start_metadata_write = true;
             let mut config = crate::agent::config::Config::default();
@@ -510,7 +553,17 @@ async fn ordinary_spawn_with_failed_metadata_write_persists_output_and_disposes_
             let mut request = auto_wake_test_request(&id);
             request.runtime_overrides.isolation =
                 Some(xai_tool_types::SubagentIsolationMode::Worktree);
-            let result = backend.spawn(request, None).await.expect("ordinary spawn");
+            // Park the reply at the model, mark the worktree dirty, then let the
+            // turn finish so completion takes the snapshot-and-dispose path.
+            server.hold_agent_completions();
+            let (result, ()) = tokio::join!(backend.spawn(request, None), async {
+                while server.request_count() == 0 {
+                    tokio::task::yield_now().await;
+                }
+                std::fs::write(worktree.join("dirty.txt"), "dirty").expect("dirty worktree");
+                server.release_agent_completions();
+            });
+            let result = result.expect("ordinary spawn");
             assert!(result.success);
             let output = result.output.to_string();
             assert_eq!(
@@ -522,8 +575,11 @@ async fn ordinary_spawn_with_failed_metadata_write_persists_output_and_disposes_
             )
             .expect("metadata");
             assert_eq!(persisted.status, "completed");
-            let worktree = persisted.worktree_path.as_deref().expect("worktree path");
-            assert!(!std::path::Path::new(worktree).exists());
+            assert_eq!(
+                persisted.worktree_path.as_deref(),
+                Some(worktree.to_string_lossy().as_ref())
+            );
+            assert!(!worktree.exists());
             assert!(persisted.snapshot_ref.is_some());
 
             drop(backend);
@@ -533,8 +589,14 @@ async fn ordinary_spawn_with_failed_metadata_write_persists_output_and_disposes_
         .await;
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn ordinary_spawn_disposes_worktree_when_only_remote_settings_enable_snapshot() {
+#[test]
+fn ordinary_spawn_disposes_worktree_when_only_remote_settings_enable_snapshot() {
+    on_session_stack(
+        ordinary_spawn_disposes_worktree_when_only_remote_settings_enable_snapshot_body,
+    );
+}
+
+async fn ordinary_spawn_disposes_worktree_when_only_remote_settings_enable_snapshot_body() {
     xai_test_utils::require_git!();
     use xai_grok_tools::implementations::grok_build::task::backend::{
         ChannelBackend, SubagentBackend,
@@ -561,6 +623,9 @@ async fn ordinary_spawn_disposes_worktree_when_only_remote_settings_enable_snaps
                 &server,
                 RunShellChildHarnessConfig::new(meta_dir.clone(), InitialAttemptBehavior::Normal),
             );
+            let worktree = crate::session::worktree::worktree_base_dir_for_source(&repo)
+                .expect("worktree base dir")
+                .join(format!("subagent-{id}"));
             ctx.parent_cwd = repo;
             ctx.remote_settings = Some(crate::util::config::RemoteSettings {
                 subagent_worktree_snapshot_enabled: Some(true),
@@ -584,16 +649,29 @@ async fn ordinary_spawn_disposes_worktree_when_only_remote_settings_enable_snaps
             let mut request = auto_wake_test_request(&id);
             request.runtime_overrides.isolation =
                 Some(xai_tool_types::SubagentIsolationMode::Worktree);
-            let result = backend.spawn(request, None).await.expect("ordinary spawn");
+            // Park the reply at the model, mark the worktree dirty, then let the
+            // turn finish so the remote-enabled dispose gate snapshots and removes it.
+            server.hold_agent_completions();
+            let (result, ()) = tokio::join!(backend.spawn(request, None), async {
+                while server.request_count() == 0 {
+                    tokio::task::yield_now().await;
+                }
+                std::fs::write(worktree.join("dirty.txt"), "dirty").expect("dirty worktree");
+                server.release_agent_completions();
+            });
+            let result = result.expect("ordinary spawn");
             assert!(result.success);
             let persisted: SubagentMeta = serde_json::from_str(
                 &std::fs::read_to_string(meta_dir.join("meta.json")).expect("completion meta"),
             )
             .expect("metadata");
             assert_eq!(persisted.status, "completed");
-            let worktree = persisted.worktree_path.as_deref().expect("worktree path");
+            assert_eq!(
+                persisted.worktree_path.as_deref(),
+                Some(worktree.to_string_lossy().as_ref())
+            );
             assert!(
-                !std::path::Path::new(worktree).exists(),
+                !worktree.exists(),
                 "remote subagent_worktree_snapshot_enabled must reach the post-spawn dispose gate"
             );
             assert!(persisted.snapshot_ref.is_some());
@@ -607,8 +685,12 @@ async fn ordinary_spawn_disposes_worktree_when_only_remote_settings_enable_snaps
 
 /// The child's actor no longer binds itself; `run_shell_child` binds it once the actor is up,
 /// ahead of the first turn, and teardown releases it.
-#[tokio::test(flavor = "current_thread")]
-async fn ordinary_spawn_binds_the_child_workspace_session_before_its_first_turn() {
+#[test]
+fn ordinary_spawn_binds_the_child_workspace_session_before_its_first_turn() {
+    on_session_stack(ordinary_spawn_binds_the_child_workspace_session_before_its_first_turn_body);
+}
+
+async fn ordinary_spawn_binds_the_child_workspace_session_before_its_first_turn_body() {
     use xai_grok_tools::implementations::grok_build::task::backend::{
         ChannelBackend, SubagentBackend,
     };
@@ -683,8 +765,12 @@ async fn ordinary_spawn_binds_the_child_workspace_session_before_its_first_turn(
         .await;
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn unacked_wake_start_and_abort_fail_closed_without_parking_runner() {
+#[test]
+fn unacked_wake_start_and_abort_fail_closed_without_parking_runner() {
+    on_session_stack(unacked_wake_start_and_abort_fail_closed_without_parking_runner_body);
+}
+
+async fn unacked_wake_start_and_abort_fail_closed_without_parking_runner_body() {
     use xai_grok_tools::implementations::grok_build::task::backend::{
         ChannelBackend, SubagentBackend,
     };
@@ -813,8 +899,12 @@ async fn unacked_wake_start_and_abort_fail_closed_without_parking_runner() {
         .await;
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn rejected_deferred_start_restores_prior_without_publication() {
+#[test]
+fn rejected_deferred_start_restores_prior_without_publication() {
+    on_session_stack(rejected_deferred_start_restores_prior_without_publication_body);
+}
+
+async fn rejected_deferred_start_restores_prior_without_publication_body() {
     use xai_grok_tools::implementations::grok_build::task::backend::{
         ChannelBackend, SubagentBackend,
     };
@@ -937,8 +1027,14 @@ async fn rejected_deferred_start_restores_prior_without_publication() {
         .await;
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn started_wake_with_failed_metadata_write_preserves_prior_durable_artifacts() {
+#[test]
+fn started_wake_with_failed_metadata_write_preserves_prior_durable_artifacts() {
+    on_session_stack(
+        started_wake_with_failed_metadata_write_preserves_prior_durable_artifacts_body,
+    );
+}
+
+async fn started_wake_with_failed_metadata_write_preserves_prior_durable_artifacts_body() {
     use xai_grok_tools::implementations::grok_build::task::backend::{
         ChannelBackend, SubagentBackend,
     };

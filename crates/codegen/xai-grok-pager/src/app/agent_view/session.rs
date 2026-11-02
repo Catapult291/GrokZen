@@ -2009,6 +2009,7 @@ mod resolve_turn_activity_tests {
         view.subagent_sessions.insert(
             "child-session-xyz".into(),
             SubagentInfo {
+                label: None,
                 subagent_id: Arc::from("sub-id-42"),
                 child_session_id: Arc::from("child-session-xyz"),
                 description: Arc::from("explore the auth module"),

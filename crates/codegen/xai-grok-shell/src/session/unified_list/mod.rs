@@ -579,6 +579,7 @@ mod tests {
             model_id: Some("grok-build".into()),
             num_messages: 7,
             last_active_at: Some(updated_at.into()),
+            last_reply_at: None,
             branch: Some("main".into()),
             repo_name: Some("xai".into()),
             worktree_label: Some("wt".into()),
@@ -650,6 +651,17 @@ mod tests {
             Some("worktree")
         );
     }
+    #[test]
+    fn ext_superset_carries_last_reply_at() {
+        let mut r = row("s1", "2026-06-18T20:10:00Z");
+        r.legacy.last_reply_at = Some("2026-06-01T00:00:00Z".into());
+        let value = serde_json::to_value(r.into_ext_superset()).expect("serialize");
+        assert_eq!(
+            value.get("lastReplyAt").and_then(|v| v.as_str()),
+            Some("2026-06-01T00:00:00Z")
+        );
+    }
+
     #[test]
     fn facets_carry_kind_and_cwd() {
         let r = row("s1", "2026-06-18T20:10:00Z");

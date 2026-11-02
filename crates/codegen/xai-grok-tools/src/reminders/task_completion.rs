@@ -765,6 +765,7 @@ pub fn consumed_completion_ids(output: &ToolOutput) -> Vec<&str> {
             ids.push(r.task_id.as_str());
         }
         ToolOutput::KillTask(KillTaskOutput::TaskNotFound(_)) => {}
+        ToolOutput::ListAgents(_) => {}
         ToolOutput::SubagentCompleted(SubagentCompletedOutput { subagent_id, .. }) => {
             ids.push(subagent_id.as_str());
         }
@@ -1927,6 +1928,7 @@ mod tests {
     }
     fn test_request(id: &str) -> SubagentRequest {
         SubagentRequest {
+            label: None,
             id: id.into(),
             prompt: String::new(),
             description: "test task".into(),
@@ -1959,7 +1961,17 @@ mod tests {
         }
     }
     fn summarize(request: &SubagentRequest, result: &SubagentResult) -> SubagentCompletionSummary {
-        let snapshot = terminal_snapshot(request, result, None, None, 1_700_000_000_000);
+        let snapshot = terminal_snapshot(
+            request,
+            result,
+            None,
+            None,
+            1_700_000_000_000,
+            None,
+            None,
+            None,
+            false,
+        );
         completion_summary(request, result, &snapshot)
     }
     fn make_subagent_completion(id: &str, success: bool) -> SubagentCompletionSummary {
@@ -2243,6 +2255,10 @@ mod tests {
                 None,
                 persona.map(str::to_owned),
                 1_700_000_000_000,
+                None,
+                None,
+                None,
+                false,
             );
             let tool = TaskOutputOutput::Result(terminal_subagent_result(&snapshot));
             let tool_text = ToolOutput::TaskOutput(tool).to_prompt_format();

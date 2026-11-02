@@ -1884,6 +1884,7 @@ mod tests {
     fn make_info() -> SubagentInfo {
         let now = Instant::now();
         SubagentInfo {
+            label: None,
             subagent_id: Arc::from("sa-1"),
             child_session_id: Arc::from("cs-1"),
             description: Arc::from("Find API endpoints"),

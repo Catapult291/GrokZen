@@ -715,10 +715,14 @@ pub(crate) fn build_session_entry_data_with_locale(
             } else {
                 entry.summary.clone()
             };
-            // Prefer last_active_at; fall back to updated_at (not created_at)
-            // so pre-migration sessions don't jump to their creation date.
+            // Pin the column to the last assistant reply so merely reopening a session never
+            // refreshes it. Fall back to last_active_at, then updated_at (not created_at) so
+            // pre-migration sessions don't jump to their creation date.
             let right_text = format_time_ago_with_locale(
-                entry.last_active_at.unwrap_or(entry.updated_at),
+                entry
+                    .last_reply_at
+                    .or(entry.last_active_at)
+                    .unwrap_or(entry.updated_at),
                 locale,
             );
             let is_selected = !state.selection_hidden && fi == state.selected;
@@ -1188,6 +1192,7 @@ mod tests {
             model_id: None,
             num_messages: 0,
             last_active_at: None,
+            last_reply_at: None,
             branch: None,
             repo_name: repo.into(),
             worktree_label: None,
@@ -1631,6 +1636,18 @@ mod tests {
             "recap/last-turn rows must be omitted when absent"
         );
     }
+    #[test]
+    fn row_time_uses_last_reply_even_after_newer_metadata_writes() {
+        let reply = chrono::Utc::now() - chrono::Duration::days(3);
+        let mut entry = make_entry("s_reply", "repo");
+        entry.last_reply_at = Some(reply);
+        entry.last_active_at = Some(chrono::Utc::now());
+        entry.updated_at = chrono::Utc::now();
+        let state = PickerState::default();
+        let built = build_session_entry_data(&[entry], &[0], &state, 80);
+        assert_eq!(at(&built, 0).right_text, format_time_ago(reply));
+    }
+
     #[test]
     fn foreign_entry_uses_source_badge_and_has_no_detail_expansion() {
         let mut entry = make_entry("foreign", "repo");

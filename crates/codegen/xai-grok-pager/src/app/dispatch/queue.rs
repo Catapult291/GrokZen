@@ -456,6 +456,8 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
 
     match queued.kind {
         QueueEntryKind::Prompt => {
+            // Read the tail pose before the prompt block changes the content height
+            let was_at_tail = agent.scrollback.is_at_tail();
             agent.begin_local_turn(&prompt_id);
             // Scrollback shows display text (never raw skill XML)
             // Combined drains paint one bubble per original follow-up
@@ -496,7 +498,9 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
                 });
             }
             let flip = page_flip_on_send();
-            agent.scrollback.follow_new_turn(Some(prompt_idx), flip);
+            agent
+                .scrollback
+                .follow_new_turn_from(Some(prompt_idx), flip, was_at_tail);
 
             let combined_segs = queued.combined_texts.clone();
             let effects = if let Some(mut blocks) = queued.wire_blocks {
@@ -872,6 +876,8 @@ pub(crate) fn apply_turn_start_shim(
     kind: &str,
     combined_texts: Option<Vec<String>>,
 ) -> Option<EntryId> {
+    // Read the tail pose before this turn's prompt (or boundary chrome) changes the content height
+    let was_at_tail = agent.scrollback.is_at_tail();
     // Re-derive the per-turn viewer flag (see the ACP gate)
     // If this client originated it (its own queued/immediate prompt), it drives it; otherwise it is viewing a turn another client drives
     // `attached_as_viewer` must then flip back to true even if this pane has sent prompts before (the flag is not a one-way latch)
@@ -961,7 +967,9 @@ pub(crate) fn apply_turn_start_shim(
             None
         } else {
             let flip = page_flip_on_send();
-            agent.scrollback.follow_new_turn(Some(prompt_idx), flip);
+            agent
+                .scrollback
+                .follow_new_turn_from(Some(prompt_idx), flip, was_at_tail);
             flip.then_some(first_id)
         }
     } else if let Some(block) = display_block {
@@ -1050,7 +1058,9 @@ pub(crate) fn apply_turn_start_shim(
             None
         } else {
             let flip = page_flip_on_send();
-            agent.scrollback.follow_new_turn(Some(prompt_idx), flip);
+            agent
+                .scrollback
+                .follow_new_turn_from(Some(prompt_idx), flip, was_at_tail);
             flip.then_some(prompt_entry_id)
         }
     } else {
@@ -2108,6 +2118,19 @@ mod tests {
         assert!(!sb.is_follow_preserve_scroll());
         assert_eq!(sb.scroll_offset(), bottom);
         assert_eq!(sb.selected(), Some(sb.len() - 1));
+
+        // Wheel-scrolled onto the tail: follow is off, but the send must still follow the new turn
+        // rather than streaming the answer below the viewport.
+        let mut app = app_at_bottom();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.scrollback.scroll_up(4);
+        agent.scrollback.scroll_down(4);
+        assert!(!agent.scrollback.is_follow_mode());
+        assert!(agent.scrollback.is_at_tail());
+        dispatch(Action::SendPrompt("go".into()), &mut app);
+        let sb = &test_agent(&app, AgentId(0)).scrollback;
+        assert!(sb.is_follow_mode());
+        assert!(!sb.is_follow_preserve_scroll());
 
         let mut app = app_at_bottom();
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();

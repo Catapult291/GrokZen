@@ -934,6 +934,14 @@ pub struct Config {
     pub subagents_max_depth: u32,
     #[serde(skip)]
     pub subagents_max_concurrent: usize,
+    /// Resolved cumulative per-root subagent budget.
+    /// See [`crate::config::SubagentsConfig::resolve_max_total_agents`].
+    #[serde(skip)]
+    pub subagents_max_total_agents: usize,
+    /// Base commit for isolated subagent worktrees.
+    /// See [`crate::config::SubagentWorktreeBase::resolve`].
+    #[serde(skip)]
+    pub subagent_worktree_base: crate::config::SubagentWorktreeBase,
     /// Resolved concurrent subagent turn-sampling limit feeding the shared semaphore.
     /// See [`crate::config::SubagentsConfig::resolve_sampling_limit`].
     #[serde(skip)]
@@ -1217,6 +1225,9 @@ impl Default for Config {
             subagents_max_depth: crate::config::SubagentsConfig::DEFAULT_MAX_DEPTH,
             subagents_max_concurrent:
                 xai_grok_tools::implementations::grok_build::task::admission::DEFAULT_MAX_CONCURRENT,
+            subagents_max_total_agents:
+                xai_grok_tools::implementations::grok_build::task::admission::DEFAULT_MAX_TOTAL_AGENTS,
+            subagent_worktree_base: crate::config::SubagentWorktreeBase::default(),
             subagents_sampling_limit:
                 xai_grok_tools::implementations::grok_build::task::admission::DEFAULT_MAX_CONCURRENT,
             subagents_limit_behavior: Default::default(),
@@ -1663,6 +1674,12 @@ impl Config {
             .and_then(|r| r.subagents_max_depth);
         self.subagents_max_depth =
             crate::config::SubagentsConfig::resolve_max_depth(env.as_deref(), sa.max_depth, remote);
+        self.subagent_worktree_base = crate::config::SubagentWorktreeBase::resolve(
+            std::env::var(crate::config::SubagentWorktreeBase::ENV)
+                .ok()
+                .as_deref(),
+            sa.worktree_base.as_deref(),
+        );
     }
     fn resolve_subagent_limits(
         &mut self,
@@ -1675,6 +1692,11 @@ impl Config {
             env(SubagentsConfig::ENV_MAX_CONCURRENT).as_deref(),
             sa.max_concurrent,
             remote.and_then(|r| r.subagents_max_concurrent),
+        );
+        self.subagents_max_total_agents = SubagentsConfig::resolve_max_total_agents(
+            env(SubagentsConfig::ENV_MAX_TOTAL_AGENTS).as_deref(),
+            sa.max_total_agents,
+            remote.and_then(|r| r.subagents_max_total_agents),
         );
         self.subagents_sampling_limit = SubagentsConfig::resolve_sampling_limit(
             env(SubagentsConfig::ENV_SAMPLING_LIMIT).as_deref(),
@@ -1715,6 +1737,11 @@ impl Config {
                 .raw_config
                 .get("subagents")
                 .and_then(|s| s.get("max_concurrent"))
+                .and_then(|v| v.as_integer()),
+            max_total_agents: ctx
+                .raw_config
+                .get("subagents")
+                .and_then(|s| s.get("max_total_agents"))
                 .and_then(|v| v.as_integer()),
             limit_behavior: ctx
                 .raw_config

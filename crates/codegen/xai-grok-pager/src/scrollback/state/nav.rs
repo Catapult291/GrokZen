@@ -552,9 +552,24 @@ impl ScrollbackState {
     }
 
     /// `page_flip` without a prompt (bash/synthetic): enable follow-with-preserve only. No `page_flip`, with a prompt:
-    /// leave scroll and follow unchanged. No `page_flip`, no prompt: still enable follow-with-preserve (there is no
-    /// prompt to snap. pre-setting bash/adoption always engaged follow). Always selects `prompt_idx` when present.
+    /// leave scroll and follow unchanged unless the caller reports the viewport was parked on the transcript tail.
+    /// No `page_flip`, no prompt: still enable follow-with-preserve (there is no prompt to snap. pre-setting
+    /// bash/adoption always engaged follow). Always selects `prompt_idx` when present.
     pub fn follow_new_turn(&mut self, prompt_idx: Option<usize>, page_flip: bool) {
+        self.follow_new_turn_from(prompt_idx, page_flip, false);
+    }
+
+    /// [`Self::follow_new_turn`] with the viewport's pre-send tail position.
+    ///
+    /// With page flip off the send deliberately leaves the viewport alone so a reader scrolled up keeps their place.
+    /// A reader parked on the tail has nothing below to keep in view, so the new prompt and its whole answer would
+    /// stream off screen beneath them; re-engage follow there instead.
+    pub(crate) fn follow_new_turn_from(
+        &mut self,
+        prompt_idx: Option<usize>,
+        page_flip: bool,
+        was_at_tail: bool,
+    ) {
         if let Some(idx) = prompt_idx {
             self.set_selected(Some(idx));
         }
@@ -568,6 +583,10 @@ impl ScrollbackState {
         } else if prompt_idx.is_none() {
             self.release_pin_reserve();
             self.enable_follow_with_preserve();
+        } else if was_at_tail {
+            self.release_pin_reserve();
+            self.enable_follow();
+            self.follow_preserve_scroll = false;
         }
     }
 
@@ -584,6 +603,11 @@ impl ScrollbackState {
             .total_height
             .saturating_sub(self.viewport_height as usize);
         self.total_height > self.viewport_height as usize && self.scroll_offset < max_offset
+    }
+
+    /// True when the viewport is parked on the transcript tail (nothing left below it to scroll to).
+    pub fn is_at_tail(&self) -> bool {
+        !self.has_content_below()
     }
 
     /// Ensure the selected entry is visible in the viewport, using minimal scrolling. large entries that exceed it
@@ -1143,6 +1167,50 @@ mod tests {
         state.follow_new_turn(None, false);
         assert!(state.is_follow_mode());
         assert!(state.is_follow_preserve_scroll());
+        assert_eq!(state.scroll_offset(), reading);
+    }
+
+    #[test]
+    fn follow_new_turn_from_tail_follows_without_page_flip() {
+        let mut state = ScrollbackState::new();
+        for i in 0..30 {
+            state.push_block(agent_block(&format!("filler line {i}")));
+        }
+        state.prepare_layout(80, 8);
+        state.goto_bottom();
+        // Wheel up then back down: the landing event moves real rows, so follow stays off at the tail.
+        state.scroll_up(4);
+        state.scroll_down(4);
+        assert!(!state.is_follow_mode());
+        assert!(state.is_at_tail());
+
+        state.push_block(user_block("next question"));
+        let prompt_idx = state.len() - 1;
+        state.follow_new_turn_from(Some(prompt_idx), false, true);
+        assert!(state.is_follow_mode());
+        assert!(!state.is_follow_preserve_scroll());
+
+        state.push_block(agent_block("answer"));
+        state.prepare_layout(80, 8);
+        assert_eq!(state.scroll_offset(), state.max_scroll_offset());
+    }
+
+    #[test]
+    fn follow_new_turn_off_tail_still_keeps_reading_position() {
+        let mut state = ScrollbackState::new();
+        for i in 0..30 {
+            state.push_block(agent_block(&format!("filler line {i}")));
+        }
+        state.prepare_layout(80, 8);
+        state.goto_bottom();
+        state.scroll_up(10);
+        let reading = state.scroll_offset();
+        assert!(!state.is_at_tail());
+
+        state.push_block(user_block("next question"));
+        let prompt_idx = state.len() - 1;
+        state.follow_new_turn_from(Some(prompt_idx), false, false);
+        assert!(!state.is_follow_mode());
         assert_eq!(state.scroll_offset(), reading);
     }
 

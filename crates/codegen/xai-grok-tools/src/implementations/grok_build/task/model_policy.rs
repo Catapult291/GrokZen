@@ -147,13 +147,16 @@ fn subagent_type_property(types: &[&SubagentDescriptor]) -> serde_json::Value {
         "type": "string",
         "enum": names,
         "description": format!(
-            "Omit for a general-purpose subagent. Set it to hand the task to one of these agents:\n{}",
+            "Omit for a general-purpose subagent. Pick explore for read-only investigation, \
+             plan for implementation design, and implementer for implementation plus \
+             verification; other types hand the task to the named agent:\n{}",
             lines.join("\n")
         ),
     })
 }
 
-/// One `- name: description` line. The description loses its line breaks and is cut to the byte limit.
+/// One `- name: description` line, followed by the agent's tool summary when it has one.
+/// Text loses its line breaks; the description alone is cut to the byte limit.
 fn subagent_type_line(t: &SubagentDescriptor) -> String {
     let description = t
         .description
@@ -162,7 +165,14 @@ fn subagent_type_line(t: &SubagentDescriptor) -> String {
         .join(" ");
     let description =
         crate::util::truncate_str_with_marker(&description, MAX_SUBAGENT_TYPE_DESCRIPTION_BYTES);
-    format!("- {}: {description}", t.name)
+    match t
+        .tools
+        .as_deref()
+        .map(|tools| tools.split_whitespace().collect::<Vec<_>>().join(" "))
+    {
+        Some(tools) if !tools.is_empty() => format!("- {}: {description} {tools}", t.name),
+        _ => format!("- {}: {description}", t.name),
+    }
 }
 
 /// `param_name` is the client-facing spelling; the catalog is never enumerated.
