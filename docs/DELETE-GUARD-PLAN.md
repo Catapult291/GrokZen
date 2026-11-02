@@ -82,7 +82,7 @@ cargo test -p xai-grok-workspace --lib permission::manager
 | 2. 权限管理器接入 | 完成 | `7589b621` | `cargo test -p xai-grok-workspace --lib permission::manager` | 137 通过；`reasons::HARDLINE` 与 telemetry `PermissionDecisionReason::Hardline` 同步 |
 | 3. safe-delete 脚本 | 完成 | `755d099d` | `pwsh -NoProfile -NonInteractive -File scripts/windows/tests/safe-delete.tests.ps1` | 39 项断言全过、0 跳过（含 junction 逃逸与允许根为 junction）；拒绝盘根/系统目录/主目录根/通配符/UNC/设备路径；裸相对路径的拒绝在 `c7b26383` 补齐（41 项通过） |
 | 4. 文档与配置示例 | 完成 | `c134bd0c` | 人工检查文档与脚本输出一致；`safe-delete.tests.ps1` 41 项通过 | 新增 `docs/SAFE-DELETE.md`，`DEVELOPMENT.md` 加入口链接；阶段 4 核对后按用户要求把 `windows_system_dir_delete` 从“目录本身 + 一级 `/*`”收紧为整棵子树（`fe258faf`），文档同步 |
-| 5. 合并回 zh-dev | 待办 | | 见 6.3 | |
+| 5. 合并回 zh-dev | 完成 | `889e9639` | 见 6.1 / 6.2 | `feat/delete-guard` 的 13 个提交合并进 `zh-dev`，合并树与 feat 分支一致；验收记录见 6.4 |
 
 ## 2. 阶段 1：hardline 检测模块（P0）
 
@@ -445,6 +445,34 @@ git branch -d feat/delete-guard
 ```
 
 > 如果 `git push` 需要代理，按现有 GitHub 规则先确认 `HTTPS_PROXY`，再执行。
+
+### 6.4 阶段 5 验收记录
+
+合并提交 `889e9639`（`feat/delete-guard` → `zh-dev`，`--no-ff`），合并树与
+`feat/delete-guard` 的树完全一致。
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test -p xai-grok-permission-rules` | 359 通过 / 0 失败 |
+| `cargo test -p xai-grok-workspace --lib permission::manager` | 137 通过 / 0 失败 |
+| `cargo test -p xai-grok-workspace --lib permission` | 22 个既有失败（`hub_gate` / `sandbox_wire` / `grants`），在基线 `b1e19d09` 上同样失败 |
+| `cargo clippy -p xai-grok-permission-rules -p xai-grok-workspace --lib --tests --no-deps` | 本计划涉及文件 0 告警；`shell_access.rs` 的 5 处 `unnecessary_cast` 为既有基线；`--all-targets -- -D warnings` 会在 `xai-grok-config` / `xai-fast-worktree` 等既有告警处失败，基线同样失败 |
+| `cargo fmt -p xai-grok-permission-rules -p xai-grok-workspace --check` | 通过；仓库根 `cargo fmt --check` 在本机报 `os error 206`（文件名或扩展名太长），基线工作区同样复现 |
+| `pwsh -NoProfile -NonInteractive -File scripts/windows/tests/safe-delete.tests.ps1` | 41 通过 / 0 失败 / 0 跳过 |
+
+手工验证（新构建的 `grok-zh`，`--permission-mode bypassPermissions`）：
+
+- `if false; then rm -rf Q:/; fi`：阶段 5 首次探测时未被识别，命令进入 shell 并
+  以退出码 0 空转。修复提交 `6a317fc8` 后同一条命令在 spawn 前返回
+  `PolicyDeny`，原文为 `hardline: deleting a drive root — this command is not
+  allowed through the agent; run it outside the agent if needed`。
+- `rm -rf ./tmp-probe`：直接执行、不弹审批，目录被删除，确认普通清理未被误杀。
+- `safe-delete.ps1`：删除目录与文件均写 `deleted`；`C:\`、`C:\Windows`、
+  `..\..\Windows`、含 `*` 路径、UNC、`\\?\C:\...`、允许根外路径、允许根本身
+  均退出 2 且目标未动；不存在的路径退出 0 并写 `not_found`；未创建归档目录。
+
+> 推送状态：`origin/zh-dev` 停在 `4f68b950`，本地 `zh-dev` 在其之上还有 53 个
+> 与删除防护无关的既有提交，`git push origin zh-dev` 会一并发布。
 
 ## 7. 风险与回滚
 
