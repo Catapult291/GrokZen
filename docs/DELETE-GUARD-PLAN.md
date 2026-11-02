@@ -80,8 +80,8 @@ cargo test -p xai-grok-workspace --lib permission::manager
 | 0. worktree / 基线 | 完成 | `docs: 导入删除防护计划并记录基线` | 见 1.2 | worktree `../.worktrees/grokzen-delete-guard`，分支 `feat/delete-guard`（基于 zh-dev `b1e19d09`）；两个基线测试全绿（permission-rules 346 通过，permission::manager 133 通过），无既有失败 |
 | 1. hardline 检测模块 | 完成 | `ad043291` | `cargo test -p xai-grok-permission-rules hardline` | 12 个用例通过；匹配走 parser + 引号感知分词，未新增 `regex` 依赖 |
 | 2. 权限管理器接入 | 完成 | `7589b621` | `cargo test -p xai-grok-workspace --lib permission::manager` | 137 通过；`reasons::HARDLINE` 与 telemetry `PermissionDecisionReason::Hardline` 同步 |
-| 3. safe-delete 脚本 | 完成 | `755d099d` | `pwsh -NoProfile -NonInteractive -File scripts/windows/tests/safe-delete.tests.ps1` | 39 项断言全过、0 跳过（含 junction 逃逸与允许根为 junction）；拒绝盘根/系统目录/主目录根/通配符/UNC/设备路径/相对路径，提交前实测默认根与多根 |
-| 4. 文档与配置示例 | 待办 | | 人工检查 | |
+| 3. safe-delete 脚本 | 完成 | `755d099d` | `pwsh -NoProfile -NonInteractive -File scripts/windows/tests/safe-delete.tests.ps1` | 39 项断言全过、0 跳过（含 junction 逃逸与允许根为 junction）；拒绝盘根/系统目录/主目录根/通配符/UNC/设备路径；裸相对路径的拒绝在 `c7b26383` 补齐（41 项通过） |
+| 4. 文档与配置示例 | 完成 | `c134bd0c` | 人工检查文档与脚本输出一致；`safe-delete.tests.ps1` 41 项通过 | 新增 `docs/SAFE-DELETE.md`，`DEVELOPMENT.md` 加入口链接；记录 hardline 只匹配系统目录本身与一级 `/*`、更深子目录由脚本拒绝这一边界 |
 | 5. 合并回 zh-dev | 待办 | | 见 6.3 | |
 
 ## 2. 阶段 1：hardline 检测模块（P0）
