@@ -78,8 +78,8 @@ cargo test -p xai-grok-workspace --lib permission::manager
 | 阶段 | 状态 | 提交 | 验收命令 | 备注 |
 |---|---|---|---|---|
 | 0. worktree / 基线 | 完成 | `docs: 导入删除防护计划并记录基线` | 见 1.2 | worktree `../.worktrees/grokzen-delete-guard`，分支 `feat/delete-guard`（基于 zh-dev `b1e19d09`）；两个基线测试全绿（permission-rules 346 通过，permission::manager 133 通过），无既有失败 |
-| 1. hardline 检测模块 | 待办 | | `cargo test -p xai-grok-permission-rules hardline` | |
-| 2. 权限管理器接入 | 待办 | | `cargo test -p xai-grok-workspace --lib permission::manager` | |
+| 1. hardline 检测模块 | 完成 | `ad043291` | `cargo test -p xai-grok-permission-rules hardline` | 12 个用例通过；匹配走 parser + 引号感知分词，未新增 `regex` 依赖 |
+| 2. 权限管理器接入 | 完成 | `7589b621` | `cargo test -p xai-grok-workspace --lib permission::manager` | 137 通过；`reasons::HARDLINE` 与 telemetry `PermissionDecisionReason::Hardline` 同步 |
 | 3. safe-delete 脚本 | 待办 | | 见 4.5 | |
 | 4. 文档与配置示例 | 待办 | | 人工检查 | |
 | 5. 合并回 zh-dev | 待办 | | 见 6.3 | |
