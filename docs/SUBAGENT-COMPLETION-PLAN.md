@@ -24,7 +24,7 @@
 | 阶段 3 结果契约 | 已完成 | `f3b49426` | `output_schema`、`submit_result`、`structured` / `stop_reason` / `partial` |
 | 阶段 4 生命周期 | 已完成 | `f3b49426` | `context: fork`、深度/总量预算、resume 放宽、max_turns partial |
 | 阶段 5 运行态 snapshot | 已完成（并入阶段 2） | `f3b49426` | snapshot 字段与 `list_agents` 输出列同源 |
-| 6.1 委派并发安全 | 实现已完成，验收测试缺 | `231153fe` | `TaskTool` 声明 `max_concurrency = Some(16)` |
+| 6.1 委派并发安全 | 已完成 | `231153fe` / `a9d97135` | `TaskTool` 声明 `max_concurrency = Some(16)`；并行验收测试见 `a9d97135` |
 | 6.2 worktree 收尾 | 实现已完成，验收部分 | `eaf0fe70` | 无改动自动清理、apply/discard、`worktree_base` |
 | 6.3 文档一致性 | 已完成 | `dccf90d9` | 中英文档与代码默认值对齐 |
 | 6.4 指标 | 已完成 | `1f332c4c` | 本地汇总 + 完成事件补类型/停止原因 |
@@ -35,18 +35,18 @@
 
 | 验收项 | 结论 | 现有证据 | 缺口 |
 |---|---|---|---|
-| 批量 fan-out 不串行 | **未验收** | 协调器已有测试能同时启动两个子代理（如 `teardown_session_children_spares_other_sessions`）；`TaskTool` 已声明并发上限 | 原计划要求的专门测试“同一 step 两个前台 spawn 同时进入 running，任一先完成不阻塞另一个”不存在 |
+| 批量 fan-out 不串行 | **已验收** | `parallel_foreground_spawns_overlap_and_finish_independently` 断言两个前台 spawn 都进入 `started`，`finish_one("a")` 后 b 仍在运行，两者最终都 `success`；`teardown_session_children_spares_other_sessions` 仍通过；`TaskTool` 已声明并发上限 | 无 |
 | 空 worktree 不残留 | **部分验收** | `workspace_helper_reports_clean_dirty_and_committed_worktrees` 通过；`subagent_worktree_has_changes` / `remove_subagent_worktree` 各自有测试；3 个 `subagent_worktree_base` 配置测试通过 | 没有一条断言覆盖“无改动 → 目录被删除 + meta `worktree_path` 被清空”的组合路径 |
 | 文档与代码默认值一致 | **已验收** | 抽查 `background=true`、`max_depth=2`、`max_total_agents=16`、`max_concurrent=32`、`worktree_base=head`，中英文档与代码一致 | 无 |
 | 6.4 指标 | **已完成** | 7 个 metrics 单测；`cargo check` tools/shell 通过 | 无 |
 
-结论：**阶段 6 代码已齐，验收未齐**。在任务 A、B 完成前，不应把阶段 6 标记为通过。
+结论：**阶段 6 代码已齐，验收未齐**。在任务 B 完成前，不应把阶段 6 标记为通过。
 
 ## 3. 剩余任务（按执行顺序）
 
 ### 任务 A（P0）：补 6.1 双前台 spawn 并行验收测试
 
-**状态**：待办
+**状态**：已完成（`a9d97135`）
 
 **目标**：证明同一 assistant step 的两个前台 spawn 在协调器内重叠运行；先完成者不阻塞另一个。
 
@@ -286,6 +286,7 @@ rustfmt --edition 2024 --check <changed-file>
 | 2026-11-02 | 6.4 指标 | 通过 | `cargo test -p xai-grok-tools --lib metrics::`（7 passed）；`cargo check -p xai-grok-shell --lib` |
 | 2026-11-02 | 6.2 worktree helper | 通过 | `cargo test -p xai-grok-workspace --lib workspace_helper_reports_clean_dirty_and_committed_worktrees`（1 passed） |
 | 2026-11-02 | 6.2 worktree_base 配置 | 通过 | `cargo test -p xai-grok-shell --lib subagent_worktree_base`（3 passed） |
+| 2026-11-02 | 6.1 双前台 spawn 并行 | 通过 | `cargo test -p xai-grok-tools --lib task::coordinator`（166 passed）；`cargo test -p xai-grok-tools --lib task::`（365 passed）；提交 `a9d97135` |
 
 ## 6. 提交约定
 
