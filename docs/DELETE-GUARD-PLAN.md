@@ -81,7 +81,7 @@ cargo test -p xai-grok-workspace --lib permission::manager
 | 1. hardline 检测模块 | 完成 | `ad043291` | `cargo test -p xai-grok-permission-rules hardline` | 12 个用例通过；匹配走 parser + 引号感知分词，未新增 `regex` 依赖 |
 | 2. 权限管理器接入 | 完成 | `7589b621` | `cargo test -p xai-grok-workspace --lib permission::manager` | 137 通过；`reasons::HARDLINE` 与 telemetry `PermissionDecisionReason::Hardline` 同步 |
 | 3. safe-delete 脚本 | 完成 | `755d099d` | `pwsh -NoProfile -NonInteractive -File scripts/windows/tests/safe-delete.tests.ps1` | 39 项断言全过、0 跳过（含 junction 逃逸与允许根为 junction）；拒绝盘根/系统目录/主目录根/通配符/UNC/设备路径；裸相对路径的拒绝在 `c7b26383` 补齐（41 项通过） |
-| 4. 文档与配置示例 | 完成 | `c134bd0c` | 人工检查文档与脚本输出一致；`safe-delete.tests.ps1` 41 项通过 | 新增 `docs/SAFE-DELETE.md`，`DEVELOPMENT.md` 加入口链接；记录 hardline 只匹配系统目录本身与一级 `/*`、更深子目录由脚本拒绝这一边界 |
+| 4. 文档与配置示例 | 完成 | `c134bd0c` | 人工检查文档与脚本输出一致；`safe-delete.tests.ps1` 41 项通过 | 新增 `docs/SAFE-DELETE.md`，`DEVELOPMENT.md` 加入口链接；阶段 4 核对后按用户要求把 `windows_system_dir_delete` 从“目录本身 + 一级 `/*`”收紧为整棵子树（`fe258faf`），文档同步 |
 | 5. 合并回 zh-dev | 待办 | | 见 6.3 | |
 
 ## 2. 阶段 1：hardline 检测模块（P0）
@@ -127,7 +127,7 @@ pub fn detect_hardline(command: &str) -> Option<HardlineHit>;
 **Windows**
 
 - 盘根：`C:\`、`C:/`、`C:`、`/c/`、`//?/C:/`、`\\?\C:\`、`\\.\C:`
-- 系统目录：`C:\Windows`、`C:\Program Files`、`C:\Program Files (x86)`、`C:\ProgramData`
+- 系统目录：`C:\Windows`、`C:\Program Files`、`C:\Program Files (x86)`、`C:\ProgramData` 及其子目录
 - 用户主目录根：`C:\Users\<name>`（精确匹配；不匹配其子目录）
 - `Remove-Item` / `ri` / `rm` / `del` / `erase` / `rd` / `rmdir` 指向上述路径，且带 `-Recurse` / `-Force` / `/s` / `/q` / `/f`
 - `format C:`、`Format-Volume`、`Clear-Disk`、`diskpart` + `clean` / `clean all`
