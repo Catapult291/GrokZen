@@ -1975,6 +1975,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn subagent_completed_output_defaults_stop_reason_and_partial_for_legacy_callers() {
+        // Older callers never stamp stop_reason / partial / structured; the
+        // serde defaults must keep them deserializable and treat them as
+        // "end_turn on success" per the field contract.
+        let legacy: SubagentCompletedOutput = serde_json::from_str(
+            r#"{"output":"o","subagent_id":"019a","subagent_type":"explore","tool_calls":1,
+                "turns":1,"duration_ms":1,"worktree_path":null,"resume_from_hint":"019a"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.stop_reason, "");
+        assert!(!legacy.partial);
+        assert_eq!(legacy.structured, None);
+    }
+
     fn literal_naming() -> TaskToolNaming<'static> {
         TaskToolNaming {
             task_tool: "task",
