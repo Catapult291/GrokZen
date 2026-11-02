@@ -207,6 +207,16 @@ impl SessionActor {
         );
     }
 
+    /// Debug breadcrumb around each await in the cancel path.
+    /// A `start` without its matching `done` names the step the cancel never returned from.
+    fn log_cancel_step(&self, step: &str, phase: &str) {
+        xai_grok_telemetry::unified_log::debug(
+            "shell.cancel.step",
+            Some(self.session_info.id.0.as_ref()),
+            Some(serde_json::json!({ "step": step, "phase": phase })),
+        );
+    }
+
     /// Trim the rewound turn from in-memory history and resolve it as `Rewound`.
     /// `target_prompt_index` is the cut captured when the rewind was claimed; `None` uses a fresh snapshot (the legacy path with no prompt id).
     async fn finish_rewound_cancel(
@@ -252,6 +262,31 @@ impl SessionActor {
         &self,
         options: crate::session::CancelOptions,
     ) -> CancelOutcome {
+        let started_at = std::time::Instant::now();
+        let trigger = options
+            .trigger
+            .as_ref()
+            .map(crate::session::CancelTrigger::as_str)
+            .map(str::to_owned);
+        let outcome = self.cancel_running_task_inner(options).await;
+        xai_grok_telemetry::unified_log::info(
+            "shell.cancel.finished",
+            Some(self.session_info.id.0.as_ref()),
+            Some(serde_json::json!({
+                "elapsed_ms": elapsed_ms_saturating(started_at, std::time::Instant::now()),
+                "barrier": format!("{:?}", outcome.barrier),
+                "turn_stopped": outcome.turn_stopped,
+                "settled": outcome.settled,
+                "trigger": trigger,
+            })),
+        );
+        outcome
+    }
+
+    async fn cancel_running_task_inner(
+        &self,
+        options: crate::session::CancelOptions,
+    ) -> CancelOutcome {
         let kind = options
             .trigger
             .as_ref()
@@ -289,7 +324,9 @@ impl SessionActor {
             Vec<super::parent_message::ParentOwnedDelivery>,
         )> = None;
         if let Some(requested) = requested_prompt_id.as_deref() {
+            self.log_cancel_step("lock_front_prompt", "start");
             let mut state = self.state.lock().await;
+            self.log_cancel_step("lock_front_prompt", "done");
             let front_prompt_id = state.pending_inputs.front().map(|f| f.prompt_id.clone());
             if front_prompt_id.as_deref() != Some(requested) {
                 // The client gave up on a prompt that landed behind the running turn: drop the row now,
@@ -379,12 +416,18 @@ impl SessionActor {
         // A claimed rewind owns only the old turn
         // The generic teardown targets whatever is running now and must not run; a new turn may already be promoted
         if let Some((input, epoch, target_prompt_index, message_completions)) = claimed_rewound {
+            self.log_cancel_step("prepare_image_strips", "start");
             let _strip_guard = self.prepare_image_strips_for_rewind().await;
+            self.log_cancel_step("prepare_image_strips", "done");
             self.cancel_active_sampling_requests();
             self.cancel_pending_image_strips_for_rewind();
+            self.log_cancel_step("notify_turn_abort", "start");
             self.notify_turn_abort(epoch, xai_agent_lifecycle::TurnAbortReason::Interrupted)
                 .await;
+            self.log_cancel_step("notify_turn_abort", "done");
+            self.log_cancel_step("get_total_tokens", "start");
             let total_tokens = self.chat_state_handle.get_total_tokens().await;
+            self.log_cancel_step("get_total_tokens", "done");
             let result = Ok(PromptTurnOk {
                 stop_reason: acp::StopReason::Cancelled,
                 total_tokens,
@@ -395,7 +438,8 @@ impl SessionActor {
                 tool_overrides: self.effective_tool_overrides(),
             });
             Self::settle_parent_message_completions(message_completions, &result);
-            return self
+            self.log_cancel_step("finish_rewound_cancel", "start");
+            let outcome = self
                 .finish_rewound_cancel(
                     input,
                     Some(target_prompt_index),
@@ -403,11 +447,35 @@ impl SessionActor {
                     cancel_reason.is_some(),
                 )
                 .await;
+            self.log_cancel_step("finish_rewound_cancel", "done");
+            return outcome;
         }
         let mut finalization = if rewind_requested {
             CancelFinalization::Rewind
         } else {
-            let Some(lease) = self.state.lock().await.claim_cancel_finalization() else {
+            self.log_cancel_step("lock_finalization_claim", "start");
+            let (lease, front_prompt_id, running_prompt_id) = {
+                let mut state = self.state.lock().await;
+                let front_prompt_id = state.pending_inputs.front().map(|f| f.prompt_id.clone());
+                let running_prompt_id = state.running_prompt_id().map(str::to_owned);
+                (
+                    state.claim_cancel_finalization(),
+                    front_prompt_id,
+                    running_prompt_id,
+                )
+            };
+            self.log_cancel_step("lock_finalization_claim", "done");
+            let Some(lease) = lease else {
+                xai_grok_telemetry::unified_log::info(
+                    "shell.cancel.noop_no_lease",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({
+                        "front_prompt_id": front_prompt_id,
+                        "running_prompt_id": running_prompt_id,
+                        "requested_prompt_id": &requested_prompt_id,
+                        "trigger": trigger.as_ref().map(crate::session::CancelTrigger::as_str),
+                    })),
+                );
                 return CancelOutcome::noop();
             };
             CancelFinalization::Keep(lease)
@@ -475,7 +543,10 @@ impl SessionActor {
 
         // After the abort, so this chat-state round trip cannot keep the turn task alive, and before the teardown edits the text
         let last_assistant_message = if cancel_reason.is_some() {
-            self.last_assistant_message_for_cancel().await
+            self.log_cancel_step("last_assistant_message", "start");
+            let message = self.last_assistant_message_for_cancel().await;
+            self.log_cancel_step("last_assistant_message", "done");
+            message
         } else {
             None
         };
@@ -488,6 +559,7 @@ impl SessionActor {
         }
 
         if kill_background_tasks {
+            self.log_cancel_step("kill_background_tasks", "start");
             if self.startup_hints.is_subagent {
                 // Subagent teardown: only kill tasks owned by this session, not the parent's or sibling's tasks on the shared backend
                 self.agent
@@ -502,9 +574,12 @@ impl SessionActor {
                     .kill_all_background_tasks()
                     .await;
             }
+            self.log_cancel_step("kill_background_tasks", "done");
         }
 
+        self.log_cancel_step("get_total_tokens", "start");
         let total_tokens = self.chat_state_handle.get_total_tokens().await;
+        self.log_cancel_step("get_total_tokens", "done");
         let (
             cancelled_prompt_id,
             pending_inputs,
@@ -514,7 +589,9 @@ impl SessionActor {
             message_completions,
             captures_cancelled_turn,
         ) = {
+            self.log_cancel_step("lock_cancel_state", "start");
             let mut state = self.state.lock().await;
+            self.log_cancel_step("lock_cancel_state", "done");
             debug_assert!(
                 pinned_prompt_id.is_none()
                     || state.running_prompt_id().is_none()
@@ -749,8 +826,12 @@ impl SessionActor {
                         } else {
                             xai_tool_types::ForegroundSpawnInterrupt::UserStoppedTurn
                         };
-                        self.hand_off_foreground_subagents(prompt_id, interrupt)
-                            .await
+                        self.log_cancel_step("hand_off_foreground_subagents", "start");
+                        let answers = self
+                            .hand_off_foreground_subagents(prompt_id, interrupt)
+                            .await;
+                        self.log_cancel_step("hand_off_foreground_subagents", "done");
+                        answers
                     } else {
                         HashMap::new()
                     };
@@ -822,7 +903,9 @@ impl SessionActor {
 
         // After the abort, so the turn no longer owns the commands it started.
         if send_now {
+            self.log_cancel_step("background_foreground_commands", "start");
             self.background_foreground_commands_for_send_now().await;
+            self.log_cancel_step("background_foreground_commands", "done");
         }
 
         if tore_down_task {
@@ -832,7 +915,9 @@ impl SessionActor {
             // The aborted turn's `BlockingWaitGuard`s drop asynchronously (they live in tool futures owned by the drainer task / subagent spawn task).
             // Until they do, `queue_input` would read a stale depth > 0 and auto-send-now the next prompt against a turn already gone.
             self.tool_context.blocking_wait_depth.reset();
+            self.log_cancel_step("flush_pending_skill_reminders", "start");
             self.flush_pending_skill_reminders().await;
+            self.log_cancel_step("flush_pending_skill_reminders", "done");
         }
 
         // No multi-second drain here (the actor loop would block RecordSubagentUsage)
@@ -840,9 +925,14 @@ impl SessionActor {
         let cancelled_usage = if rewound_input.is_none()
             && let Some(ref prompt_id) = cancelled_prompt_id
         {
+            self.log_cancel_step("outstanding_reply", "start");
             let reply = self.outstanding_reply_for_prompt(prompt_id).await;
+            self.log_cancel_step("outstanding_reply", "done");
             let outcome = super::turn::UsageDrainOutcome::from_outstanding_reply(reply.as_ref());
-            self.finalize_usage_from_outcome(prompt_id, outcome).await
+            self.log_cancel_step("finalize_usage", "start");
+            let usage = self.finalize_usage_from_outcome(prompt_id, outcome).await;
+            self.log_cancel_step("finalize_usage", "done");
+            usage
         } else {
             None
         };
@@ -856,15 +946,19 @@ impl SessionActor {
         if cancelled_prompt_id.is_some()
             && let Some(epoch) = turn_epoch
         {
+            self.log_cancel_step("notify_turn_abort", "start");
             self.notify_turn_abort(epoch, xai_agent_lifecycle::TurnAbortReason::Interrupted)
                 .await;
+            self.log_cancel_step("notify_turn_abort", "done");
         }
         // Rewind rails hold no lease, so clear the aborted turn's exact
         // resources here (the Keep rail does it in `finish_finalization_lease`).
         if matches!(finalization, CancelFinalization::Rewind)
             && let Some(prompt_id) = cancelled_prompt_id.as_deref()
         {
+            self.log_cancel_step("clear_exact_turn_resources", "start");
             self.clear_exact_turn_resources(prompt_id).await;
+            self.log_cancel_step("clear_exact_turn_resources", "done");
         }
         // A no-task cancel of a pinned front (turn started / pin set, task not yet or no longer in the slot) still needs a durable terminal so resume can tell unknown duration from a 0ms turn.
         // A queued front that never started has no pin and must not emit.
@@ -887,6 +981,7 @@ impl SessionActor {
             }
             // `cancelTrigger` lets clients tell a send-now cancel from a Ctrl+C/Esc one
             // `MidTurnAbort` matches what the prompt's RPC resolves with below, so the event and the RPC agree
+            self.log_cancel_step("emit_turn_completed", "start");
             self.emit_turn_completed(
                 prompt_id,
                 &Ok(acp::StopReason::Cancelled),
@@ -903,10 +998,13 @@ impl SessionActor {
                 None,
             )
             .await;
+            self.log_cancel_step("emit_turn_completed", "done");
         }
 
         if let Some(input) = rewound_input {
+            self.log_cancel_step("prepare_image_strips", "start");
             let _strip_guard = self.prepare_image_strips_for_rewind().await;
+            self.log_cancel_step("prepare_image_strips", "done");
             self.cancel_active_sampling_requests();
             self.cancel_pending_image_strips_for_rewind();
             let result = Ok(PromptTurnOk {
@@ -919,9 +1017,12 @@ impl SessionActor {
                 tool_overrides: self.effective_tool_overrides(),
             });
             Self::settle_parent_message_completions(message_completions, &result);
-            return self
+            self.log_cancel_step("finish_rewound_cancel", "start");
+            let outcome = self
                 .finish_rewound_cancel(input, None, total_tokens, turn_stopped)
                 .await;
+            self.log_cancel_step("finish_rewound_cancel", "done");
+            return outcome;
         }
 
         let message_result = Ok(PromptTurnOk {
@@ -979,14 +1080,20 @@ impl SessionActor {
         }
         // The aborted task skips the completion arm; no next turn starts before this returns.
         if captures_cancelled_turn && let Some(session) = self.weak_self.upgrade() {
+            self.log_cancel_step("lock_prompt_index", "start");
             let source_prompt_index = *self.tool_context.prompt_index.lock().await;
+            self.log_cancel_step("lock_prompt_index", "done");
+            self.log_cancel_step("enqueue_v2_turn_capture", "start");
             session.enqueue_v2_turn_capture(source_prompt_index).await;
+            self.log_cancel_step("enqueue_v2_turn_capture", "done");
             session.schedule_v2_dream_check_after_turn();
         }
+        self.log_cancel_step("finish_finalization_lease", "start");
         let settled = match &mut finalization {
             CancelFinalization::Keep(lease) => self.finish_finalization_lease(lease).await,
             CancelFinalization::Rewind => false,
         };
+        self.log_cancel_step("finish_finalization_lease", "done");
         CancelOutcome {
             barrier: if suppress_task_wakes {
                 WakeBarrier::Armed
@@ -1034,18 +1141,36 @@ impl SessionActor {
     /// Kill the foreground commands this cancel owns. A subagent kills only its own, never the parent's or a sibling's on the shared backend.
     #[tracing::instrument(name = "cancel.kill_foreground", skip_all)]
     async fn kill_foreground_commands_for_cancel(&self) {
-        if self.startup_hints.is_subagent {
-            self.agent
-                .borrow()
-                .tool_bridge()
-                .kill_foreground_commands_by_owner(&self.session_info.id.0)
-                .await;
-        } else {
-            self.agent
-                .borrow()
-                .tool_bridge()
-                .kill_foreground_commands()
-                .await;
+        // A backend that never answers must not hold the cancel path open.
+        const KILL_FOREGROUND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+        self.log_cancel_step("kill_foreground_commands", "start");
+        let killed = tokio::time::timeout(KILL_FOREGROUND_TIMEOUT, async {
+            if self.startup_hints.is_subagent {
+                self.agent
+                    .borrow()
+                    .tool_bridge()
+                    .kill_foreground_commands_by_owner(&self.session_info.id.0)
+                    .await;
+            } else {
+                self.agent
+                    .borrow()
+                    .tool_bridge()
+                    .kill_foreground_commands()
+                    .await;
+            }
+        })
+        .await;
+        match killed {
+            Ok(()) => self.log_cancel_step("kill_foreground_commands", "done"),
+            Err(_) => {
+                xai_grok_telemetry::unified_log::warn(
+                    "shell.cancel.kill_foreground_timeout",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({
+                        "timeout_ms": KILL_FOREGROUND_TIMEOUT.as_millis() as u64,
+                    })),
+                );
+            }
         }
     }
 }
