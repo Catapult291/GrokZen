@@ -264,6 +264,12 @@ impl SessionActor {
             trigger,
             user_initiated,
         } = options;
+        // A send-now redirect backgrounds the foreground command after the
+        // abort, so it must not trip the cooperative-cancel token.
+        let send_now = matches!(
+            trigger.as_ref(),
+            Some(crate::session::CancelTrigger::SendNow)
+        );
         let rewind_requested = matches!(
             history,
             crate::session::CancelHistoryDisposition::RewindIfNoOutput { .. }
@@ -318,6 +324,9 @@ impl SessionActor {
                 self.sweep_monitor_buffer_into_pending(&mut state, "monitor-cancel-drain");
                 let turn_epoch = self.turn_report.epoch();
                 if let Some(task) = state.running_task.take_if(|t| t.prompt_id == requested) {
+                    if !send_now {
+                        state.turn_cancel.cancel();
+                    }
                     self.abort_turn_task(&task, turn_epoch);
                     self.cancel_active_sampling_requests();
                 }
@@ -450,6 +459,9 @@ impl SessionActor {
                 && let Some(epoch) = claimed_turn_epoch
                 && let Some(task) = state.running_task.as_ref()
             {
+                if !send_now {
+                    state.turn_cancel.cancel();
+                }
                 self.abort_turn_task(task, epoch);
                 self.cancel_active_sampling_requests();
             }
@@ -467,9 +479,6 @@ impl SessionActor {
         } else {
             None
         };
-
-        // A send-now redirect is the user continuing, not stopping, so it never kills an in-flight command.
-        let send_now = matches!(trigger, Some(crate::session::CancelTrigger::SendNow));
 
         // Kill all running foreground terminal processes before aborting the task.
         // Send-now skips this and backgrounds them after the abort.
@@ -547,6 +556,12 @@ impl SessionActor {
             let identity_matches = requested_prompt_id
                 .as_deref()
                 .is_none_or(|id| front_prompt_id.as_deref() == Some(id));
+            // Cooperative tool cancellation fires before the turn task is
+            // aborted, and only for the turn this cancel targets. Send-now
+            // backgrounds its foreground command instead of killing it.
+            if identity_matches && !send_now {
+                state.turn_cancel.cancel();
+            }
             let was_rewindable = state.rewindable;
             // Rewind holds no lease, so it reads the live epoch; a no-task cancel has none.
             let turn_epoch =

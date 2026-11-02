@@ -103,6 +103,7 @@ pub(super) async fn create_test_actor_with_memory(
         .filter(|_| memory_config.as_ref().is_some_and(|config| config.enabled));
     let state = TokioMutex::new(State {
         running_task: None,
+        turn_cancel: tokio_util::sync::CancellationToken::new(),
         finalization_gate: Default::default(),
         message_delivery: Default::default(),
         pending_inputs: VecDeque::new(),

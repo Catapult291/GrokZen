@@ -75,6 +75,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
     let tool_context = ToolContext::new(cwd.clone(), None, None, fs, terminal, hunk_tracker_handle);
     let state = TokioMutex::new(State {
         running_task: None,
+        turn_cancel: tokio_util::sync::CancellationToken::new(),
         finalization_gate: Default::default(),
         message_delivery: Default::default(),
         pending_inputs: VecDeque::new(),
