@@ -4808,3 +4808,210 @@ async fn sibling_roster_hides_siblings_of_other_sessions() {
     );
     harness.actor.abort();
 }
+
+/// §5 integration flow: spawn → list → send → interrupt → resume. Each tool
+/// passes in isolation; this pins the composed control-plane flow the model
+/// actually drives.
+#[tokio::test]
+async fn control_plane_flow_spawn_list_send_interrupt_then_resume() {
+    let AdmissionHarness {
+        mut harness,
+        mut admission_entered,
+        admission_release,
+    } = harness_with_admission_gate(
+        false,
+        CoordinatorConfig {
+            foreground_budget: std::time::Duration::from_secs(60),
+            ..CoordinatorConfig::default()
+        },
+    );
+    let backend = parent_backend(&harness);
+
+    // Spawn: the new agent shows up as Running with its own identity.
+    let mut worker = request("worker", true);
+    worker.label = Some("worker".to_owned());
+    let (registered, worker_spawn) = spawn_noting_registration(backend.clone(), worker);
+    registered.await.expect("background registration");
+    assert_eq!(harness.started.recv().await.as_deref(), Some("worker"));
+
+    let entries = backend.list_agents("parent", true, None, 50).await;
+    let [entry] = entries.as_slice() else {
+        panic!("expected exactly one running agent, got {entries:?}");
+    };
+    assert_eq!(entry.id, "worker");
+    assert_eq!(entry.status, SubagentAgentStatus::Running);
+    assert_eq!(entry.label.as_deref(), Some("worker"));
+    assert_eq!(entry.parent_id, "parent");
+    assert_eq!(entry.depth, 1);
+    assert!(
+        backend
+            .list_agents("parent", true, None, 0)
+            .await
+            .is_empty()
+    );
+
+    // Queue-delivery admission on the running agent. `admitted_messages` is
+    // only wired for wake runs (see TestControl), so the running-agent
+    // observation point here is the admission gate; the wake run below
+    // exercises the recorded-admission channel itself.
+    let send = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            backend
+                .send_active_message(
+                    ActiveAgentMessageRequest::try_new_with_operation(
+                        "worker",
+                        "queued update",
+                        ActiveAgentMessageOperation::Queue,
+                    )
+                    .unwrap(),
+                )
+                .await
+        }
+    });
+    admission_entered
+        .recv()
+        .await
+        .expect("running agent admitted the queued delivery");
+    let _ = admission_release.send(());
+    let _ = send.await.expect("send joins");
+
+    // Interrupt: the roster row flips to Cancelled and the live view drops it.
+    assert!(matches!(
+        backend.cancel("worker").await,
+        SubagentCancelOutcome::Cancelled
+    ));
+    let result = worker_spawn.await.unwrap().unwrap();
+    assert!(result.cancelled, "{result:?}");
+    harness
+        .completions
+        .recv()
+        .await
+        .expect("worker disposition");
+
+    let entries = backend.list_agents("parent", true, None, 50).await;
+    let cancelled = entries
+        .iter()
+        .find(|entry| entry.id == "worker")
+        .expect("cancelled agent stays listed");
+    assert_eq!(cancelled.status, SubagentAgentStatus::Cancelled);
+    assert!(
+        backend
+            .list_agents("parent", false, None, 50)
+            .await
+            .is_empty()
+    );
+
+    // A fresh agent completes normally and becomes a resume source.
+    let (registered, second_spawn) =
+        spawn_noting_registration(backend.clone(), request("second", true));
+    registered.await.expect("second registration");
+    assert_eq!(harness.started.recv().await.as_deref(), Some("second"));
+    let _ = harness.finish_one.send("second".to_owned());
+    let result = second_spawn.await.unwrap().unwrap();
+    assert!(result.success, "{result:?}");
+    harness
+        .completions
+        .recv()
+        .await
+        .expect("second disposition");
+
+    // resume_from spawns a new running agent on top of the retained session.
+    let mut resume = request("resume-1", true);
+    resume.resume_from = Some("second".to_owned());
+    let (registered, resume_spawn) = spawn_noting_registration(backend.clone(), resume);
+    registered.await.expect("resume registration");
+    assert_eq!(harness.started.recv().await.as_deref(), Some("resume-1"));
+
+    let entries = backend.list_agents("parent", false, None, 50).await;
+    let [entry] = entries.as_slice() else {
+        panic!("expected only the resumed agent in the live view, got {entries:?}");
+    };
+    assert_eq!(entry.id, "resume-1");
+    assert_eq!(entry.status, SubagentAgentStatus::Running);
+
+    // Finished rows sort last (Running < Ready < Cancelled) and `limit` keeps
+    // the live work first.
+    let entries = backend.list_agents("parent", true, None, 2).await;
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["resume-1", "second"]
+    );
+    let entries = backend.list_agents("parent", true, None, 50).await;
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[1].id, "second");
+    assert_eq!(entries[1].status, SubagentAgentStatus::Ready);
+    assert!(entries[1].resumable);
+    assert_eq!(entries[2].id, "worker");
+    assert_eq!(entries[2].status, SubagentAgentStatus::Cancelled);
+
+    // `parent_id` filters to descendants; a resumed agent is a sibling of its
+    // source, and a subtree root never lists itself.
+    assert!(
+        backend
+            .list_agents("parent", true, Some("second"), 50)
+            .await
+            .is_empty()
+    );
+    assert!(
+        backend
+            .list_agents("parent", true, Some("worker"), 50)
+            .await
+            .is_empty()
+    );
+
+    // Waking the resumed agent starts a fresh run whose control channel
+    // records admitted messages — the send_subagent_message observation point.
+    let _ = harness.finish_one.send("resume-1".to_owned());
+    let result = resume_spawn.await.unwrap().unwrap();
+    assert!(result.success, "{result:?}");
+    harness
+        .completions
+        .recv()
+        .await
+        .expect("resume disposition");
+
+    let wake = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            backend
+                .send_active_message(
+                    ActiveAgentMessageRequest::try_new("resume-1", "continue").unwrap(),
+                )
+                .await
+        }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("resume-1"));
+    let steer = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            backend
+                .send_active_message(
+                    ActiveAgentMessageRequest::try_new_with_operation(
+                        "resume-1",
+                        "steer update",
+                        ActiveAgentMessageOperation::Steer,
+                    )
+                    .unwrap(),
+                )
+                .await
+        }
+    });
+    let (operation, text) = harness
+        .admitted_messages
+        .recv()
+        .await
+        .expect("wake run records the admission");
+    assert_eq!(operation, ActiveAgentMessageOperation::Steer);
+    assert_eq!(text, "steer update");
+    let outcome = steer.await.expect("steer send joins");
+    assert!(
+        matches!(outcome, ActiveAgentMessageOutcome::Accepted { .. }),
+        "{outcome:?}"
+    );
+    let _ = wake.await.expect("wake send joins");
+    harness.actor.abort();
+}
