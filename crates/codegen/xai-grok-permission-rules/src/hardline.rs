@@ -428,9 +428,12 @@ fn is_posix_top_dir(path: &str) -> bool {
 }
 
 fn is_windows_system_dir(rest: &str) -> bool {
-    WINDOWS_SYSTEM_DIRS
-        .iter()
-        .any(|dir| rest == *dir || rest.strip_prefix(dir) == Some("/*"))
+    WINDOWS_SYSTEM_DIRS.iter().any(|dir| {
+        rest == *dir
+            || rest
+                .strip_prefix(dir)
+                .is_some_and(|tail| tail.starts_with('/'))
+    })
 }
 
 fn is_windows_user_root(rest: &str) -> bool {
@@ -939,6 +942,12 @@ mod tests {
             "rm -rf /c/Users/me",
             "rm -rf C:\\ProgramData",
             "rm -rf C:\\Program Files (x86)",
+            "rm -rf C:\\Windows\\System32",
+            "rm -rf C:/Windows/SysWOW64/drivers",
+            "Remove-Item C:\\Windows\\System32 -Recurse -Force",
+            "del /f /s /q C:\\Windows\\Temp",
+            "rm -rf C:\\Program Files\\Some App",
+            "rm -rf C:\\ProgramData\\Vendor",
             "rm -rf \\\\?\\C:\\",
             "rm -rf \\\\.\\C:",
         ] {
@@ -992,6 +1001,9 @@ mod tests {
             "git reset --hard",
             "rm -rf $TARGET",
             "rm -rf C:\\Users\\me\\Documents",
+            "rm -rf C:\\WindowsOld",
+            "rm -rf C:\\Windows.old",
+            "rm -rf C:\\ProgramData2",
         ] {
             assert_miss(command);
         }
