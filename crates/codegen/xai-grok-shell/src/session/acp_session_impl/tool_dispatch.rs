@@ -39,8 +39,24 @@ pub(super) async fn dispatch_tool(
         session_id,
         origin,
         xai_grok_tools::types::source_summary::SourceSummarySlot::new(),
+        None,
     )
     .await
+}
+
+fn build_tool_call_context(
+    call_id: xai_tool_protocol::ToolCallId,
+    origin: xai_grok_tools::types::tool_call_origin::ToolCallOrigin,
+    slot: xai_grok_tools::types::source_summary::SourceSummarySlot,
+    cancellation: Option<tokio_util::sync::CancellationToken>,
+) -> xai_tool_runtime::ToolCallContext {
+    let mut ctx = xai_tool_runtime::ToolCallContext::new(call_id);
+    ctx.insert(origin);
+    ctx.insert(slot);
+    if let Some(token) = cancellation {
+        ctx.insert(xai_tool_runtime::Cancellation(token));
+    }
+    ctx
 }
 
 pub(super) async fn dispatch_observed(
@@ -49,13 +65,15 @@ pub(super) async fn dispatch_observed(
     session_id: &str,
     origin: xai_grok_tools::types::tool_call_origin::ToolCallOrigin,
     slot: xai_grok_tools::types::source_summary::SourceSummarySlot,
+    cancellation: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<ToolRunResult, xai_tool_runtime::ToolError> {
-    let mut ctx = xai_tool_runtime::ToolCallContext::new(
+    let ctx = build_tool_call_context(
         xai_tool_protocol::ToolCallId::new(prepared.tool_call_id.0.as_ref())
             .unwrap_or_else(|_| xai_tool_protocol::ToolCallId::new_v7()),
+        origin,
+        slot,
+        cancellation,
     );
-    ctx.insert(origin);
-    ctx.insert(slot);
     workspace_ops
         .call_tool_with_context(
             &prepared.tool_name,
@@ -419,6 +437,43 @@ pub(super) fn build_tool_parse_error_message(
 mod tests {
     use super::*;
     use xai_grok_sampling_types::rs;
+    use xai_grok_tools::types::source_summary::SourceSummarySlot;
+    use xai_grok_tools::types::tool_call_origin::{InvocationSource, ToolCallOrigin};
+
+    fn test_origin() -> ToolCallOrigin {
+        ToolCallOrigin::direct(
+            InvocationSource::System,
+            "invocation",
+            None,
+            None,
+            None,
+            "tool",
+            None,
+        )
+    }
+
+    #[test]
+    fn cancellation_extension_is_mounted_when_present() {
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = build_tool_call_context(
+            xai_tool_protocol::ToolCallId::new_v7(),
+            test_origin(),
+            SourceSummarySlot::new(),
+            Some(token),
+        );
+        assert!(ctx.get::<xai_tool_runtime::Cancellation>().is_some());
+    }
+
+    #[test]
+    fn cancellation_extension_is_absent_when_not_provided() {
+        let ctx = build_tool_call_context(
+            xai_tool_protocol::ToolCallId::new_v7(),
+            test_origin(),
+            SourceSummarySlot::new(),
+            None,
+        );
+        assert!(ctx.get::<xai_tool_runtime::Cancellation>().is_none());
+    }
 
     fn web_search_payload(status: rs::WebSearchToolCallStatus) -> serde_json::Value {
         // The exact serialized `web_search_call` payload the sampler forwards on `BackendToolCallCompleted` (via `serde_json::to_value(ws)`)

@@ -87,6 +87,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 ToolContext::new(cwd.clone(), None, None, fs, terminal, hunk_tracker_handle);
             let state = TokioMutex::new(State {
                 running_task: None,
+                turn_cancel: tokio_util::sync::CancellationToken::new(),
                 finalization_gate: Default::default(),
                 message_delivery: Default::default(),
                 pending_inputs: VecDeque::new(),
