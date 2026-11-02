@@ -25,7 +25,7 @@
 | 阶段 4 生命周期 | 已完成 | `f3b49426` | `context: fork`、深度/总量预算、resume 放宽、max_turns partial |
 | 阶段 5 运行态 snapshot | 已完成（并入阶段 2） | `f3b49426` | snapshot 字段与 `list_agents` 输出列同源 |
 | 6.1 委派并发安全 | 已完成 | `231153fe` / `a9d97135` | `TaskTool` 声明 `max_concurrency = Some(16)`；并行验收测试见 `a9d97135` |
-| 6.2 worktree 收尾 | 实现已完成，验收部分 | `eaf0fe70` | 无改动自动清理、apply/discard、`worktree_base` |
+| 6.2 worktree 收尾 | 已完成 | `eaf0fe70` / `f61f131a` | 无改动自动清理、apply/discard、`worktree_base`；删除与指针清空断言见 `f61f131a` |
 | 6.3 文档一致性 | 已完成 | `dccf90d9` | 中英文档与代码默认值对齐 |
 | 6.4 指标 | 已完成 | `1f332c4c` | 本地汇总 + 完成事件补类型/停止原因 |
 
@@ -36,11 +36,11 @@
 | 验收项 | 结论 | 现有证据 | 缺口 |
 |---|---|---|---|
 | 批量 fan-out 不串行 | **已验收** | `parallel_foreground_spawns_overlap_and_finish_independently` 断言两个前台 spawn 都进入 `started`，`finish_one("a")` 后 b 仍在运行，两者最终都 `success`；`teardown_session_children_spares_other_sessions` 仍通过；`TaskTool` 已声明并发上限 | 无 |
-| 空 worktree 不残留 | **部分验收** | `workspace_helper_reports_clean_dirty_and_committed_worktrees` 通过；`subagent_worktree_has_changes` / `remove_subagent_worktree` 各自有测试；3 个 `subagent_worktree_base` 配置测试通过 | 没有一条断言覆盖“无改动 → 目录被删除 + meta `worktree_path` 被清空”的组合路径 |
+| 空 worktree 不残留 | **已验收** | workspace 层 `unchanged_worktree_is_removed_and_unregistered`：干净 worktree 判定为无改动，删除后目录消失且从 `git worktree list` 注销；shell 层 `update_subagent_meta_worktree_removed_clears_the_pointer`：meta `worktree_path` 清空 | 未跑 `run_shell_child` + `MockInferenceServer` 全链路（见任务 F），边界已写入 `f61f131a` 提交说明 |
 | 文档与代码默认值一致 | **已验收** | 抽查 `background=true`、`max_depth=2`、`max_total_agents=16`、`max_concurrent=32`、`worktree_base=head`，中英文档与代码一致 | 无 |
 | 6.4 指标 | **已完成** | 7 个 metrics 单测；`cargo check` tools/shell 通过 | 无 |
 
-结论：**阶段 6 代码已齐，验收未齐**。在任务 B 完成前，不应把阶段 6 标记为通过。
+结论：**任务 A、B 已完成，阶段 6 验收缺口已补齐**。剩余任务 F（端到端验证）与 G（既有失败基线）见 §3。
 
 ## 3. 剩余任务（按执行顺序）
 
@@ -80,7 +80,7 @@ cargo test -p xai-grok-tools --lib task::
 
 ### 任务 B（P0）：补 6.2 空 worktree 删除断言
 
-**状态**：待办
+**状态**：已完成（`f61f131a`）
 
 **目标**：断言一个无改动的子代理 worktree 在完成收尾时确实被删除，且持久化指针被清空。
 
@@ -287,6 +287,7 @@ rustfmt --edition 2024 --check <changed-file>
 | 2026-11-02 | 6.2 worktree helper | 通过 | `cargo test -p xai-grok-workspace --lib workspace_helper_reports_clean_dirty_and_committed_worktrees`（1 passed） |
 | 2026-11-02 | 6.2 worktree_base 配置 | 通过 | `cargo test -p xai-grok-shell --lib subagent_worktree_base`（3 passed） |
 | 2026-11-02 | 6.1 双前台 spawn 并行 | 通过 | `cargo test -p xai-grok-tools --lib task::coordinator`（166 passed）；`cargo test -p xai-grok-tools --lib task::`（365 passed）；提交 `a9d97135` |
+| 2026-11-02 | 6.2 空 worktree 删除与清指针 | 通过 | `cargo test -p xai-grok-workspace --lib worktree`（112 passed，4 个任务 G 已知基线失败）；`cargo test -p xai-grok-shell --lib agent::subagent -- --skip wake::`（289 passed）；提交 `f61f131a` |
 
 ## 6. 提交约定
 
