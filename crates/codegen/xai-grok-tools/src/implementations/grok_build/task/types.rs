@@ -76,6 +76,8 @@ pub struct SubagentRequest {
     pub id: String,
     pub prompt: String,
     pub description: String,
+    /// Short model-chosen label shown in `list_agents` and the TUI. Falls back to the id.
+    pub label: Option<String>,
     pub subagent_type: String,
     pub parent_session_id: String,
     /// Parent turn/prompt ID that launched this subagent. Used to cancel only the subagents spawned
@@ -289,6 +291,26 @@ pub fn prune_orphaned_background_task_tools(config: &mut crate::registry::types:
     });
 }
 
+/// Drop subagent-control tools that cannot be satisfied: `list_agents` without
+/// a `task` tool. `list_agents` is registered unconditionally in the default
+/// toolsets, so every strip path (subagents disabled, depth cap, allowlist)
+/// must call this after removing `task`.
+pub fn prune_orphaned_subagent_tools(config: &mut crate::registry::types::ToolServerConfig) {
+    use crate::types::tool::ToolKind;
+
+    let has_task_tool = config
+        .tools
+        .iter()
+        .any(|tc| tc.kind == Some(ToolKind::Task));
+    if has_task_tool {
+        return;
+    }
+    config.tools.retain(|tc| {
+        tc.id.rsplit(':').next()
+            != Some(crate::implementations::grok_build::list_agents::LIST_AGENTS_TOOL_NAME)
+    });
+}
+
 fn is_background_capable_bash_tool(tc: &crate::registry::types::ToolConfig) -> bool {
     match tc.id.as_str() {
         "GrokBuild:run_terminal_cmd" | "GrokBuildConcise:run_terminal_cmd" => tc
@@ -457,6 +479,18 @@ pub struct SubagentResult {
     /// auto-background). Not a completion — `success` stays false so `status()` is not `"completed"`; branch on this before
     /// `success`. Task `run_in_background` start is a separate registration signal, not this flag on `spawn()`.
     pub backgrounded: bool,
+    /// Schema-validated structured answer produced under the child's
+    /// `output_schema` contract, duplicated from `output` (which carries the
+    /// same JSON document as text). `None` when no schema was requested, the
+    /// runtime did not stamp it, or validation failed.
+    pub structured: Option<serde_json::Value>,
+    /// Why the child's turn ended (`xai_tool_types::stop_reason` values).
+    /// Empty when the runtime did not stamp it; treat empty + `success` as
+    /// `end_turn`.
+    pub stop_reason: String,
+    /// True when the child stopped before finishing (max turns, cancel,
+    /// truncation) — the result is partial and resumable.
+    pub partial: bool,
 }
 
 impl Default for SubagentResult {
@@ -478,6 +512,9 @@ impl Default for SubagentResult {
             worktree_path: None,
             subagent_type: String::new(),
             backgrounded: false,
+            structured: None,
+            stop_reason: String::new(),
+            partial: false,
         }
     }
 }
@@ -563,9 +600,15 @@ pub struct SubagentLoopUnitActiveRequest {
 
 /// Point-in-time snapshot of a subagent's state.
 /// Returned by the coordinator in response to a `SubagentQueryRequest`.
-#[derive(Debug, Clone)]
+///
+/// The placement/usage/observability fields are flat so `list_agents` derives
+/// its wire columns from this one struct; status-specific narrative (output
+/// text, error) stays in [`SubagentSnapshotStatus`].
+#[derive(Debug, Clone, Default)]
+#[allow(clippy::derive_partial_eq_without_eq)]
 pub struct SubagentSnapshot {
     pub subagent_id: String,
+    pub label: Option<String>,
     pub description: String,
     pub subagent_type: String,
     pub status: SubagentSnapshotStatus,
@@ -575,10 +618,36 @@ pub struct SubagentSnapshot {
     pub duration_ms: u64,
     /// Persona used by this subagent, if any.
     pub persona: Option<String>,
+    /// Effective child model id; `None` before the runtime resolves it.
+    pub model: Option<String>,
+    /// Immediate spawner id, or the root session id for a direct child.
+    pub parent_id: Option<String>,
+    /// Nesting depth; a direct child of the root is 1. `None` before admission.
+    pub depth: Option<u32>,
+    /// Input (context) tokens reported by the child runtime.
+    pub tokens_in: u64,
+    /// Output tokens reported by the child runtime.
+    pub tokens_out: u64,
+    /// Raw tokens currently used in the child's context window.
+    pub context_used: u64,
+    /// Total context window capacity (tokens); 0 when unknown.
+    pub context_window: u64,
+    /// Context window usage as a percentage (0–100).
+    pub context_pct: u8,
+    /// Most recently invoked client tool name, when known.
+    pub current_tool: Option<String>,
+    /// Epoch ms of the last observed child activity; `None` when unknown.
+    pub last_activity: Option<u64>,
+    /// 1-based slot in the parent's admission queue while `status` is queued;
+    /// `None` otherwise.
+    pub queue_position: Option<usize>,
+    /// Whether the finished child retains a resumable conversation.
+    pub resumable: bool,
 }
 
 /// Lifecycle metadata returned to shell presentation and extension callers.
 #[derive(Debug, Clone)]
+#[allow(clippy::derive_partial_eq_without_eq)]
 pub struct SubagentInspection {
     pub snapshot: SubagentSnapshot,
     pub parent_session_id: String,
@@ -596,28 +665,74 @@ impl SubagentSnapshot {
             SubagentSnapshotStatus::Running { .. } | SubagentSnapshotStatus::Initializing
         )
     }
+
+    /// Derive the `list_agents` wire entry from this snapshot: identity,
+    /// placement, and usage columns all read the flat fields, so the tool's
+    /// output cannot drift from the coordinator's internal state. `elapsed_ms`
+    /// and the terminal-status mapping come from the snapshot itself.
+    pub fn agent_entry(&self) -> SubagentAgentEntry {
+        // A queued snapshot is `Initializing` with a coordinator-set queue
+        // slot; pending (admitted, starting) snapshots have no slot and read
+        // as `Running`, matching the TUI's live grouping.
+        let queued = self.queue_position.is_some()
+            && matches!(self.status, SubagentSnapshotStatus::Initializing);
+        let status = if queued {
+            SubagentAgentStatus::Queued
+        } else {
+            match &self.status {
+                SubagentSnapshotStatus::Initializing | SubagentSnapshotStatus::Running { .. } => {
+                    SubagentAgentStatus::Running
+                }
+                SubagentSnapshotStatus::Completed { .. } => {
+                    if self.resumable {
+                        SubagentAgentStatus::Ready
+                    } else {
+                        SubagentAgentStatus::Completed
+                    }
+                }
+                SubagentSnapshotStatus::Failed { .. } => SubagentAgentStatus::Failed,
+                SubagentSnapshotStatus::Cancelled { .. } => SubagentAgentStatus::Cancelled,
+            }
+        };
+        SubagentAgentEntry {
+            id: self.subagent_id.clone(),
+            label: self.label.clone(),
+            subagent_type: self.subagent_type.clone(),
+            status,
+            model: self.model.clone(),
+            parent_id: self
+                .parent_id
+                .clone()
+                .unwrap_or_else(|| self.subagent_id.clone()),
+            depth: self.depth.unwrap_or(1),
+            elapsed_ms: self.duration_ms,
+            tokens_in: self.tokens_in,
+            tokens_out: self.tokens_out,
+            context_pct: self.context_pct,
+            current_tool: self.current_tool.clone(),
+            queue_position: self.queue_position,
+            resumable: self.resumable,
+        }
+    }
 }
 
 /// Status of a subagent snapshot.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum SubagentSnapshotStatus {
     /// Subagent is being set up (creating worktree, resolving config, spawning
     /// session). Queries during this phase should report the subagent as
     /// initializing rather than "not found".
+    #[default]
     Initializing,
-    /// Child session is still running. Fields are populated from the child
-    /// session's `SessionSignals` snapshot at query time (pull-based).
+    /// Child session is still running. Token/context/tool detail lives on the
+    /// flat snapshot fields (`tokens_in`, `context_pct`, `current_tool`, …),
+    /// populated from the child session's `SessionSignals` snapshot at query
+    /// time (pull-based).
     Running {
         /// Number of completed turns so far.
         turn_count: u32,
         /// Total tool calls executed so far.
         tool_call_count: u32,
-        /// Current tokens used in the context window.
-        tokens_used: u64,
-        /// Total context window capacity (tokens).
-        context_window_tokens: u64,
-        /// Context window usage as a percentage (0–100).
-        context_usage_pct: u8,
         /// Distinct tool names called so far (e.g. `["bash", "read_file"]`).
         tools_used: Vec<String>,
         /// Number of errors encountered so far.
@@ -802,6 +917,77 @@ pub struct SubagentListRunningRequest {
     pub respond_to: oneshot::Sender<Vec<SubagentInspection>>,
 }
 
+/// Wire-facing state of one entry in `list_agents`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentAgentStatus {
+    /// Admitted, waiting for a session concurrency slot.
+    Queued,
+    /// In flight — initializing or running a turn.
+    Running,
+    /// Online, between turns.
+    Idle,
+    /// Finished, with a resumable conversation retained.
+    Ready,
+    /// Finished successfully and not resumable.
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl SubagentAgentStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Idle => "idle",
+            Self::Ready => "ready",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// One subagent in a `list_agents` result.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SubagentAgentEntry {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(rename = "type")]
+    pub subagent_type: String,
+    pub status: SubagentAgentStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub parent_id: String,
+    /// Nesting depth: a direct child of the root is 1.
+    pub depth: u32,
+    pub elapsed_ms: u64,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub context_pct: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_position: Option<usize>,
+    pub resumable: bool,
+}
+
+/// Request for a subtree of subagents owned by one parent session.
+#[derive(Educe)]
+#[educe(Debug)]
+pub struct SubagentListAgentsRequest {
+    pub parent_session_id: String,
+    /// Include finished children. Live and queued children are always included.
+    pub include_finished: bool,
+    /// Restrict to descendants of this subagent id; `None` lists the whole session tree.
+    pub parent_id: Option<String>,
+    pub limit: usize,
+    #[educe(Debug(ignore))]
+    pub respond_to: oneshot::Sender<Vec<SubagentAgentEntry>>,
+}
+
 /// Fork/resume provenance retained by the shared coordinator.
 #[derive(Debug, Clone, Default)]
 pub struct SubagentProvenance {
@@ -966,6 +1152,7 @@ pub enum SubagentEvent {
     Cancel(SubagentCancelRequest),
     ListActive(SubagentListActiveRequest),
     ListRunning(SubagentListRunningRequest),
+    ListAgents(SubagentListAgentsRequest),
     Completions(SubagentCompletionsRequest),
     /// `Completions` without draining; the requester's ledger discards the copies at a later drain. `suppress_ids` is ignored.
     PeekCompletions(SubagentCompletionsRequest),
@@ -1463,9 +1650,6 @@ mod tests {
         let status = super::SubagentSnapshotStatus::Running {
             turn_count: 0,
             tool_call_count: 0,
-            tokens_used: 0,
-            context_window_tokens: 0,
-            context_usage_pct: 0,
             tools_used: vec![],
             error_count: 0,
         };
@@ -1532,6 +1716,7 @@ mod tests {
 
         let summaries = vec![super::SubagentCompletionSummary {
             snapshot: super::SubagentSnapshot {
+                label: None,
                 subagent_id: "sub-1".into(),
                 description: "test task".into(),
                 subagent_type: "general-purpose".into(),
@@ -1544,6 +1729,7 @@ mod tests {
                 started_at_epoch_ms: 0,
                 duration_ms: 1500,
                 persona: None,
+                ..Default::default()
             },
             loop_task_id: None,
             tool_calls: 7,
@@ -1588,6 +1774,7 @@ mod tests {
         // Simulate coordinator response: one found, one not
         let snapshots = vec![
             Some(super::SubagentSnapshot {
+                label: None,
                 subagent_id: "a".into(),
                 description: "task a".into(),
                 subagent_type: "general-purpose".into(),
@@ -1600,6 +1787,7 @@ mod tests {
                 started_at_epoch_ms: 1000,
                 duration_ms: 500,
                 persona: None,
+                ..Default::default()
             }),
             None,
         ];
@@ -1661,5 +1849,146 @@ mod tests {
                 },
             ))
             .unwrap();
+    }
+
+    #[test]
+    fn agent_entry_maps_running_snapshot_to_wire_columns() {
+        let snapshot = super::SubagentSnapshot {
+            subagent_id: "sub-1".into(),
+            label: Some("auth-research".into()),
+            description: "research auth".into(),
+            subagent_type: "explore".into(),
+            status: super::SubagentSnapshotStatus::Running {
+                turn_count: 2,
+                tool_call_count: 5,
+                tools_used: vec!["search_code".into()],
+                error_count: 0,
+            },
+            started_at_epoch_ms: 1_000,
+            duration_ms: 8_421,
+            persona: None,
+            model: Some("current-model".into()),
+            parent_id: Some("root".into()),
+            depth: Some(1),
+            tokens_in: 18_234,
+            tokens_out: 0,
+            context_used: 18_234,
+            context_window: 128_000,
+            context_pct: 37,
+            current_tool: Some("search_code".into()),
+            last_activity: None,
+            queue_position: None,
+            resumable: false,
+        };
+        let entry = snapshot.agent_entry();
+        assert_eq!(entry.id, "sub-1");
+        assert_eq!(entry.label.as_deref(), Some("auth-research"));
+        assert_eq!(entry.subagent_type, "explore");
+        assert_eq!(entry.status, super::SubagentAgentStatus::Running);
+        assert_eq!(entry.model.as_deref(), Some("current-model"));
+        assert_eq!(entry.parent_id, "root");
+        assert_eq!(entry.depth, 1);
+        assert_eq!(entry.elapsed_ms, 8_421);
+        assert_eq!(entry.tokens_in, 18_234);
+        assert_eq!(entry.tokens_out, 0);
+        assert_eq!(entry.context_pct, 37);
+        assert_eq!(entry.current_tool.as_deref(), Some("search_code"));
+        assert_eq!(entry.queue_position, None);
+        assert!(!entry.resumable);
+    }
+
+    #[test]
+    fn agent_entry_maps_terminal_statuses_and_queue_slot() {
+        let queued = super::SubagentSnapshot {
+            subagent_id: "q".into(),
+            subagent_type: "explore".into(),
+            status: super::SubagentSnapshotStatus::Initializing,
+            queue_position: Some(2),
+            parent_id: Some("root".into()),
+            ..Default::default()
+        };
+        let entry = queued.agent_entry();
+        assert_eq!(entry.status, super::SubagentAgentStatus::Queued);
+        assert_eq!(entry.queue_position, Some(2));
+
+        let ready = super::SubagentSnapshot {
+            subagent_id: "r".into(),
+            subagent_type: "implementer".into(),
+            status: super::SubagentSnapshotStatus::Completed {
+                output: String::new(),
+                tool_calls: 3,
+                turns: 2,
+                worktree_path: None,
+            },
+            resumable: true,
+            parent_id: Some("root".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            ready.agent_entry().status,
+            super::SubagentAgentStatus::Ready
+        );
+
+        let completed = super::SubagentSnapshot {
+            status: super::SubagentSnapshotStatus::Completed {
+                output: String::new(),
+                tool_calls: 3,
+                turns: 2,
+                worktree_path: None,
+            },
+            subagent_id: "c".into(),
+            subagent_type: "explore".into(),
+            parent_id: Some("root".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            completed.agent_entry().status,
+            super::SubagentAgentStatus::Completed
+        );
+
+        let failed = super::SubagentSnapshot {
+            status: super::SubagentSnapshotStatus::Failed {
+                error: "boom".into(),
+            },
+            subagent_id: "f".into(),
+            subagent_type: "explore".into(),
+            parent_id: Some("root".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            failed.agent_entry().status,
+            super::SubagentAgentStatus::Failed
+        );
+
+        let cancelled = super::SubagentSnapshot {
+            status: super::SubagentSnapshotStatus::Cancelled {
+                reason: Some("user".into()),
+            },
+            subagent_id: "x".into(),
+            subagent_type: "explore".into(),
+            parent_id: Some("root".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            cancelled.agent_entry().status,
+            super::SubagentAgentStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn pending_snapshot_without_lineage_falls_back_in_entry() {
+        let snapshot = super::SubagentSnapshot {
+            subagent_id: "p".into(),
+            subagent_type: "explore".into(),
+            status: super::SubagentSnapshotStatus::Initializing,
+            parent_id: None,
+            depth: None,
+            ..Default::default()
+        };
+        let entry = snapshot.agent_entry();
+        // Parent falls back to the id itself (root-level unknown), depth to 1.
+        assert_eq!(entry.parent_id, "p");
+        assert_eq!(entry.depth, 1);
+        assert_eq!(entry.status, super::SubagentAgentStatus::Running);
     }
 }

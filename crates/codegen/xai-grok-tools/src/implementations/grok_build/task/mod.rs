@@ -21,6 +21,7 @@ mod agent_message_sender;
 pub mod backend;
 pub mod coordinator;
 mod coordinator_state;
+mod metrics;
 pub use coordinator_state::{cap_completion_output, completion_summary, terminal_snapshot};
 pub mod model_policy;
 pub use model_policy::TaskParams;
@@ -35,12 +36,18 @@ use crate::types::output::ToolOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::{SessionFolder, SharedResources};
 use crate::types::tool::{ToolKind, ToolNamespace};
-use xai_tool_types::{SubagentCompletedOutput, SubagentIsolationMode, TaskToolInput};
+use xai_tool_types::{
+    SubagentCompletedOutput, SubagentContextMode, SubagentIsolationMode, TaskToolInput,
+};
+use self::types::{
+    ActiveAgentMessageOperation, ActiveAgentMessageOutcome, ActiveAgentMessageRequest,
+    SubagentSnapshotStatus,
+};
 
 pub const TASK_TOOL_NAME: &str = "task";
 
 /// Default max nesting depth when [`MaxSubagentDepth`] is not injected.
-pub const MAX_SUBAGENT_DEPTH: u32 = 1;
+pub const MAX_SUBAGENT_DEPTH: u32 = 2;
 
 pub fn effective_max_subagent_depth(resources: &crate::types::resources::Resources) -> u32 {
     resources
@@ -338,6 +345,9 @@ impl xai_tool_runtime::Tool for TaskTool {
         xai_tool_protocol::ToolCapabilities {
             is_read_only: false,
             tool_scope: Some(xai_tool_protocol::ToolScope::Write),
+            // Spawns are non-blocking after admission; allow a same-step fan-out
+            // without treating each call as an exclusive barrier (plan §6.1).
+            max_concurrency: Some(16),
             ..Default::default()
         }
     }
@@ -456,6 +466,81 @@ impl xai_tool_runtime::Tool for TaskTool {
             xai_tool_types::is_not_sentinel(trimmed).then(|| trimmed.to_string())
         });
 
+        // A `resume_from` naming a still-running subagent becomes a queued
+        // follow-up: the text rides `send_subagent_message`'s queue delivery
+        // and runs as the child's next turn, instead of failing outright.
+        // The lookup is fail-open: an unavailable query (no coordinator, a
+        // stalled host) falls through to the plain resume path, which still
+        // reports "still running" from the child runtime.
+        if let Some(resume_id) = resume_from.clone() {
+            let query = backend.backend().query(&resume_id, false, None);
+            let snapshot = match tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                query,
+            )
+            .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(_elapsed) => {
+                    tracing::debug!(
+                        resume_from = %resume_id,
+                        "resume running-check query timed out; falling through to resume"
+                    );
+                    None
+                }
+            };
+            let still_running = matches!(
+                snapshot.map(|snapshot| snapshot.status),
+                Some(
+                    SubagentSnapshotStatus::Initializing
+                        | SubagentSnapshotStatus::Running { .. }
+                )
+            );
+            if still_running {
+                let outcome = backend
+                    .backend()
+                    .send_active_message(
+                        ActiveAgentMessageRequest::try_new_with_operation(
+                            resume_id.clone(),
+                            input.prompt.as_str(),
+                            ActiveAgentMessageOperation::Queue,
+                        )
+                        .map_err(|outcome| {
+                            xai_tool_runtime::ToolError::custom(
+                                "resume_followup_rejected",
+                                format!(
+                                    "Cannot resume from subagent '{resume_id}': it is still \
+                                     running and the follow-up message was not accepted \
+                                     ({outcome:?}). Wait for it to complete, then resume."
+                                ),
+                            )
+                        })?,
+                    )
+                    .await;
+                return match outcome {
+                    ActiveAgentMessageOutcome::Accepted { message_id } => {
+                        Ok(ToolOutput::Text(
+                            format!(
+                                "Subagent '{resume_id}' is still running; the prompt was queued \
+                                 as a follow-up (message {message_id}) and will run as its next \
+                                 turn. Resume with resume_from once it completes instead if a \
+                                 separate continuation is needed."
+                            )
+                            .into(),
+                        ))
+                    }
+                    other => Err(xai_tool_runtime::ToolError::custom(
+                        "resume_followup_rejected",
+                        format!(
+                            "Cannot resume from subagent '{resume_id}': it is still running and \
+                             the follow-up message was not accepted ({other:?}). Wait for it to \
+                             complete, then resume."
+                        ),
+                    )),
+                };
+            }
+        }
+
         // Model overrides are soft-ignored on resume (source model is always pinned).
         let model = xai_tool_types::sanitize_optional_arg(input.model);
         let model = if resume_from.is_some() {
@@ -566,6 +651,8 @@ impl xai_tool_runtime::Tool for TaskTool {
                     .await;
             }
             reject_subagent_type(outcome, &subagent_type)?;
+            #[cfg(test)]
+            record_builtin_selection(&resources, &subagent_type).await;
         }
 
         if let Some(ref requested) = model {
@@ -602,10 +689,60 @@ impl xai_tool_runtime::Tool for TaskTool {
             })
             .flatten();
 
+        let label = xai_tool_types::sanitize_label(input.label.clone());
+        // The explore prompt scales its effort to a level stated on the first line.
+        let prompt = match input.thoroughness {
+            Some(thoroughness) if subagent_type.eq_ignore_ascii_case("explore") => format!(
+                "Thoroughness: {}.\n\n{}",
+                thoroughness.as_str(),
+                input.prompt.trim_start()
+            ),
+            Some(_) => {
+                tracing::warn!(
+                    subagent_type = %subagent_type,
+                    "thoroughness only applies to explore subagents; ignoring"
+                );
+                input.prompt.clone()
+            }
+            None => input.prompt.clone(),
+        };
+
+        // Reject an unsupported output schema before any child work is spent.
+        // The subset check mirrors the child runtime's contract enforcement.
+        let output_schema = match input.output_schema {
+            None => None,
+            Some(schema) => match xai_tool_types::validate_output_schema(&schema) {
+                Ok(()) => Some(schema),
+                Err(message) => {
+                    return Err(xai_tool_runtime::ToolError::invalid_arguments(message));
+                }
+            },
+        };
+
+        // Fork seeding only applies to a fresh spawn: a resume resolves its
+        // own conversation source (transcript copy) and wins, matching the
+        // child runtime's fail-closed precedence.
+        let fork_context = input.context == Some(SubagentContextMode::Fork) && resume_from.is_none();
+        if input.context == Some(SubagentContextMode::Fork) && resume_from.is_some() {
+            tracing::debug!(
+                subagent_id = %id,
+                "ignoring context=fork because resume_from is set; resume wins"
+            );
+        }
+        // A forked child inherits the parent model and runs read-only unless
+        // its type is the implementation-oriented builtin. The harness-internal
+        // `capability_mode` stays caller-controlled: an explicit in-process
+        // mode wins over the fork default.
+        let capability_mode = input.capability_mode.or({
+            (fork_context && !subagent_type.eq_ignore_ascii_case("implementer"))
+                .then_some(xai_tool_types::SubagentCapabilityMode::ReadOnly)
+        });
+
         let request = SubagentRequest {
             id: id.clone(),
-            prompt: input.prompt.clone(),
+            prompt,
             description: input.description.clone(),
+            label,
             subagent_type: subagent_type.clone(),
             parent_session_id,
             parent_prompt_id,
@@ -619,8 +756,9 @@ impl xai_tool_runtime::Tool for TaskTool {
                 reasoning_effort: None,
                 persona: None,
                 // JSON cannot set this field. Compat-harness adapters still
-                // populate it in-process; model-facing spawns stay `None`.
-                capability_mode: input.capability_mode,
+                // populate it in-process; model-facing spawns stay `None`
+                // unless `context: fork` implies the read-only default.
+                capability_mode,
                 isolation: input.isolation,
                 // Model-issued `task` spawns never override the harness; the
                 // parent agent decides the flavor (the `/goal` harness override
@@ -629,14 +767,14 @@ impl xai_tool_runtime::Tool for TaskTool {
                 completion_output_cap: None,
                 spawn_depth: None,
                 output_token_budget: None,
-                output_schema: None,
+                output_schema,
                 loop_task_id: None,
             },
             run_in_background: input.run_in_background,
             // Model-spawned subagents must still appear in the idle reminder.
             surface_completion: true,
             await_to_completion: false,
-            fork_context: false,
+            fork_context,
             owner: SubagentOwner::Task,
             cancel_token: child_cancellation,
             spawn_root: SpawnRootSpan::new(spawn_root_span),
@@ -753,6 +891,12 @@ impl xai_tool_runtime::Tool for TaskTool {
             } else {
                 result.subagent_type
             };
+            let structured = result.structured.clone();
+            let stop_reason = if structured.is_some() {
+                xai_tool_types::stop_reason::END_TURN.to_owned()
+            } else {
+                xai_tool_types::stop_reason::NO_STRUCTURED_RESULT.to_owned()
+            };
             Ok(ToolOutput::SubagentCompleted(SubagentCompletedOutput {
                 // SubagentCompletedOutput.output is `String` (serde-visible
                 // boundary). One allocation per completion; cheaper paths
@@ -767,6 +911,9 @@ impl xai_tool_runtime::Tool for TaskTool {
                 persona: None,
                 resume_from_hint,
                 persona_hint,
+                structured,
+                stop_reason,
+                partial: result.partial,
             }))
         } else {
             Err(xai_tool_runtime::ToolError::invalid_arguments(
@@ -844,6 +991,71 @@ fn reject_subagent_type(
 }
 
 #[cfg(test)]
+async fn record_builtin_selection(resources: &SharedResources, subagent_type: &str) {
+    let counter = {
+        let res = resources.lock().await;
+        res.get::<selection_stats::BuiltinSelectionCounter>()
+            .cloned()
+    };
+    if let Some(counter) = counter {
+        counter.record(subagent_type);
+    }
+}
+
+/// Test-only tally of resolved built-in `subagent_type` choices. Insert a
+/// counter into resources to observe routing in unit tests; production builds
+/// compile the whole module out.
+#[cfg(test)]
+pub(crate) mod selection_stats {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Default, Clone)]
+    pub(crate) struct BuiltinSelectionCounter {
+        counts: Arc<Mutex<HashMap<String, u64>>>,
+    }
+
+    impl BuiltinSelectionCounter {
+        pub(crate) fn new() -> Self {
+            Self::default()
+        }
+
+        /// Records one selection. Non-built-in (custom) types are ignored:
+        /// this counter tracks the built-in routing baseline.
+        pub(crate) fn record(&self, subagent_type: &str) {
+            if xai_tool_types::builtin_subagent_by_name(subagent_type).is_none() {
+                return;
+            }
+            let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+            *counts.entry(subagent_type.to_owned()).or_default() += 1;
+        }
+
+        pub(crate) fn count(&self, subagent_type: &str) -> u64 {
+            self.counts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(subagent_type)
+                .copied()
+                .unwrap_or(0)
+        }
+
+        pub(crate) fn counts(&self) -> HashMap<String, u64> {
+            self.counts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+    }
+}
+
+#[cfg(test)]
+crate::register_resource!(
+    "grok_build",
+    "BuiltinSelectionCounter",
+    selection_stats::BuiltinSelectionCounter
+);
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::implementations::grok_build::task::backend::{
@@ -893,6 +1105,12 @@ mod tests {
                         let outcome = outcome_fn(&req.subagent_type, &req.parent_session_id);
                         let _ = req.respond_to.send(outcome);
                     }
+                    // The resume follow-up gate asks whether the source is
+                    // still running; this pump hosts no coordinator, so the
+                    // source resolves as not-running (plain resume proceeds).
+                    SubagentEvent::Query(req) => {
+                        let _ = req.respond_to.send(None);
+                    }
                     other => {
                         if proxy_tx.send(other).is_err() {
                             break;
@@ -926,13 +1144,17 @@ mod tests {
             &tool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
+                label: None,
                 description: "test task".into(),
                 prompt: "do something".into(),
                 subagent_type: "general-purpose".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
+                context: None,
                 resume_from: None,
                 cwd: None,
                 model: None,
@@ -970,6 +1192,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn label_is_normalized_onto_the_spawn_request() {
+        let (backend, mut rx) = make_backend();
+        let drain = tokio::spawn(async move {
+            if let Some(SubagentEvent::Spawn(mut req)) = rx.recv().await {
+                let label = req.request.label.clone();
+                req.notify_registered();
+                label
+            } else {
+                None
+            }
+        });
+
+        let mut input = task_input("explore", true);
+        input.label = Some("  auth   research  ".to_owned());
+        let result = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(resources_for_task(backend).into_shared()),
+            input,
+        )
+        .await;
+        assert!(result.is_ok(), "spawn should succeed");
+        assert_eq!(drain.await.unwrap().as_deref(), Some("auth research"));
+    }
+
+    #[tokio::test]
     async fn raised_max_depth_allows_nested_spawn() {
         let (backend, mut rx) = make_backend();
         let mut resources = Resources::new();
@@ -989,13 +1236,17 @@ mod tests {
             &TaskTool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
+                label: None,
                 description: "nested ok".into(),
                 prompt: "should be allowed at max_depth=2".into(),
                 subagent_type: "explore".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: true,
                 capability_mode: None,
                 isolation: None,
+                context: None,
                 resume_from: None,
                 cwd: None,
                 model: None,
@@ -1018,6 +1269,7 @@ mod tests {
         let mut resources = Resources::new();
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(1)); // first-level subagent
+        resources.insert(MaxSubagentDepth(1)); // explicit single-level budget
         resources.insert(SessionIdResource("child-session".to_string()));
         resources.insert(CurrentPromptIdResource("prompt-456".to_string()));
 
@@ -1025,13 +1277,17 @@ mod tests {
             &TaskTool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
+                label: None,
                 description: "nested spawn".into(),
                 prompt: "should be rejected".into(),
                 subagent_type: "explore".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
+                context: None,
                 resume_from: None,
                 cwd: None,
                 model: None,
@@ -1058,13 +1314,17 @@ mod tests {
             &tool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
+                label: None,
                 description: "test task".into(),
                 prompt: "do something".into(),
                 subagent_type: "general-purpose".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
+                context: None,
                 resume_from: None,
                 cwd: None,
                 model: None,
@@ -1118,13 +1378,17 @@ mod tests {
             &tool,
             test_ctx(shared),
             TaskToolInput {
+                label: None,
                 description: "Find auth middleware".into(),
                 prompt: "Search for authentication middleware files".into(),
                 subagent_type: "explore".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
+                context: None,
                 resume_from: None,
                 cwd: None,
                 model: None,
@@ -1176,13 +1440,17 @@ mod tests {
             &tool,
             test_ctx(shared),
             TaskToolInput {
+                label: None,
                 description: "test task".into(),
                 prompt: "do something".into(),
                 subagent_type: "general-purpose".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
+                context: None,
                 resume_from: None,
                 cwd: None,
                 model: None,
@@ -1221,13 +1489,17 @@ mod tests {
             &tool,
             test_ctx(shared),
             TaskToolInput {
+                label: None,
                 description: "test task".into(),
                 prompt: "do something".into(),
                 subagent_type: "general-purpose".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
+                context: None,
                 resume_from: None,
                 cwd: None,
                 model: None,
@@ -1331,13 +1603,17 @@ mod tests {
 
     fn task_input(subagent_type: &str, background: bool) -> TaskToolInput {
         TaskToolInput {
+            label: None,
             description: "test".into(),
             prompt: "do it".into(),
             subagent_type: subagent_type.into(),
             subagent_type_specified: false,
+            thoroughness: None,
+            output_schema: None,
             run_in_background: background,
             capability_mode: None,
             isolation: None,
+            context: None,
             resume_from: None,
             cwd: None,
             model: None,
@@ -1485,6 +1761,136 @@ mod tests {
         .expect("sole allowlisted type is spawnable");
         handle.await.unwrap();
         assert!(matches!(result, ToolOutput::SubagentCompleted(_)));
+    }
+
+    #[tokio::test]
+    async fn thoroughness_prefixes_only_the_explore_prompt() {
+        use xai_tool_types::Thoroughness;
+
+        for (subagent_type, expected_prompt) in [
+            ("explore", "Thoroughness: very_thorough.\n\ndo it"),
+            ("general-purpose", "do it"),
+        ] {
+            let (backend, mut rx) = make_backend();
+            let shared = resources_for_task(backend).into_shared();
+            let handle = tokio::spawn(async move {
+                let request = unwrap_spawn(rx.recv().await.expect("spawn"));
+                assert_eq!(request.prompt, expected_prompt);
+                request
+                    .respond_with(|request| SubagentResult {
+                        success: true,
+                        output: std::sync::Arc::from("ok"),
+                        subagent_id: request.id.clone(),
+                        child_session_id: request.id.clone(),
+                        ..Default::default()
+                    })
+                    .unwrap();
+            });
+
+            let mut input = task_input(subagent_type, false);
+            input.thoroughness = Some(Thoroughness::VeryThorough);
+            xai_tool_runtime::Tool::run(&TaskTool, test_ctx(shared), input)
+                .await
+                .expect("spawn succeeds");
+            handle.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_output_schema_rejected_before_spawn() {
+        let (backend, mut rx) = make_backend();
+        let resources = resources_for_task(backend);
+
+        let mut input = task_input("explore", true);
+        input.output_schema = Some(serde_json::json!({"type": "object", "patternProperties": {}}));
+        let result =
+            xai_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input).await;
+
+        let msg = result
+            .expect_err("unsupported keyword must reject")
+            .to_string();
+        assert!(msg.contains("patternProperties"), "error: {msg}");
+        assert!(
+            rx.try_recv().is_err(),
+            "rejected schema must not reach the coordinator"
+        );
+    }
+
+    #[tokio::test]
+    async fn output_schema_threads_to_runtime_overrides() {
+        let (backend, mut rx) = make_backend();
+        let shared = resources_for_task(backend).into_shared();
+        let handle = tokio::spawn(async move {
+            let request = unwrap_spawn(rx.recv().await.expect("spawn"));
+            assert_eq!(
+                request.runtime_overrides.output_schema,
+                Some(serde_json::json!({"type": "object", "required": ["ok"]})),
+            );
+            request
+                .respond_with(|request| SubagentResult {
+                    success: true,
+                    output: std::sync::Arc::from("ok"),
+                    subagent_id: request.id.clone(),
+                    child_session_id: request.id.clone(),
+                    structured: Some(serde_json::json!({"ok": true})),
+                    stop_reason: xai_tool_types::stop_reason::END_TURN.to_owned(),
+                    ..Default::default()
+                })
+                .unwrap();
+        });
+
+        let mut input = task_input("general-purpose", false);
+        input.output_schema = Some(serde_json::json!({"type": "object", "required": ["ok"]}));
+        let result = xai_tool_runtime::Tool::run(&TaskTool, test_ctx(shared), input)
+            .await
+            .expect("valid schema spawns");
+        handle.await.unwrap();
+        match result {
+            ToolOutput::SubagentCompleted(sub) => {
+                assert_eq!(sub.structured, Some(serde_json::json!({"ok": true})));
+                assert_eq!(sub.stop_reason, xai_tool_types::stop_reason::END_TURN);
+                assert!(!sub.partial);
+            }
+            other => panic!("Expected SubagentCompleted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn omitted_output_schema_reports_no_structured_result() {
+        let (backend, mut rx) = make_backend();
+        let shared = resources_for_task(backend).into_shared();
+        let handle = tokio::spawn(async move {
+            let request = unwrap_spawn(rx.recv().await.expect("spawn"));
+            assert!(request.runtime_overrides.output_schema.is_none());
+            request
+                .respond_with(|request| SubagentResult {
+                    success: true,
+                    output: std::sync::Arc::from("plain text"),
+                    subagent_id: request.id.clone(),
+                    child_session_id: request.id.clone(),
+                    ..Default::default()
+                })
+                .unwrap();
+        });
+
+        let result = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(shared),
+            task_input("general-purpose", false),
+        )
+        .await
+        .expect("schema-free spawn succeeds");
+        handle.await.unwrap();
+        match result {
+            ToolOutput::SubagentCompleted(sub) => {
+                assert!(sub.structured.is_none());
+                assert_eq!(
+                    sub.stop_reason,
+                    xai_tool_types::stop_reason::NO_STRUCTURED_RESULT
+                );
+            }
+            other => panic!("Expected SubagentCompleted, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -2240,13 +2646,17 @@ mod tests {
     #[test]
     fn task_input_roundtrips_through_json() {
         let input = TaskToolInput {
+            label: None,
             description: "find bugs".into(),
             prompt: "search for bugs".into(),
             subagent_type: "explore".into(),
             subagent_type_specified: true,
+            thoroughness: None,
+            output_schema: None,
             run_in_background: true,
             capability_mode: Some(SubagentCapabilityMode::ReadOnly),
             isolation: Some(SubagentIsolationMode::Worktree),
+            context: None,
             resume_from: None,
             cwd: None,
             model: Some("test-model".into()),
@@ -2517,23 +2927,31 @@ mod tests {
     // ── resume_from tests ────────────────────────────────────────────
 
     #[test]
-    fn task_tool_input_has_no_fork_context_field() {
+    fn task_tool_input_exposes_context_but_not_fork_context() {
         let _: TaskToolInput =
             serde_json::from_str(r#"{"description": "d", "prompt": "p", "fork_context": true}"#)
                 .unwrap();
         let schema_json = serde_json::to_string(&schemars::schema_for!(TaskToolInput)).unwrap();
         assert!(
+            schema_json.contains("context"),
+            "TaskToolInput JSON schema must expose the context parameter"
+        );
+        assert!(
             !schema_json.contains("fork_context"),
             "TaskToolInput JSON schema must not expose fork_context"
         );
         let serialized = serde_json::to_string(&TaskToolInput {
+            label: None,
             description: "d".into(),
             prompt: "p".into(),
             subagent_type: "general-purpose".into(),
             subagent_type_specified: false,
+            thoroughness: None,
+            output_schema: None,
             run_in_background: false,
             capability_mode: None,
             isolation: None,
+            context: None,
             resume_from: None,
             cwd: None,
             model: None,
@@ -2545,10 +2963,14 @@ mod tests {
             !serialized.contains("fork_context"),
             "TaskToolInput serialization must not include fork_context"
         );
+        assert!(
+            !serialized.contains("\"context\""),
+            "omitted context must not gain a key"
+        );
     }
 
     #[tokio::test]
-    async fn model_task_spawn_sets_fork_context_false() {
+    async fn model_task_spawn_omitting_context_stays_fresh() {
         let (backend, mut rx) = make_backend();
         let mut resources = Resources::new();
         resources.insert(backend);
@@ -2561,7 +2983,7 @@ mod tests {
             let request = unwrap_spawn(rx.recv().await.unwrap());
             assert!(
                 !request.fork_context,
-                "model-spawned task must not set fork_context"
+                "model-spawned task without context must stay fresh"
             );
             request
                 .respond_with(|request| SubagentResult {
@@ -2578,14 +3000,194 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                label: None,
                 description: "d".into(),
                 prompt: "p".into(),
                 subagent_type: "general-purpose".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
+                context: None,
                 resume_from: None,
+                cwd: None,
+                model: None,
+                workspace: None,
+                task_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fork_context_with_explore_defaults_to_read_only() {
+        let (backend, mut rx) = make_backend();
+        let mut resources = Resources::new();
+        resources.insert(backend);
+        resources.insert(SubagentDepthCounter(0));
+        resources.insert(SessionIdResource("parent".to_string()));
+        resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
+
+        let shared = resources.into_shared();
+        let handle = tokio::spawn(async move {
+            let request = unwrap_spawn(rx.recv().await.unwrap());
+            assert!(
+                request.fork_context,
+                "context=fork on a fresh spawn must set fork_context"
+            );
+            assert_eq!(
+                request.runtime_overrides.capability_mode,
+                Some(SubagentCapabilityMode::ReadOnly),
+                "forked non-implementer child must default to read-only"
+            );
+            request
+                .respond_with(|request| SubagentResult {
+                    success: true,
+                    output: "ok".into(),
+                    subagent_id: request.id.clone(),
+                    child_session_id: request.id.clone(),
+                    ..Default::default()
+                })
+                .unwrap();
+        });
+
+        let _ = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(shared),
+            TaskToolInput {
+                label: None,
+                description: "d".into(),
+                prompt: "p".into(),
+                subagent_type: "explore".into(),
+                subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
+                run_in_background: false,
+                capability_mode: None,
+                isolation: None,
+                context: Some(SubagentContextMode::Fork),
+                resume_from: None,
+                cwd: None,
+                model: None,
+                workspace: None,
+                task_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fork_context_with_implementer_skips_read_only_default() {
+        let (backend, mut rx) = make_backend();
+        let mut resources = Resources::new();
+        resources.insert(backend);
+        resources.insert(SubagentDepthCounter(0));
+        resources.insert(SessionIdResource("parent".to_string()));
+        resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
+
+        let shared = resources.into_shared();
+        let handle = tokio::spawn(async move {
+            let request = unwrap_spawn(rx.recv().await.unwrap());
+            assert!(
+                request.fork_context,
+                "context=fork on a fresh spawn must set fork_context"
+            );
+            assert_eq!(
+                request.runtime_overrides.capability_mode, None,
+                "forked implementer child must keep the caller-controlled capability mode"
+            );
+            request
+                .respond_with(|request| SubagentResult {
+                    success: true,
+                    output: "ok".into(),
+                    subagent_id: request.id.clone(),
+                    child_session_id: request.id.clone(),
+                    ..Default::default()
+                })
+                .unwrap();
+        });
+
+        let _ = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(shared),
+            TaskToolInput {
+                label: None,
+                description: "d".into(),
+                prompt: "p".into(),
+                subagent_type: "implementer".into(),
+                subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
+                run_in_background: false,
+                capability_mode: None,
+                isolation: None,
+                context: Some(SubagentContextMode::Fork),
+                resume_from: None,
+                cwd: None,
+                model: None,
+                workspace: None,
+                task_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fork_context_yields_to_resume_from() {
+        let (backend, mut rx) = make_backend();
+        let mut resources = Resources::new();
+        resources.insert(backend);
+        resources.insert(SubagentDepthCounter(0));
+        resources.insert(SessionIdResource("parent".to_string()));
+        resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
+
+        let shared = resources.into_shared();
+        let handle = tokio::spawn(async move {
+            let request = unwrap_spawn(rx.recv().await.unwrap());
+            assert_eq!(request.resume_from.as_deref(), Some("prev-id"));
+            assert!(
+                !request.fork_context,
+                "resume_from wins over context=fork; resume must stay fresh"
+            );
+            assert_eq!(
+                request.runtime_overrides.capability_mode, None,
+                "no fork default without fork_context"
+            );
+            request
+                .respond_with(|request| SubagentResult {
+                    success: true,
+                    output: "resumed".into(),
+                    subagent_id: request.id.clone(),
+                    child_session_id: request.id.clone(),
+                    ..Default::default()
+                })
+                .unwrap();
+        });
+
+        let _ = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(shared),
+            TaskToolInput {
+                label: None,
+                description: "resume".into(),
+                prompt: "continue".into(),
+                subagent_type: "explore".into(),
+                subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
+                run_in_background: false,
+                capability_mode: None,
+                isolation: None,
+                context: Some(SubagentContextMode::Fork),
+                resume_from: Some("prev-id".into()),
                 cwd: None,
                 model: None,
                 workspace: None,
@@ -2616,13 +3218,17 @@ mod tests {
     #[test]
     fn resume_from_not_serialized_when_none() {
         let input = TaskToolInput {
+            label: None,
             description: "d".into(),
             prompt: "p".into(),
             subagent_type: "general-purpose".into(),
             subagent_type_specified: false,
+            thoroughness: None,
+            output_schema: None,
             run_in_background: false,
             capability_mode: None,
             isolation: None,
+            context: None,
             resume_from: None,
             cwd: None,
             model: None,
@@ -2664,13 +3270,17 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                label: None,
                 description: "resume".into(),
                 prompt: "continue".into(),
                 subagent_type: "general-purpose".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
+                context: None,
                 resume_from: Some("prev-id".into()),
                 cwd: None,
                 model: None,
@@ -2732,13 +3342,17 @@ mod tests {
                 &TaskTool,
                 test_ctx(shared),
                 TaskToolInput {
+                    label: None,
                     description: "test sentinel".into(),
                     prompt: "work".into(),
                     subagent_type: "general-purpose".into(),
                     subagent_type_specified: false,
+                    thoroughness: None,
+                    output_schema: None,
                     run_in_background: false,
                     capability_mode: None,
                     isolation: None,
+                    context: None,
                     resume_from: Some(sentinel.into()),
                     cwd: None,
                     model: None,
@@ -2780,13 +3394,17 @@ mod tests {
     #[test]
     fn cwd_not_serialized_when_none() {
         let input = TaskToolInput {
+            label: None,
             description: "d".into(),
             prompt: "p".into(),
             subagent_type: "general-purpose".into(),
             subagent_type_specified: false,
+            thoroughness: None,
+            output_schema: None,
             run_in_background: false,
             capability_mode: None,
             isolation: None,
+            context: None,
             resume_from: None,
             cwd: None,
             model: None,
@@ -2810,13 +3428,17 @@ mod tests {
             &TaskTool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
+                label: None,
                 description: "test cwd conflict".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::Worktree),
+                context: None,
                 resume_from: None,
                 cwd: Some("/tmp".into()),
                 model: None,
@@ -2866,13 +3488,17 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                label: None,
                 description: "test empty cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::Worktree),
+                context: None,
                 resume_from: None,
                 cwd: Some("".into()),
                 model: None,
@@ -2918,13 +3544,17 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                label: None,
                 description: "test null cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::Worktree),
+                context: None,
                 resume_from: None,
                 cwd: Some("null".into()),
                 model: None,
@@ -2970,13 +3600,17 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                label: None,
                 description: "test whitespace cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::Worktree),
+                context: None,
                 resume_from: None,
                 cwd: Some("  ".into()),
                 model: None,
@@ -3025,13 +3659,17 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                label: None,
                 description: "test nonexistent cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::Worktree),
+                context: None,
                 resume_from: None,
                 cwd: Some("/nonexistent/path/that/does/not/exist".into()),
                 model: None,
@@ -3061,13 +3699,17 @@ mod tests {
             &TaskTool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
+                label: None,
                 description: "test nonexistent cwd no worktree".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
+                context: None,
                 resume_from: None,
                 cwd: Some("/nonexistent/path/that/does/not/exist".into()),
                 model: None,
@@ -3118,13 +3760,17 @@ mod tests {
                 &TaskTool,
                 test_ctx(shared.clone()),
                 TaskToolInput {
+                    label: None,
                     description: "test sentinel cwd".into(),
                     prompt: "work".into(),
                     subagent_type: "general-purpose".into(),
                     subagent_type_specified: false,
+                    thoroughness: None,
+                    output_schema: None,
                     run_in_background: false,
                     capability_mode: None,
                     isolation: None,
+                    context: None,
                     resume_from: None,
                     cwd: Some(sentinel.into()),
                     model: None,
@@ -3173,13 +3819,17 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                label: None,
                 description: "cwd test".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
+                context: None,
                 resume_from: None,
                 cwd: Some("/tmp".into()),
                 model: None,
@@ -3232,13 +3882,17 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                label: None,
                 description: "stray quote cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
+                context: None,
                 resume_from: None,
                 cwd: Some("\"/tmp".into()),
                 model: None,
@@ -3286,13 +3940,17 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                label: None,
                 description: "cwd with none".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::None),
+                context: None,
                 resume_from: None,
                 cwd: Some("/tmp".into()),
                 model: None,
@@ -3336,13 +3994,17 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                label: None,
                 description: "cwd + resume".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
+                context: None,
                 resume_from: Some("prev-id".into()),
                 cwd: Some("/tmp/some-dir".into()),
                 model: None,
@@ -3649,6 +4311,51 @@ mod tests {
         assert!(
             spawn.request.spawn_root.take_span().is_none(),
             "slot must be single-take"
+        );
+    }
+
+    /// Stage 0 baseline snapshot: an omitted `subagent_type` still resolves to
+    /// `general-purpose`, and the test-only counter records exactly that type.
+    /// Stage 1 changes this expectation deliberately when built-ins become
+    /// selectable.
+    #[tokio::test]
+    async fn stage0_omitted_type_spawns_general_purpose_and_counts_it() {
+        let (backend, mut rx) = make_backend();
+        let mut resources = resources_for_task(backend);
+        let counter = selection_stats::BuiltinSelectionCounter::new();
+        resources.insert(counter.clone());
+        let shared = resources.into_shared();
+
+        let handle = tokio::spawn(async move {
+            let request = unwrap_spawn(rx.recv().await.expect("spawn"));
+            assert_eq!(request.subagent_type, "general-purpose");
+            request
+                .respond_with(|request| SubagentResult {
+                    success: true,
+                    output: std::sync::Arc::from("ok"),
+                    subagent_id: request.id.clone(),
+                    child_session_id: request.id.clone(),
+                    ..Default::default()
+                })
+                .unwrap();
+        });
+
+        let input: TaskToolInput = serde_json::from_str(
+            r#"{"description":"baseline","prompt":"do it","run_in_background":false}"#,
+        )
+        .unwrap();
+        xai_tool_runtime::Tool::run(&TaskTool, test_ctx(shared), input)
+            .await
+            .expect("omitted type spawns the default");
+        handle.await.unwrap();
+
+        assert_eq!(counter.count("general-purpose"), 1);
+        assert_eq!(counter.count("explore"), 0);
+        assert_eq!(counter.count("plan"), 0);
+        assert_eq!(
+            counter.counts().len(),
+            1,
+            "only the resolved built-in type is counted"
         );
     }
 }

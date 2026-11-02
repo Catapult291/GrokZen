@@ -226,6 +226,11 @@ fn parse_session_picker_entries_with(
                 .or_else(|| v.get("last_active_at"))
                 .and_then(Value::as_str)
                 .and_then(|s| s.parse().ok());
+            let last_reply_at: Option<chrono::DateTime<chrono::Utc>> = v
+                .get("lastReplyAt")
+                .or_else(|| v.get("last_reply_at"))
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse().ok());
             let branch = v.get("branch").and_then(Value::as_str).map(String::from);
             let worktree_label = v
                 .get("worktreeLabel")
@@ -259,6 +264,7 @@ fn parse_session_picker_entries_with(
                 model_id,
                 num_messages,
                 last_active_at,
+                last_reply_at,
                 branch,
                 repo_name,
                 worktree_label,
@@ -337,7 +343,8 @@ fn parse_session_picker_entries_with(
 }
 /// Local on-disk sessions have no live activity signal, so they map to [`RosterActivity::Dormant`] and render in the dashboard's **Inactive** group.
 pub(super) fn session_picker_entry_to_roster(e: SessionPickerEntry) -> RosterEntry {
-    let last_change = e.last_active_at.unwrap_or(e.updated_at);
+    // Same key the `/resume` picker uses: the last reply pins the row, so reopening history never reorders it.
+    let last_change = e.last_reply_at.or(e.last_active_at).unwrap_or(e.updated_at);
     RosterEntry {
         session_id: e.id,
         title: Some(e.summary).filter(|s| !s.trim().is_empty()),

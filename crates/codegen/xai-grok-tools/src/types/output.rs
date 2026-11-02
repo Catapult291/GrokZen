@@ -584,6 +584,7 @@ pub enum ToolOutput {
     WebFetch(WebFetchOutput),
     MCP(MCPOutput),
     TaskOutput(TaskOutputOutput),
+    ListAgents(crate::implementations::grok_build::list_agents::ListAgentsOutput),
     KillTask(KillTaskOutput),
     Skill(SkillOutput),
     ApplyPatch(ApplyPatchOutput),
@@ -658,6 +659,8 @@ impl ToolOutput {
     /// Render tool output for inclusion in the model prompt with specified format.
     pub fn to_prompt_format(&self) -> String {
         match self {
+            ToolOutput::ListAgents(output) => serde_json::to_string_pretty(output)
+                .unwrap_or_else(|error| format!("failed to render subagent list: {error}")),
             ToolOutput::ReadFile(read_file_output) => match read_file_output {
                 ReadFileOutput::FileContent(file_content) if file_content.content.is_empty() => {
                     if file_content.total_lines == 0 {
@@ -844,7 +847,8 @@ impl ToolOutput {
             ToolOutput::SubagentCompleted(sub) => {
                 let mut text = sub.output.clone();
                 if let Some(ref wt) = sub.worktree_path {
-                    text.push_str(&format!("\n\n<worktree_path>{wt}</worktree_path>"));
+                    text.push_str("\n\n");
+                    text.push_str(&xai_tool_types::format_worktree_block(wt));
                 }
                 text.push_str("\n\n");
                 text.push_str(&sub.resume_footer());
@@ -2306,6 +2310,9 @@ mod tests {
             persona: None,
             resume_from_hint: "019e0000-0000-7000-8000-0000000000bb".into(),
             persona_hint: None,
+            structured: None,
+            stop_reason: xai_tool_types::stop_reason::END_TURN.to_owned(),
+            partial: false,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -2346,6 +2353,9 @@ mod tests {
             persona: Some("implementer".into()),
             resume_from_hint: "abc-123".into(),
             persona_hint: Some("implementer".into()),
+            structured: None,
+            stop_reason: xai_tool_types::stop_reason::END_TURN.to_owned(),
+            partial: false,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -2370,6 +2380,9 @@ mod tests {
             persona: None,
             resume_from_hint: "wt-agent".into(),
             persona_hint: None,
+            structured: None,
+            stop_reason: xai_tool_types::stop_reason::END_TURN.to_owned(),
+            partial: false,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -2394,6 +2407,9 @@ mod tests {
             persona: Some("implementer".into()),
             resume_from_hint: "sub-abc-123".into(),
             persona_hint: Some("implementer".into()),
+            structured: None,
+            stop_reason: xai_tool_types::stop_reason::END_TURN.to_owned(),
+            partial: false,
         };
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(
@@ -2697,6 +2713,9 @@ mod tests {
             persona: None,
             resume_from_hint: "sub-xyz".into(),
             persona_hint: None,
+            structured: None,
+            stop_reason: xai_tool_types::stop_reason::END_TURN.to_owned(),
+            partial: false,
         };
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(

@@ -199,7 +199,7 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 
 | Key | Type / Values | Requirements | Managed | Details |
 | --- | --- | --- | --- | --- |
-| `features.active_agent_messages` | `boolean` | `pin` | `user` | Enable or disable `active_agent_messages`. Default false. Also `GROK_ACTIVE_AGENT_MESSAGES`. |
+| `features.active_agent_messages` | `boolean` | `pin` | `user` | Enable or disable `active_agent_messages`. Default true. Also `GROK_ACTIVE_AGENT_MESSAGES`. |
 | `features.ask_user_question` | `boolean` | `pin` | `user` | Enable or disable `ask_user_question`. Default true. Also `GROK_ASK_USER_QUESTION`. |
 | `features.auto_wake` | `boolean` | `pin` | `user` | Enable or disable `auto_wake`. Default true. Also `GROK_AUTO_WAKE`. |
 | `features.backend_tools` | `boolean` | `pin` | `user` | Enable or disable `backend_tools`. Default true. Also `GROK_BACKEND_SEARCH`. |
@@ -541,11 +541,13 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 | Key | Type / Values | Requirements | Managed | Details |
 | --- | --- | --- | --- | --- |
 | `subagents.enabled` | `boolean` | `pin` | `user` | Subagent / task tool master switch, default true even when other `subagents.*` keys are set. Also GROK_SUBAGENTS or `--no-subagents`. |
-| `subagents.limit_behavior` | `queue / fail` | `yes` | `user` | What to do when the concurrent subagent cap is hit. |
-| `subagents.max_concurrent` | `integer` | `yes` | `user` | Max concurrent subagents. |
-| `subagents.max_depth` | `integer` | `yes` | `user` | Max nested subagent depth (clamped ≥1). |
+| `subagents.limit_behavior` | `queue / fail` | `yes` | `user` | What to do when the concurrent subagent cap is hit. Default `queue`. Also `GROK_SUBAGENT_LIMIT_BEHAVIOR`. |
+| `subagents.max_concurrent` | `integer` | `yes` | `user` | Max concurrently running subagents. Default 32; values below 1 clamp to 1. Also `GROK_MAX_CONCURRENT_SUBAGENTS`. |
+| `subagents.max_depth` | `integer` | `yes` | `user` | Max subagent nesting depth (clamped ≥1). Default 2: root (0) → child (1) → grandchild (2). Also `GROK_SUBAGENTS_MAX_DEPTH`. |
+| `subagents.max_total_agents` | `integer` | `yes` | `user` | Cumulative subagents one root session may create; queued, running, and finished all count. Default 16; values below 1 clamp to 1. Also `GROK_SUBAGENTS_MAX_TOTAL_AGENTS`. |
 | `subagents.models.<name>` | `string` | `yes` | `user` | Per-subagent model id override. |
 | `subagents.toggle.<name>` | `boolean` | `yes` | `user` | Enable or disable an individual subagent type. Omitted agents default on. |
+| `subagents.worktree_base` | `head / default_branch` | `yes` | `user` | Base commit for isolated subagent worktrees. Default `head` (the parent worktree's current HEAD). Also `GROK_SUBAGENTS_WORKTREE_BASE`. |
 
 ### `telemetry`
 

@@ -131,6 +131,8 @@ impl SubagentAttemptInfo {
 pub struct SubagentInfo {
     pub subagent_id: Arc<str>,
     pub child_session_id: Arc<str>,
+    /// Model-chosen display label; the UI falls back to type/id when absent.
+    pub label: Option<Arc<str>>,
     pub description: Arc<str>,
     pub subagent_type: Arc<str>,
     pub attempt: SubagentAttemptInfo,
@@ -252,6 +254,7 @@ impl ChildTranscript {
 pub(crate) struct SubagentChildInfo {
     pub(crate) subagent_id: String,
     pub(crate) child_session_id: String,
+    pub(crate) label: Option<String>,
     pub(crate) description: String,
     pub(crate) subagent_type: String,
 }
@@ -272,6 +275,7 @@ impl SubagentInfo {
                 }
                 info.subagent_id = Arc::from(child.subagent_id);
                 info.child_session_id = Arc::from(child.child_session_id);
+                info.label = child.label.map(Arc::from);
                 info.description = Arc::from(child.description);
                 info.subagent_type = Arc::from(child.subagent_type);
                 info.attempt = attempt;
@@ -280,6 +284,7 @@ impl SubagentInfo {
             None => Self {
                 subagent_id: Arc::from(child.subagent_id),
                 child_session_id: Arc::from(child.child_session_id),
+                label: child.label.map(Arc::from),
                 description: Arc::from(child.description),
                 subagent_type: Arc::from(child.subagent_type),
                 attempt,
@@ -501,6 +506,7 @@ pub(crate) mod test_support {
     pub(crate) fn make_info() -> super::SubagentInfo {
         let now = std::time::Instant::now();
         super::SubagentInfo {
+            label: None,
             subagent_id: "sa-1".into(),
             child_session_id: "cs-1".into(),
             description: "test task".into(),
@@ -998,7 +1004,14 @@ pub(crate) fn format_subagent_label_with_locale(
 ) -> (String, String) {
     let (tag, clean_desc) = parse_tag_prefix(&info.description);
 
-    let raw_label = if let Some(p) = info
+    let raw_label = if let Some(label) = info
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        label.to_string()
+    } else if let Some(p) = info
         .attempt
         .persona
         .as_deref()

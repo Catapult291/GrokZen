@@ -43,7 +43,9 @@ impl SkillManager {
             .chain(&self.discovered_skills)
         {
             let skill_path = Path::new(&skill.path);
-            if !skill_path.is_absolute() {
+            // Skip relative registrations. `has_root` (not `is_absolute`) so a
+            // rooted path without a drive (`/repo/...`) also counts on Windows.
+            if !skill_path.has_root() {
                 continue;
             }
             let canonical = canonical_path(&skill.path);

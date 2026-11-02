@@ -170,7 +170,13 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         };
 
         let running = self.session_running_count(&wake_request.parent_session_id);
-        match self.admission.admit(&wake_request, running) {
+        // A wake replaces its completed record instead of adding to it, so the
+        // total-agents budget is unchanged by construction; keep the same root
+        // count the original spawn saw to avoid a spurious reject here.
+        let total_for_root = self
+            .total_agents_for_root(&wake_request.parent_session_id)
+            .saturating_sub(1);
+        match self.admission.admit(&wake_request, running, total_for_root) {
             AdmissionDecision::Start => {
                 let completed =
                     self.completed
@@ -225,6 +231,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     match error {
                         AdmissionError::ConcurrentLimitReached { limit } => {
                             SubagentLimitDecision::RejectedAtConcurrentLimit { limit }
+                        }
+                        AdmissionError::TotalAgentsLimitReached { .. } => {
+                            SubagentLimitDecision::RejectedAtTotalAgentsLimit
                         }
                     },
                 );

@@ -88,18 +88,28 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
         self.inherit_resume_subagent_type(request.as_mut());
         let running = self.session_running_count(&request.parent_session_id);
-        match self.admission.admit(&request, running) {
-            AdmissionDecision::Start => self.start_child(
-                *request,
-                Some(result_tx),
-                registered_tx,
-                StartOrigin::Direct,
-                None,
-                spawner_session_id,
-                None,
-                None,
-            ),
+        let total_for_root = self.total_agents_for_root(&request.parent_session_id);
+        match self
+            .admission
+            .admit(&request, running, total_for_root)
+        {
+            AdmissionDecision::Start => {
+                self.metrics.record_spawn(&request.subagent_type);
+                self.log_spawn_accepted(&request, "started");
+                self.start_child(
+                    *request,
+                    Some(result_tx),
+                    registered_tx,
+                    StartOrigin::Direct,
+                    None,
+                    spawner_session_id,
+                    None,
+                    None,
+                )
+            }
             AdmissionDecision::Enqueue => {
+                self.metrics.record_spawn(&request.subagent_type);
+                self.log_spawn_accepted(&request, "queued");
                 debug_assert!(
                     !request.owner.is_workflow(),
                     "workflow spawns bypass admission and must never queue"
@@ -150,6 +160,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         AdmissionError::ConcurrentLimitReached { limit } => {
                             SubagentLimitDecision::RejectedAtConcurrentLimit { limit: *limit }
                         }
+                        AdmissionError::TotalAgentsLimitReached { .. } => {
+                            SubagentLimitDecision::RejectedAtTotalAgentsLimit
+                        }
                     },
                 );
                 let result = SubagentResult::failed(id.clone(), id, error.message());
@@ -161,6 +174,29 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 );
             }
         }
+    }
+
+    /// One structured line per accepted spawn. Paired with the model-facing
+    /// selection counter so a baseline run can answer what the parent chose
+    /// and with what context before routing changes land.
+    fn log_spawn_accepted(&self, request: &SubagentRequest, admission: &'static str) {
+        tracing::debug!(
+            subagent_id = %request.id,
+            parent_session_id = %request.parent_session_id,
+            subagent_type = %request.subagent_type,
+            context = if request.fork_context { "fork" } else { "fresh" },
+            depth = self.graph.depth_of(&request.id).unwrap_or(1),
+            background = request.run_in_background,
+            prompt_bytes = request.prompt.len(),
+            model = request.runtime_overrides.model.as_deref().unwrap_or(""),
+            effort = request
+                .runtime_overrides
+                .reasoning_effort
+                .as_deref()
+                .unwrap_or(""),
+            admission,
+            "subagent spawn accepted"
+        );
     }
 
     /// Re-key a nested spawn (its parent is itself a subagent) to the root
@@ -218,6 +254,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             queue_depth: match decision {
                 SubagentLimitDecision::QueuedAtConcurrentLimit { .. } => queued + 1,
                 SubagentLimitDecision::RejectedAtConcurrentLimit { .. } => queued,
+                SubagentLimitDecision::RejectedAtTotalAgentsLimit => queued,
             },
             origin: if request.from_scheduler_loop() {
                 LimitedSpawnOrigin::SchedulerLoop

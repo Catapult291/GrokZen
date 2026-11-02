@@ -60,17 +60,22 @@ enabled = false
 <a id="built-in-agent-types"></a>
 ## 内置智能体类型
 
-内置类型仍作为宿主类型存在，模型不能按名称选择它们。省略 `subagent_type` 时，使用 `general-purpose`。
+内置类型可以直接按名称选择。省略 `subagent_type` 时仍然使用 `general-purpose`。某个类型被 `[subagents.toggle]` 关闭、被父级 `Agent(...)` 允许列表排除，或存在同名自定义智能体时，它不会出现在枚举里。
 
-| 类型              | 说明                                          |
-| ----------------- | -------------------------------------------- |
-| `general-purpose` | 默认类型。可处理任何任务的全能力智能体。    |
-| `explore`         | 研究智能体。搜索、读取、grep 并运行 shell 命令，但不编辑文件。用于代码库调查。 |
-| `plan`            | 规划智能体。探索代码库并生成结构化实现计划；不编辑文件。 |
+| 类型 | 选择场景 | 工具集 | 默认 effort / max_turns |
+| --- | --- | --- | --- |
+| `general-purpose` | 研究与实现混合、跨多步的任务；不确定选哪个时的默认值。 | 全部工具（读写、执行、搜索、网页、计划）。 | 继承会话 / 40 |
+| `explore` | 只做调查：找文件、读代码、追调用链，不修改任何文件。 | 只读：读文件、列目录、`search_code`、`resolve_context`、`find_symbol`、`find_references`、`goto_definition`、`get_diagnostics`；无 shell。 | `low` / 12 |
+| `plan` | 需要实现设计：探索代码并产出分步方案。 | 只读工具加 `todo_write`；无 shell、无编辑。 | `medium` / 20 |
+| `implementer` | 要实现并自测：改代码、跑测试、构建或静态检查。 | 完整的读写执行工具集（不含 workflow）。 | 继承会话 / 40 |
 
-项目或用户定义的智能体可以添加新的类型，或按名称覆盖这些内置类型。
+选择建议：只调查选 `explore`；只出方案选 `plan`；实现并验证选 `implementer`；研究加实现或任务边界不清选 `general-purpose`。自定义类型按名称选择，例如 `my-plugin:reviewer`。
 
-存在插件、项目或用户定义的智能体时，`spawn_subagent` 会提供可选的 `subagent_type` 枚举，取值为这些智能体的名称，例如 `my-plugin:reviewer`。列表不包含内置类型名称或 xAI 随附的智能体。如果父智能体的 `tools` 列表通过 `Agent(...)` 限制可启动的类型，枚举中只会列出允许的类型。传入未知类型会导致调用失败，并返回有效类型列表。
+工具 schema 按上述顺序先列内置类型，再列项目/用户/插件定义的智能体。父智能体的 `tools` 列表通过 `Agent(...)` 限制可启动类型时，枚举中只列出允许的类型。传入未知类型会导致调用失败，并返回有效类型列表。
+
+### `thoroughness`
+
+`thoroughness` 只对 `explore` 生效：`quick`（只看明显匹配）、`medium`（顺带检查附近调用点与约定）、`very_thorough`（追完所有相关路径并报告边界情况）。Grok Build 会把它写成子任务提示的第一行 `Thoroughness: <level>.`。其他类型收到该参数会记录警告并忽略。
 
 ---
 
@@ -154,22 +159,36 @@ description = "Path to write review notes"
 
 主智能体调用 `spawn_subagent` 工具。参数如下：
 
-| 参数         | 说明                                                       |
-| ---------------- | ------------------------------------------------------------ |
-| `prompt`          | 给子智能体的完整任务提示。                           |
-| `description`     | 任务的简短标签（3–5 个单词）。                          |
-| `subagent_type`   | 要启动的智能体类型。默认为 `general-purpose`。         |
-| `background`      | 在后台运行子智能体并立即返回子智能体 ID。默认为 `false`。 |
-| `isolation`       | `none`（共享工作区，默认）或 `worktree`（隔离的 Git 工作树）。 |
-| `resume_from`     | 继续已完成的子智能体对话。传入其子智能体 ID。 |
-| `cwd`             | 子智能体的工作目录。与 `isolation: worktree` 互斥；设置 `resume_from` 时忽略（恢复的子级继承源目录）。 |
+| 参数 | 说明 |
+| --- | --- |
+| `prompt` | 给子智能体的完整任务提示。设置 `output_schema` 时，要求它以单个符合 schema 的 JSON 值结束。 |
+| `description` | 任务的简短描述。 |
+| `label` | 3–5 个词的显示标签，写入 `list_agents` 输出与子智能体界面；省略时用 id。 |
+| `subagent_type` | `general-purpose`（默认）、`explore`、`plan`、`implementer` 或自定义类型名。 |
+| `thoroughness` | 仅 `explore` 使用：`quick`、`medium` 或 `very_thorough`。其他类型忽略。 |
+| `background` | 默认 `true`：立即返回子智能体 ID，稍后用 `get_command_or_subagent_output` 取结果，完成时也会收到通知。设为 `false` 时前台等待；超过前台预算会自动转后台并返回 ID。 |
+| `isolation` | `none`（共享工作区，默认）或 `worktree`（隔离的 Git 工作树）。 |
+| `context` | `fresh`（默认，空记录）或 `fork`（复制父级对话作为起点）。fork 子代理继承父模型，默认只读，除非类型是 `implementer`；设置 `resume_from` 时忽略。 |
+| `output_schema` | 可选的 JSON Schema，约束子代理的最终答案。见下文。 |
+| `resume_from` | 继续一个已结束的子智能体对话。传入其子智能体 ID。 |
+| `cwd` | 子智能体的工作目录。与 `isolation: worktree` 互斥；设置 `resume_from` 时忽略（恢复的子级继承源目录）。 |
+| `model` | 可选的模型 slug。默认继承父级；设置 `resume_from` 时忽略（沿用源模型）。 |
 
 后台运行子智能体时，稍后使用 `get_command_or_subagent_output` 获取其结果。
+
+### `output_schema`
+
+传入一个 JSON Schema 对象后，子代理的最后一轮必须以单个 JSON 值结束，Grok Build 按 schema 校验：
+
+- 支持的关键字：`type`、`properties`、`required`、`items`、`enum`、`additionalProperties`、`minItems`、`maxItems`、`minLength`、`maxLength`、`minimum`、`maximum`、`description`、`$defs`、`definitions`、`$ref`。
+- 含其他关键字或结构非法的 schema（例如裸 `true`/`false`）在 spawn 前直接报错，不消耗子代理 token。
+- 校验失败，或子代理没有给出 JSON 时，该子代理以失败结束并返回具体原因。
+- 通过校验的结果放在结果的 `structured` 字段中，父级与 workflow 可以直接解构；省略 `output_schema` 时仍返回自由文本，行为不变。
 
 <a id="sending-messages-to-subagents"></a>
 ### 向子智能体发送消息
 
-`send_subagent_message` 默认关闭，通过 `GROK_ACTIVE_AGENT_MESSAGES` 或 `[features] active_agent_messages` 启用。根会话可以向自己拥有的子智能体发送后续消息；开关启用后，获授权的子智能体也可获得该工具。
+`send_subagent_message` 默认开启。用 `GROK_ACTIVE_AGENT_MESSAGES=0` 或 `[features] active_agent_messages = false` 关闭（作为 kill switch）。根会话可以向自己拥有的子智能体发送后续消息；开关启用后，获授权的子智能体也可获得该工具，其提示会注入 `<agent-roster>`，列出主代理和已命名的兄弟子代理。
 
 - `subagent_id: "parent"` 指向该子智能体仍活动的父子智能体。
 - 持久智能体 ID 指向另一个本地子智能体；符合条件的已完成子智能体会以相同身份恢复。
@@ -184,12 +203,35 @@ description = "Path to write review notes"
 
 折叠行不显示消息和原因。按右方向键（Vim 模式 `l`/`e`）展开请求投递方式、完整消息及拒绝/未确认原因，按左方向键（`h`）折叠。Enter、Ctrl+F 或双击可打开对应子智能体视图。若子智能体不在本会话中创建（例如无界面导出或其他会话的 ID），以 ID 最后 8 个字符标注 `subagent …xxxxxxxx`，展开显示原始 `Subagent ID:`，且无法打开视图。
 
+<a id="listing-subagents"></a>
+### 枚举子智能体（`list_agents`）
+
+`list_agents` 列出当前会话派出的子智能体，模型不必记住 id。
+
+| 参数 | 说明 |
+| --- | --- |
+| `include_finished` | 是否包含已结束的子代理，默认 `true`。 |
+| `parent_id` | 只列该子代理的后代；省略时列整棵会话树。 |
+| `limit` | 返回行数上限，1–50，默认 50。 |
+
+每行包含 `id`、`label`、`type`、`status`、`model`、`parent_id`、`depth`、`elapsed_ms`、`tokens_in`、`tokens_out`、`context_pct`、`current_tool`、`queue_position`、`resumable`。
+
+| `status` | 含义 |
+| --- | --- |
+| `queued` | 已准入，等待并发槽。 |
+| `running` | 正在跑一轮。 |
+| `idle` | 在线，处于轮次间隙。 |
+| `ready` | 已结束，保留可恢复会话。 |
+| `completed` / `failed` / `cancelled` | 终态。 |
+
+`resumable` 为 true 的行（通常是 `ready`）可以直接用 `resume_from` 继续；`failed` / `cancelled` 行可能只保留部分记录，恢复不保证成功。用 `id` 配合 `send_subagent_message` 给存活的子代理发消息，或用 `kill_command_or_subagent` 终止。workflow 派生的子代理不出现在列表里。
+
 ---
 
 <a id="capability-modes"></a>
 ## 能力模式
 
-能力模式不是创建子智能体时的参数。子智能体可用的工具由其**智能体类型**以及**角色 / 定义的默认值**决定。`general-purpose` 不受限制（`all`）；内置 `explore` 和 `plan` 类型可以读取、搜索并运行 shell 命令，但不能编辑文件。
+能力模式不是创建子智能体时的参数。子智能体可用的工具由其**智能体类型**以及**角色 / 定义的默认值**决定。`general-purpose` 与 `implementer` 使用完整工具集；内置 `explore` 和 `plan` 类型只读取和搜索，不能运行 shell 或编辑文件。
 
 | 模式         | 读取 | 写入 | 执行 | 说明                                  |
 | ------------ | ---- | ---- | -------- | -------------------------------------------- |
@@ -206,12 +248,19 @@ description = "Path to write review notes"
 <a id="resume-from"></a>
 ### `resume_from`
 
-`resume_from` 参数允许新的子智能体从已完成的子智能体继续，这对多阶段工作流很有用：
+`resume_from` 参数允许新的子智能体从已结束的子智能体继续，这对多阶段工作流很有用：
 
 1. 生成一个研究子智能体来调查问题。
 2. 生成第二个子智能体，并将第一个子智能体的 ID 设置为 `resume_from`，使其获得完整的研究上下文。
 
-新的子智能体继承源子智能体的记录、工具状态和模型；其系统提示和工具会根据当前智能体定义重新渲染。源子智能体必须已完成（不能仍在运行）、属于当前会话，并使用相同的智能体类型。
+边界：
+
+- 源子智能体必须已结束（`completed` / `failed` / `cancelled`），且属于当前父会话；其会话记录必须仍在当前 workspace 的会话目录中。`list_agents` 输出的 `resumable` 反映这一点。
+- 源仍在运行时不再直接报错：`prompt` 会按 `send_subagent_message` 的 `queue` 语义排队，作为它的下一轮执行，调用返回说明文本。
+- 恢复出的子智能体继承源的记录、工具状态、模型和子智能体类型；传入的 `subagent_type` 与 `model` 被忽略，系统提示和工具按当前定义重新渲染。若当前定义缺少源运行用过的工具，只记录警告。
+- 源对话必须能装进模型上下文窗口；超出恢复上限时恢复失败，提示先压缩或改用更大上下文的模型。
+- `max_turns` 截断的子智能体返回 `partial = true`，可以用 `resume_from` 继续。
+- 设置 `resume_from` 时 `context` 与 `cwd` 被忽略。
 
 <a id="mcp-inheritance"></a>
 ### MCP 继承
@@ -257,9 +306,13 @@ mcpInheritance:
 
 - 子智能体在自己的工作树副本中工作。
 - 其变更在合并前都与父级隔离。
-- 子智能体的结果包含工作树路径。
+- 完成时若工作树没有任何改动，Grok Build 直接删除它，并清掉子代理记录里的路径。
+- 有改动时保留工作树，结果包含 `<worktree_path>` 与 `<worktree_actions>`：
+  - apply：`x.ai/git/worktree/apply`，参数 `{"worktreePath": "…", "mode": "merge"}`（`mode: "overwrite"` 直接覆盖父级文件）。
+  - discard：`x.ai/git/worktree/remove`，参数 `{"worktreePath": "…", "force": true}`。
+- 开启 `[features] subagent_worktree_snapshot` 时，有改动的工作树会先快照再删除。
 
-Grok Build 通过 `x.ai/git/worktree/*` 扩展方法管理工作树，其中包括将变更合并回主工作目录的 apply 操作。
+工作树基点由 `[subagents] worktree_base` 控制：`head`（默认，取父工作树当前 `HEAD`）或 `default_branch`（取仓库默认分支）。环境变量 `GROK_SUBAGENTS_WORKTREE_BASE` 优先于配置文件。
 
 ---
 
@@ -281,6 +334,19 @@ explore = "grok-build"               # 将 explore 路由到特定模型
 ```
 
 按类型的模型覆盖适用于任何父级。没有覆盖时，子智能体继承父级模型。
+
+<a id="depth-total-and-concurrency"></a>
+### 深度、总量与并发
+
+```toml
+[subagents]
+max_depth = 2            # 默认 2；1 表示只有根会话可以派发
+max_total_agents = 16    # 每个根会话累计上限（排队、运行、已完成都计入）
+max_concurrent = 32      # 同时运行上限
+limit_behavior = "queue" # queue（默认）或 fail
+```
+
+对应环境变量：`GROK_SUBAGENTS_MAX_DEPTH`、`GROK_SUBAGENTS_MAX_TOTAL_AGENTS`、`GROK_MAX_CONCURRENT_SUBAGENTS`、`GROK_SUBAGENT_LIMIT_BEHAVIOR`。这些上限不能设为 0 来关闭；小于 1 的值会被压到 1。
 
 <a id="custom-roles-and-personas"></a>
 ### 自定义角色和 Persona
@@ -367,7 +433,11 @@ Grok Build 会在智能体屏幕的侧窗格中显示运行中和已完成的工
 <a id="depth-limits"></a>
 ## 深度限制
 
-只有顶层会话可以生成子智能体。子智能体不能再生成自己的子智能体：最大嵌套深度为一层。如果子级调用 `spawn_subagent`，调用会失败并返回深度限制错误。这样可以保持智能体树扁平，避免无限生成。
+子智能体可以再派子智能体，默认最多嵌套两层：根会话（深度 0）→ 第一层子智能体（深度 1）→ 第二层（深度 2）。`[subagents] max_depth`（或 `GROK_SUBAGENTS_MAX_DEPTH`）调整上限；设为 1 时只有根会话能派发。
+
+到达深度上限时 `spawn_subagent` 仍然可见，调用会返回明确的深度限制错误（`Subagent depth limit exceeded (current depth: …, max: …)`），而不是让工具静默消失。
+
+除深度外还有两个上限：每个根会话累计最多 `max_total_agents`（默认 16）个子代理，同时运行最多 `max_concurrent`（默认 32）个。累计上限超限时 spawn 被拒绝，并提示先收集已有结果或用 `resume_from` 复用；并发上限超限时默认排队，`limit_behavior = "fail"` 改为直接失败。
 
 ---
 

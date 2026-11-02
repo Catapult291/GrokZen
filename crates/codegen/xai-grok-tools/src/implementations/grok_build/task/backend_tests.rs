@@ -163,6 +163,7 @@ async fn channel_backend_spawn_success() {
     });
 
     let request = SubagentRequest {
+        label: None,
         id: "test-id".to_string(),
         prompt: "do something".to_string(),
         description: "test".to_string(),
@@ -198,6 +199,7 @@ async fn channel_backend_spawn_closed_channel() {
     let backend = ChannelBackend::new(tx);
 
     let request = SubagentRequest {
+        label: None,
         id: "test-id".to_string(),
         prompt: "do something".to_string(),
         description: "test".to_string(),
@@ -233,6 +235,7 @@ async fn channel_backend_query_found() {
         assert_eq!(req.timeout_ms, Some(5000));
         req.respond_to
             .send(Some(SubagentSnapshot {
+                label: None,
                 subagent_id: "sub-1".to_string(),
                 description: "find bugs".to_string(),
                 subagent_type: "explore".to_string(),
@@ -245,6 +248,7 @@ async fn channel_backend_query_found() {
                 started_at_epoch_ms: 1000,
                 duration_ms: 200,
                 persona: Some("reviewer".to_string()),
+                ..Default::default()
             }))
             .unwrap();
     });
@@ -555,6 +559,7 @@ async fn channel_backend_cancel_closed_channel() {
 async fn workflow_spawn_future_drop_cancels_but_task_drop_does_not() {
     fn request_for(owner: super::super::types::SubagentOwner) -> SubagentRequest {
         SubagentRequest {
+            label: None,
             id: "drop-owner-test".to_string(),
             prompt: "test".to_string(),
             description: "test".to_string(),
@@ -610,6 +615,7 @@ async fn channel_backend_spawn_result_dropped() {
     });
 
     let request = SubagentRequest {
+        label: None,
         id: "drop-test".to_string(),
         prompt: "test".to_string(),
         description: "test".to_string(),

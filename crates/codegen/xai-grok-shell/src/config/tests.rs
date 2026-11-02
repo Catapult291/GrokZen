@@ -1108,12 +1108,12 @@ fn subagents_config_default_enabled() {
     });
 }
 #[test]
-fn subagents_max_depth_defaults_to_one() {
+fn subagents_max_depth_defaults_to_two() {
     assert_eq!(
-            SubagentsConfig::resolve_max_depth(None, None, None),
-            SubagentsConfig::DEFAULT_MAX_DEPTH
-        );
-    assert_eq!(SubagentsConfig::DEFAULT_MAX_DEPTH, 1);
+        SubagentsConfig::resolve_max_depth(None, None, None),
+        SubagentsConfig::DEFAULT_MAX_DEPTH
+    );
+    assert_eq!(SubagentsConfig::DEFAULT_MAX_DEPTH, 2);
 }
 #[test]
 fn subagents_max_depth_env_beats_toml_and_remote() {
@@ -1156,6 +1156,37 @@ fn subagents_max_depth_invalid_env_falls_through() {
             SubagentsConfig::resolve_max_depth(Some("not-a-number"), Some(2), None),
             2
         );
+}
+#[test]
+fn subagent_worktree_base_defaults_to_head() {
+    assert_eq!(
+        SubagentWorktreeBase::resolve(None, None),
+        SubagentWorktreeBase::Head
+    );
+    assert_eq!(SubagentWorktreeBase::Head.as_str(), "head");
+}
+#[test]
+fn subagent_worktree_base_env_beats_toml_and_accepts_aliases() {
+    assert_eq!(
+        SubagentWorktreeBase::resolve(Some("default-branch"), Some("head")),
+        SubagentWorktreeBase::DefaultBranch
+    );
+    assert_eq!(
+        SubagentWorktreeBase::resolve(None, Some("DEFAULT_BRANCH")),
+        SubagentWorktreeBase::DefaultBranch
+    );
+    assert_eq!(SubagentWorktreeBase::DefaultBranch.as_str(), "default_branch");
+}
+#[test]
+fn subagent_worktree_base_unknown_value_falls_through() {
+    assert_eq!(
+        SubagentWorktreeBase::resolve(Some("trunk"), Some("head")),
+        SubagentWorktreeBase::Head
+    );
+    assert_eq!(
+        SubagentWorktreeBase::resolve(None, Some("trunk")),
+        SubagentWorktreeBase::Head
+    );
 }
 #[test]
 #[serial_test::serial]

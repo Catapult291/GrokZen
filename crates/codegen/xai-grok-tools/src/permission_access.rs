@@ -392,13 +392,17 @@ mod tests {
         ));
         assert!(matches!(
             AccessKind::from(&ToolInput::Task(TaskToolInput {
+                label: None,
                 prompt: "edit config.toml".into(),
                 description: "spawn".into(),
                 subagent_type: "general-purpose".into(),
                 subagent_type_specified: false,
+                thoroughness: None,
+                output_schema: None,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
+                context: None,
                 resume_from: None,
                 cwd: None,
                 model: None,
@@ -480,13 +484,17 @@ mod tests {
             replace_all: false,
         }));
         let task = AccessKind::from(&ToolInput::Task(TaskToolInput {
+            label: None,
             prompt: "edit config.toml".into(),
             description: "spawn".into(),
             subagent_type: "general-purpose".into(),
             subagent_type_specified: false,
+            thoroughness: None,
+            output_schema: None,
             run_in_background: false,
             capability_mode: None,
             isolation: None,
+            context: None,
             resume_from: None,
             cwd: None,
             model: None,

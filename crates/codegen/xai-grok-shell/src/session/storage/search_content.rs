@@ -349,6 +349,7 @@ pub(super) fn test_summary(
         request_id: None,
         grok_home: None,
         last_active_at: None,
+        last_reply_at: None,
         generated_title: None,
         title_is_manual: false,
         worktree_label: None,

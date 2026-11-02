@@ -92,10 +92,11 @@ and execute. Use them aggressively and liberally \u{2014} spawn subagents early 
 - Reviewing subagent results and synthesizing responses for the user
 
 ### ALWAYS delegate to subagents:
-- **ALL file modifications** \u{2014} creating, editing, deleting files (`general-purpose`)
-- **ALL builds, tests, and verification** \u{2014} running test suites, linters, compilers (`general-purpose`)
+- **ALL file modifications** \u{2014} creating, editing, deleting files (`implementer`)
+- **ALL builds, tests, and verification** \u{2014} running test suites, linters, compilers (`implementer`)
 - **Deep codebase exploration** \u{2014} searching across many files, understanding patterns (`explore`)
-- **Multi-step implementation** \u{2014} any task involving more than reading (`general-purpose`)
+- **Implementation design** \u{2014} deciding how to structure a change (`plan`)
+- **Multi-step mixed work** \u{2014} research plus implementation (`general-purpose`)
 - **Any research requiring thoroughness** \u{2014} don\u{2019}t do shallow searches yourself, spawn an `explore` subagent
 
 ### How to talk to subagents:
@@ -284,6 +285,7 @@ fn grok_build_core_toolset_with(
         kill_task_tool_config(),
         (&grok_build::TodoWriteTool).into(),
         task_output_tool_config(),
+        (&grok_build::ListAgentsTool).into(),
         wait_tasks_tool_config(),
         task_tool_config(),
         (&grok_build::SchedulerCreateTool).into(),
@@ -438,6 +440,7 @@ fn grok_build_plan_toolset() -> ToolServerConfig {
             kill_task_tool_config(),
             (&grok_build::TodoWriteTool).into(),
             task_output_tool_config(),
+            (&grok_build::ListAgentsTool).into(),
             task_tool_config(),
             (&grok_build::SchedulerCreateTool).into(),
             (&grok_build::SchedulerDeleteTool).into(),
@@ -695,7 +698,7 @@ where
     Ok(opt)
 }
 /// Eliminates string matching in discovery and ensures built-in names are defined in exactly one place.
-/// `subagent_variants()` returns only the 3 exposed to the LLM. The remaining 6 are resolvable by name but not advertised.
+/// `subagent_variants()` returns only the 4 exposed to the LLM. The remaining variants are resolvable by name but not advertised.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter, AsRefStr, IntoStaticStr,
 )]
@@ -711,6 +714,7 @@ pub enum BuiltinAgentName {
     GeneralPurpose,
     Explore,
     Plan,
+    Implementer,
     BrowserUse,
     #[strum(serialize = "grok-build-orchestrator")]
     GrokBuildOrchestrator,
@@ -737,13 +741,19 @@ impl BuiltinAgentName {
             Self::GeneralPurpose => AgentDefinition::general_purpose(),
             Self::Explore => AgentDefinition::explore(),
             Self::Plan => AgentDefinition::plan(),
+            Self::Implementer => AgentDefinition::implementer(),
             Self::BrowserUse => AgentDefinition::browser_use(),
             Self::GrokBuildOrchestrator => AgentDefinition::grok_build_orchestrator(),
         }
     }
     /// Built-in agents available as subagents via the Task tool.
     pub fn subagent_variants() -> &'static [Self] {
-        &[Self::GeneralPurpose, Self::Explore, Self::Plan]
+        &[
+            Self::GeneralPurpose,
+            Self::Explore,
+            Self::Plan,
+            Self::Implementer,
+        ]
     }
 }
 /// Portable agent identity, parsed from .grok/agents/*.md. Usable as a top-level agent or a subagent.
@@ -1606,6 +1616,7 @@ impl AgentDefinition {
                 .to_string(),
             tool_config: general_purpose_toolset(),
             prompt_body: Some(subagent_prompts::GENERAL_PURPOSE_PROMPT.to_string()),
+            max_turns: Some(40),
             ..Self::base(BuiltinAgentName::GeneralPurpose, "")
         }
     }
@@ -1616,6 +1627,8 @@ impl AgentDefinition {
             tool_config: explore_toolset(),
             permission_mode: PermissionMode::Plan,
             prompt_body: Some(subagent_prompts::EXPLORE_PROMPT.to_string()),
+            effort: Some(Effort::Low),
+            max_turns: Some(12),
             inherit_skills: false,
             ..Self::base(BuiltinAgentName::Explore, "")
         }
@@ -1627,8 +1640,20 @@ impl AgentDefinition {
             tool_config: plan_toolset(),
             permission_mode: PermissionMode::Plan,
             prompt_body: Some(subagent_prompts::PLAN_PROMPT.to_string()),
+            effort: Some(Effort::Medium),
+            max_turns: Some(20),
             inherit_skills: false,
             ..Self::base(BuiltinAgentName::Plan, "")
+        }
+    }
+    pub fn implementer() -> Self {
+        use crate::prompt::subagent_prompts;
+        Self {
+            description: xai_tool_types::IMPLEMENTER_SUBAGENT.description.to_string(),
+            tool_config: general_purpose_toolset(),
+            prompt_body: Some(subagent_prompts::IMPLEMENTER_PROMPT.to_string()),
+            max_turns: Some(40),
+            ..Self::base(BuiltinAgentName::Implementer, "")
         }
     }
     pub fn browser_use() -> Self {
@@ -1950,6 +1975,7 @@ mod tests {
                 | BuiltinAgentName::GeneralPurpose
                 | BuiltinAgentName::Explore
                 | BuiltinAgentName::Plan
+                | BuiltinAgentName::Implementer
                 | BuiltinAgentName::BrowserUse
                 | BuiltinAgentName::GrokBuildOrchestrator => false,
             };
@@ -2131,6 +2157,7 @@ mod tests {
             | BuiltinAgentName::GeneralPurpose
             | BuiltinAgentName::Explore
             | BuiltinAgentName::Plan
+            | BuiltinAgentName::Implementer
             | BuiltinAgentName::Opencode
             | BuiltinAgentName::BrowserUse => false,
         }
@@ -2814,6 +2841,7 @@ description: Test default tool config
             ("general-purpose", BuiltinAgentName::GeneralPurpose),
             ("explore", BuiltinAgentName::Explore),
             ("plan", BuiltinAgentName::Plan),
+            ("implementer", BuiltinAgentName::Implementer),
             ("browser-use", BuiltinAgentName::BrowserUse),
         ] {
             let parsed = BuiltinAgentName::from_str(s).unwrap();
@@ -2843,10 +2871,28 @@ description: Test default tool config
     #[test]
     fn test_builtin_agent_name_subagent_variants() {
         let variants = BuiltinAgentName::subagent_variants();
-        assert_eq!(variants.len(), 3);
+        assert_eq!(variants.len(), 4);
         assert!(variants.contains(&BuiltinAgentName::GeneralPurpose));
         assert!(variants.contains(&BuiltinAgentName::Explore));
         assert!(variants.contains(&BuiltinAgentName::Plan));
+        assert!(variants.contains(&BuiltinAgentName::Implementer));
+    }
+
+    #[test]
+    fn builtin_subagent_effort_and_turn_defaults() {
+        let explore = AgentDefinition::explore();
+        assert_eq!(explore.effort, Some(Effort::Low));
+        assert_eq!(explore.max_turns, Some(12));
+        let plan = AgentDefinition::plan();
+        assert_eq!(plan.effort, Some(Effort::Medium));
+        assert_eq!(plan.max_turns, Some(20));
+        for def in [
+            AgentDefinition::general_purpose(),
+            AgentDefinition::implementer(),
+        ] {
+            assert_eq!(def.effort, None, "{} inherits the session effort", def.name);
+            assert_eq!(def.max_turns, Some(40));
+        }
     }
     #[test]
     fn test_all_builtins_have_inherit_model() {

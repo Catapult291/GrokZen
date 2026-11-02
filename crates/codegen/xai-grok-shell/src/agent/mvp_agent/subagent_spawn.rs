@@ -19,6 +19,7 @@ impl MvpAgent {
         let agent_ref = LocalRef::new(self);
         let limits = xai_grok_tools::implementations::grok_build::task::admission::SubagentLimits {
             max_concurrent: self.cfg.borrow().subagents_max_concurrent,
+            max_total_agents: self.cfg.borrow().subagents_max_total_agents,
             behavior: self.cfg.borrow().subagents_limit_behavior,
         };
         crate::agent::subagent::spawn_subagent_coordinator(agent_ref.clone(), rx, limits);
@@ -282,6 +283,7 @@ impl MvpAgent {
             subagent_event_tx: self.subagent_event_tx.event_sender().0,
             parent_depth,
             subagents_max_depth: self.cfg.borrow().subagents_max_depth,
+            subagent_worktree_base: self.cfg.borrow().subagent_worktree_base,
             workflow_max_concurrent_agents: self.cfg.borrow().workflow_max_concurrent_agents,
             media_gen_batch_limits: self.cfg.borrow().media_gen_batch_limits,
             inference_idle_timeout_secs,

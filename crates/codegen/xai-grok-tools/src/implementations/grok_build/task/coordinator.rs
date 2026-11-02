@@ -33,11 +33,12 @@ use super::admission::Admission;
 use super::coordinator_state::PendingDisposition;
 use super::coordinator_state::{
     ActiveChild, BlockingWaiter, BufferedCompletion, ChildRecord, CompletedChild,
-    DisplacedCompletedChild, ForegroundChild, InternalEvent, ListRequest, PendingChild,
-    ProgressFuture, ProgressTarget, ReplyFuture, TaggedFuture, active_summary,
+    DisplacedCompletedChild, ForegroundChild, InternalEvent, ListAgentsRequest, ListRequest,
+    PendingChild, ProgressFuture, ProgressTarget, ReplyFuture, TaggedFuture, active_summary,
     background_at_deadline, background_if_caller_gone, completed_snapshot, hand_off_to_background,
     sleep_until, workflow_outstanding,
 };
+use super::metrics::SubagentMetrics;
 use super::types::{
     ActiveAgentMessageOutcome, AgentAddress, HandedOffForegroundSubagent, SpawnedSubagentRef,
     SubagentCancelOutcome, SubagentCancelTarget, SubagentDescribeOutcome, SubagentEvent,
@@ -56,7 +57,8 @@ pub use super::coordinator_state::{
     ChildReporter, ChildRunOutput, ChildRunRequest, ChildRunner, CompletionDisposition,
     CoordinatorConfig, LimitedSpawnOrigin, LocalBoxFuture, MAX_ACTIVE_MESSAGE_ADMISSIONS,
     MAX_ACTIVE_MESSAGE_ADMISSIONS_PER_CHILD, MAX_COMPLETED_ENTRIES, SendBoxFuture, StartedChild,
-    SubagentLimitDecision, SubagentLimitNotice, SubagentLimitSink, SubagentProgress, WakeOrigin,
+    SubagentLimitDecision, SubagentLimitNotice, SubagentLimitSink, SubagentProgress,
+    SubagentRosterEntry, WakeOrigin,
 };
 use queue::{QUEUED_REAP_INTERVAL, QueuedCaller, SpawnQueue, StartOrigin};
 use wake::PendingWake;
@@ -73,6 +75,8 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     runner: R,
     config: CoordinatorConfig,
     admission: Admission,
+    /// Process-local rollup logged at actor shutdown (see [`SubagentMetrics`]).
+    metrics: SubagentMetrics,
     queued: SpawnQueue,
     /// When the queued sweep last ran; bounds how stale an out-of-band
     /// token cancel of a queued spawn can get (see [`Self::next_deadline`]).
@@ -115,6 +119,8 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     progress: FuturesUnordered<ProgressFuture<<R::Control as ChildControl>::ProgressFuture>>,
     list_requests: HashMap<u64, ListRequest>,
     next_list_request_id: u64,
+    list_agents_requests: HashMap<u64, ListAgentsRequest>,
+    next_list_agents_request_id: u64,
 }
 
 /// Backstop for a delete-path teardown hold: if a cancelled child never
@@ -273,6 +279,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             terminal_published_rx,
             runner,
             admission: Admission::new(config.limits),
+            metrics: SubagentMetrics::default(),
             queued: SpawnQueue::default(),
             last_queued_reap: tokio::time::Instant::now(),
             draining_queued: false,
@@ -302,6 +309,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             progress: FuturesUnordered::new(),
             list_requests: HashMap::new(),
             next_list_request_id: 0,
+            list_agents_requests: HashMap::new(),
+            next_list_agents_request_id: 0,
         }
     }
 
@@ -393,6 +402,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             self.evict_completed_overflow();
         }
 
+        self.metrics.log_summary();
         self.cancel_all_children();
         self.active_messages.clear();
     }
@@ -449,6 +459,15 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             }
             SubagentEvent::ListRunning(request) => {
                 self.handle_list_running(request.parent_session_id, request.respond_to);
+            }
+            SubagentEvent::ListAgents(request) => {
+                self.handle_list_agents(
+                    request.parent_session_id,
+                    request.include_finished,
+                    request.parent_id,
+                    request.limit,
+                    request.respond_to,
+                );
             }
             SubagentEvent::Completions(request) => {
                 // Suppressed owned completions stay buffered for the requester's next unsuppressed request
@@ -906,6 +925,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 deadline,
             } => (Some(queued_for), deadline),
         };
+        if let Some(queued_for) = queued_for {
+            self.metrics.record_queue_wait(queued_for);
+        }
         // Wake passes the completed record's spawner; a fresh spawn takes the
         // graph advertise target (main's lineage source of truth).
         let spawner_session_id =
@@ -918,6 +940,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         let attempt_id = identity.attempt_id;
         let generation = identity.generation;
         let agent_message_sender = identity.sender;
+        let sibling_roster = self.sibling_roster(&request.parent_session_id, &id);
         self.pending.insert(
             id.clone(),
             PendingChild {
@@ -963,10 +986,38 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     session_running,
                     agent_address,
                     spawner_session_id,
+                    sibling_roster,
                 }))
                 .catch_unwind(),
             ),
         });
+    }
+
+    /// Same-parent siblings with a label, for the child prompt roster.
+    /// Workflow children stay out: they are not addressable peers.
+    fn sibling_roster(&self, parent_session_id: &str, self_id: &str) -> Vec<SubagentRosterEntry> {
+        let mut rows: Vec<SubagentRosterEntry> = self
+            .pending
+            .values()
+            .map(|child| &child.request)
+            .chain(self.active.values().map(|child| &child.request))
+            .chain(self.queued.iter().map(|queued| &*queued.request))
+            .filter(|request| {
+                request.id != self_id
+                    && request.parent_session_id == parent_session_id
+                    && !request.owner.is_workflow()
+            })
+            .filter_map(|request| {
+                Some(SubagentRosterEntry {
+                    id: request.id.clone(),
+                    label: request.label.clone()?,
+                    subagent_type: request.subagent_type.clone(),
+                })
+            })
+            .collect();
+        rows.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id)));
+        rows.dedup_by(|a, b| a.id == b.id);
+        rows
     }
 
     /// Workflow agents draw from their run's own pool, not session slots.
@@ -977,6 +1028,32 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             .chain(self.active.values().map(|child| &child.request))
             .filter(|request| {
                 request.parent_session_id == parent_session_id && !request.owner.is_workflow()
+            })
+            .count()
+    }
+
+    /// Cumulative non-workflow children recorded under a root session, across
+    /// every live lineage. The spawn graph only holds nodes with a live record
+    /// (nodes drop at completed-record eviction), so this is "how many
+    /// subagents still exist for this root", the number `max_total_agents`
+    /// budgets against.
+    fn total_agents_for_root(&self, root_session_id: &str) -> usize {
+        self.pending
+            .values()
+            .map(|child| &child.request)
+            .chain(self.active.values().map(|child| &child.request))
+            .chain(
+                self.queued
+                    .iter()
+                    .map(|queued| queued.request.as_ref()),
+            )
+            .chain(self.completed.values().map(|child| &child.request))
+            .filter(|request| {
+                !request.owner.is_workflow()
+                    && self
+                        .graph
+                        .root_session(&request.id)
+                        .is_some_and(|root| root == root_session_id)
             })
             .count()
     }
@@ -1226,6 +1303,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             ),
         };
 
+        self.metrics
+            .record_terminal(&output.result, launched, started_at.elapsed());
         output.result.subagent_type = request.subagent_type.clone();
         let persisted_output_ref = self.runner.persisted_output_ref(&output.completion_data);
         let completion_age = self.next_completion_age;
@@ -1249,7 +1328,14 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             effective_model_id,
             agent_address,
             spawner_session_id,
-            wake_eligible: !explicitly_killed && !was_cancelled && !output.result.cancelled,
+            // A max-turns cutoff is a partial result, not a teardown: the
+            // child session is intact and `send_subagent_message` can queue a
+            // continuation turn, so it stays wake-eligible. Any other cancel
+            // path (user/owner stop) still refuses wakes.
+            wake_eligible: !explicitly_killed
+                && (!was_cancelled
+                    && !output.result.cancelled
+                    || output.result.stop_reason == xai_tool_types::stop_reason::MAX_TURNS),
             result: output.result.clone(),
         };
         let snapshot = completed_snapshot(&completed, None);

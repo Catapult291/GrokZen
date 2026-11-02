@@ -2383,6 +2383,7 @@ pub(crate) mod test_fixtures {
         use std::time::Instant;
         let now = Instant::now();
         crate::app::subagent::SubagentInfo {
+            label: None,
             subagent_id: Arc::from(format!("sa-{child_sid}")),
             child_session_id: Arc::from(child_sid),
             description: Arc::from("test"),

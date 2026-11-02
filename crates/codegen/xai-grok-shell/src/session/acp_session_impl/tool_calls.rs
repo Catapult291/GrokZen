@@ -3779,13 +3779,17 @@ mod plan_mode_edit_gate_tests {
             gate(
                 &t,
                 &ToolInput::Task(TaskToolInput {
+                    label: None,
                     prompt: "p".into(),
                     description: "d".into(),
                     subagent_type: "general-purpose".into(),
                     subagent_type_specified: false,
+                    thoroughness: None,
+                    output_schema: None,
                     run_in_background: false,
                     capability_mode: None,
                     isolation: None,
+                    context: None,
                     resume_from: None,
                     cwd: None,
                     model: None,

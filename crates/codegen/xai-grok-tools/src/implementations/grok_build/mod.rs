@@ -22,6 +22,7 @@ pub mod image_gen;
 #[path = "init_or_update_app_stub.rs"]
 pub mod init_or_update_app;
 pub mod kill_task;
+pub mod list_agents;
 pub mod list_dir;
 pub mod lsp;
 pub mod media_bearer;
@@ -54,6 +55,7 @@ pub use image_gen::{
 };
 pub use init_or_update_app::INIT_OR_UPDATE_APP_TOOL_NAME;
 pub use kill_task::{KillTaskTool, KillTerminalCommandTool};
+pub use list_agents::{LIST_AGENTS_TOOL_NAME, ListAgentsTool};
 pub use list_dir::ListDirTool;
 pub use lsp::LspTool;
 pub use monitor::tool::MonitorTool;

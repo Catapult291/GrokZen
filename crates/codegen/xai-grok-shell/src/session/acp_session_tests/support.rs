@@ -1017,6 +1017,7 @@ pub(crate) async fn disk_full_actor() -> SessionActor {
 pub(crate) fn subagent_summary(id: &str) -> SubagentCompletionSummary {
     SubagentCompletionSummary {
         snapshot: SubagentSnapshot {
+            label: None,
             subagent_id: id.into(),
             description: format!("desc {id}"),
             subagent_type: "general-purpose".into(),
@@ -1029,6 +1030,7 @@ pub(crate) fn subagent_summary(id: &str) -> SubagentCompletionSummary {
             started_at_epoch_ms: 0,
             duration_ms: 1000,
             persona: None,
+            ..Default::default()
         },
         loop_task_id: None,
         tool_calls: 3,
@@ -1088,6 +1090,12 @@ pub(crate) fn spawn_fake_coordinator(
                 SubagentEvent::PeekCompletions(req) => {
                     peeks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let _ = req.respond_to.send(buffer.clone());
+                }
+                SubagentEvent::ListAgents(req) => {
+                    // This stub holds no coordinator state; answer the
+                    // contract (empty tree) so callers never eat the
+                    // backend's 5s AGENT_LIST_TIMEOUT.
+                    let _ = req.respond_to.send(Vec::new());
                 }
                 _ => {}
             }

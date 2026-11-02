@@ -664,9 +664,6 @@ pub(crate) fn format_subagent_snapshot(
         SubagentSnapshotStatus::Running {
             turn_count,
             tool_call_count,
-            tokens_used,
-            context_window_tokens,
-            context_usage_pct,
             tools_used,
             error_count,
         } => {
@@ -676,8 +673,8 @@ pub(crate) fn format_subagent_snapshot(
             } else {
                 tools_used.join(", ")
             };
-            let tokens_k = tokens_used / 1000;
-            let capacity_k = context_window_tokens / 1000;
+            let tokens_k = snap.context_used / 1000;
+            let capacity_k = snap.context_window / 1000;
             // Measure body only — wait-hint is harness advisory, not task output.
             let body = format!(
                 "Subagent is still running.\n\
@@ -685,12 +682,13 @@ pub(crate) fn format_subagent_snapshot(
                  Description: {}\n\
                  Elapsed: {:.1}s\n\
                  Progress: turn {turn_count}, {tool_call_count} tool calls, \
-                 {tokens_k}K/{capacity_k}K tokens ({context_usage_pct}% context)\n\
+                 {tokens_k}K/{capacity_k}K tokens ({pct}% context)\n\
                  Tools used: {tools_str}\n\
                  Errors: {error_count}",
                 snap.subagent_type,
                 snap.description,
                 snap.duration_ms as f64 / 1000.0,
+                pct = snap.context_pct,
             );
             let raw_output_bytes = body.len();
             let output = with_still_running_wait_hint(body, wait_hint, WaitSubject::Subagent);
@@ -732,7 +730,8 @@ pub(crate) fn terminal_subagent_result(snap: &SubagentSnapshot) -> TaskOutputRes
                 snap.subagent_id, snap.duration_ms,
             );
             if let Some(wt) = &worktree_path {
-                output.push_str(&format!("\n<worktree_path>{wt}</worktree_path>"));
+                output.push_str("\n\n");
+                output.push_str(&xai_tool_types::format_worktree_block(wt));
             }
             output.push_str("\n\n");
             output.push_str(&xai_tool_types::format_resume_footer(
@@ -2173,6 +2172,7 @@ mod tests {
     #[test]
     fn format_initializing_subagent_reports_status() {
         let snap = SubagentSnapshot {
+            label: None,
             subagent_id: "sub-init".to_string(),
             description: "Check PR status".to_string(),
             subagent_type: "general-purpose".to_string(),
@@ -2180,6 +2180,8 @@ mod tests {
             status: SubagentSnapshotStatus::Initializing,
             started_at_epoch_ms: 1_700_000_000_000,
             duration_ms: 8_500,
+
+            ..Default::default()
         };
         let result = format_subagent_snapshot(&snap, WaitHint::NotRequested);
         match result {
@@ -2211,6 +2213,7 @@ mod tests {
     #[test]
     fn format_running_subagent_includes_progress_fields() {
         let snap = SubagentSnapshot {
+            label: None,
             subagent_id: "sub-abc".to_string(),
             description: "Find all API endpoints".to_string(),
             subagent_type: "explore".to_string(),
@@ -2218,9 +2221,6 @@ mod tests {
             status: SubagentSnapshotStatus::Running {
                 turn_count: 3,
                 tool_call_count: 12,
-                tokens_used: 45_000,
-                context_window_tokens: 128_000,
-                context_usage_pct: 35,
                 tools_used: vec![
                     "bash".to_string(),
                     "read_file".to_string(),
@@ -2230,6 +2230,11 @@ mod tests {
             },
             started_at_epoch_ms: 1_700_000_000_000,
             duration_ms: 12_500,
+            tokens_in: 45_000,
+            context_used: 45_000,
+            context_window: 128_000,
+            context_pct: 35,
+            ..Default::default()
         };
         let result = format_subagent_snapshot(&snap, WaitHint::NotRequested);
         match result {
@@ -2280,6 +2285,7 @@ mod tests {
     #[test]
     fn format_running_subagent_raw_output_bytes_stable_across_wait_hints() {
         let snap = SubagentSnapshot {
+            label: None,
             subagent_id: "sub-stable".to_string(),
             description: "stable body".to_string(),
             subagent_type: "explore".to_string(),
@@ -2287,14 +2293,16 @@ mod tests {
             status: SubagentSnapshotStatus::Running {
                 turn_count: 1,
                 tool_call_count: 2,
-                tokens_used: 3_000,
-                context_window_tokens: 128_000,
-                context_usage_pct: 2,
                 tools_used: vec!["bash".to_string()],
                 error_count: 0,
             },
             started_at_epoch_ms: 1_700_000_000_000,
             duration_ms: 1_000,
+            tokens_in: 3_000,
+            context_used: 3_000,
+            context_window: 128_000,
+            context_pct: 2,
+            ..Default::default()
         };
         let expected_body = format!(
             "Subagent is still running.\n\
@@ -2338,6 +2346,7 @@ mod tests {
     #[test]
     fn format_running_subagent_with_no_tools_shows_none_yet() {
         let snap = SubagentSnapshot {
+            label: None,
             subagent_id: "sub-new".to_string(),
             description: "just started".to_string(),
             subagent_type: "general-purpose".to_string(),
@@ -2345,14 +2354,13 @@ mod tests {
             status: SubagentSnapshotStatus::Running {
                 turn_count: 0,
                 tool_call_count: 0,
-                tokens_used: 0,
-                context_window_tokens: 128_000,
-                context_usage_pct: 0,
                 tools_used: vec![],
                 error_count: 0,
             },
             started_at_epoch_ms: 1_700_000_000_000,
             duration_ms: 500,
+
+            ..Default::default()
         };
         let result = format_subagent_snapshot(&snap, WaitHint::NotRequested);
         match result {
@@ -2487,6 +2495,7 @@ mod tests {
             assert_eq!(req.subagent_id, "sub-done");
             req.respond_to
                 .send(Some(SubagentSnapshot {
+                    label: None,
                     subagent_id: "sub-done".to_string(),
                     description: "find files".to_string(),
                     subagent_type: "explore".to_string(),
@@ -2499,6 +2508,7 @@ mod tests {
                     started_at_epoch_ms: 1_700_000_000_000,
                     duration_ms: 1500,
                     persona: None,
+                    ..Default::default()
                 }))
                 .unwrap();
         });
@@ -2535,21 +2545,20 @@ mod tests {
             let req = unwrap_query(query_rx.recv().await.unwrap());
             req.respond_to
                 .send(Some(SubagentSnapshot {
+                    label: None,
                     subagent_id: "sub-run".to_string(),
                     description: "exploring".to_string(),
                     subagent_type: "general-purpose".to_string(),
                     status: SubagentSnapshotStatus::Running {
                         turn_count: 2,
                         tool_call_count: 5,
-                        tokens_used: 10_000,
-                        context_window_tokens: 128_000,
-                        context_usage_pct: 8,
                         tools_used: vec!["grep".to_string()],
                         error_count: 0,
                     },
                     started_at_epoch_ms: 1_700_000_000_000,
                     duration_ms: 3000,
                     persona: None,
+                    ..Default::default()
                 }))
                 .unwrap();
         });
@@ -2610,6 +2619,7 @@ mod tests {
 
     fn completed_subagent_snapshot(id: &str) -> SubagentSnapshot {
         SubagentSnapshot {
+            label: None,
             subagent_id: id.to_string(),
             description: "find files".to_string(),
             subagent_type: "explore".to_string(),
@@ -2622,6 +2632,7 @@ mod tests {
             started_at_epoch_ms: 1_700_000_000_000,
             duration_ms: 1500,
             persona: None,
+            ..Default::default()
         }
     }
 
@@ -2676,21 +2687,20 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(150)).await;
             req.respond_to
                 .send(Some(SubagentSnapshot {
+                    label: None,
                     subagent_id: "sub-run".to_string(),
                     description: "exploring".to_string(),
                     subagent_type: "general-purpose".to_string(),
                     status: SubagentSnapshotStatus::Running {
                         turn_count: 2,
                         tool_call_count: 5,
-                        tokens_used: 10_000,
-                        context_window_tokens: 128_000,
-                        context_usage_pct: 8,
                         tools_used: vec!["grep".to_string()],
                         error_count: 0,
                     },
                     started_at_epoch_ms: 1_700_000_000_000,
                     duration_ms: 3000,
                     persona: None,
+                    ..Default::default()
                 }))
                 .unwrap();
         });
@@ -2750,6 +2760,7 @@ mod tests {
             (
                 "sub-cancel",
                 SubagentSnapshot {
+                    label: None,
                     subagent_id: "sub-cancel".to_string(),
                     description: "cancelled".to_string(),
                     subagent_type: "explore".to_string(),
@@ -2759,12 +2770,14 @@ mod tests {
                     started_at_epoch_ms: 1_700_000_000_000,
                     duration_ms: 10,
                     persona: None,
+                    ..Default::default()
                 },
                 "cancelled",
             ),
             (
                 "sub-fail",
                 SubagentSnapshot {
+                    label: None,
                     subagent_id: "sub-fail".to_string(),
                     description: "failed".to_string(),
                     subagent_type: "explore".to_string(),
@@ -2774,6 +2787,7 @@ mod tests {
                     started_at_epoch_ms: 1_700_000_000_000,
                     duration_ms: 10,
                     persona: None,
+                    ..Default::default()
                 },
                 "failed",
             ),

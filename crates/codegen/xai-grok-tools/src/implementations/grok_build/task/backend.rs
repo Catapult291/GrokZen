@@ -15,9 +15,10 @@ use tokio::sync::{mpsc, oneshot};
 use super::types::{
     ActiveAgentMessageOutcome, ActiveAgentMessageRequest, ActiveMessageSenderContext,
     HandedOffForegroundSubagent, SpawnedSubagentRef, SubagentActiveMessageRequest,
-    SubagentCancelOutcome, SubagentCancelRequest, SubagentCancelTarget, SubagentDescribeOutcome,
-    SubagentDescribeRequest, SubagentEvent, SubagentEventSender, SubagentHandOffForegroundRequest,
-    SubagentInspectRequest, SubagentInspection, SubagentListRunningRequest, SubagentQueryRequest,
+    SubagentAgentEntry, SubagentCancelOutcome, SubagentCancelRequest, SubagentCancelTarget,
+    SubagentDescribeOutcome, SubagentDescribeRequest, SubagentEvent, SubagentEventSender,
+    SubagentHandOffForegroundRequest, SubagentInspectRequest, SubagentInspection,
+    SubagentListAgentsRequest, SubagentListRunningRequest, SubagentQueryRequest,
     SubagentRegistryCounts, SubagentRegistryCountsRequest, SubagentRequest, SubagentResult,
     SubagentSnapshot, SubagentSpawnRequest, SubagentSpawnedRefsRequest,
     SubagentValidateTypeOutcome, SubagentValidateTypeRequest,
@@ -56,6 +57,18 @@ pub trait SubagentBackend: Send + Sync + 'static {
         _request: ActiveAgentMessageRequest,
     ) -> ActiveAgentMessageOutcome {
         ActiveAgentMessageOutcome::Unsupported
+    }
+
+    /// List this session's subagent tree with live progress where available.
+    /// Backends without coordinator state return an empty list.
+    async fn list_agents(
+        &self,
+        _parent_session_id: &str,
+        _include_finished: bool,
+        _parent_id: Option<&str>,
+        _limit: usize,
+    ) -> Vec<SubagentAgentEntry> {
+        Vec::new()
     }
 
     /// Request cancellation of a subagent by ID.
@@ -620,6 +633,42 @@ impl SubagentBackend for ChannelBackend {
             .unwrap_or(ActiveAgentMessageOutcome::ChannelClosed)
     }
 
+    async fn list_agents(
+        &self,
+        parent_session_id: &str,
+        include_finished: bool,
+        parent_id: Option<&str>,
+        limit: usize,
+    ) -> Vec<SubagentAgentEntry> {
+        let parent_session_id = self
+            .parent_session_id
+            .as_deref()
+            .unwrap_or(parent_session_id)
+            .to_owned();
+        let (respond_to, response_rx) = oneshot::channel();
+        if self
+            .tx
+            .event_sender()
+            .send(SubagentEvent::ListAgents(SubagentListAgentsRequest {
+                parent_session_id,
+                include_finished,
+                parent_id: parent_id.map(str::to_owned),
+                limit,
+                respond_to,
+            }))
+            .is_err()
+        {
+            return Vec::new();
+        }
+        match tokio::time::timeout(AGENT_LIST_TIMEOUT, response_rx).await {
+            Ok(Ok(entries)) => entries,
+            Ok(Err(_)) | Err(_) => {
+                tracing::warn!("subagent list query did not complete");
+                Vec::new()
+            }
+        }
+    }
+
     async fn cancel(&self, id: &str) -> SubagentCancelOutcome {
         let (respond_to, response_rx) = oneshot::channel();
         let sent = self
@@ -739,6 +788,9 @@ async fn await_validate_reply(
         }
     }
 }
+
+/// Upper bound for one `list_agents` round-trip, including live progress.
+const AGENT_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Default `validate_type` timeout; override via [`VALIDATE_TYPE_TIMEOUT_ENV_VAR`].
 /// A short default false-fails while the coordinator is busy; a shut-down

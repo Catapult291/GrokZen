@@ -109,6 +109,14 @@ impl SpawnGraph {
         self.nodes.get(child_id).map(|node| node.root.as_str())
     }
 
+    /// Nesting depth of an admitted child: a direct child of the root is 1,
+    /// matching [`SubagentDepthCounter`](super::super::types::SubagentDepthCounter).
+    pub(super) fn depth_of(&self, child_id: &str) -> Option<u32> {
+        self.nodes
+            .get(child_id)
+            .map(|node| node.spawner_chain.len() as u32 + 1)
+    }
+
     pub(super) fn direct_spawner(&self, child_id: &str) -> Option<&str> {
         self.nodes
             .get(child_id)?

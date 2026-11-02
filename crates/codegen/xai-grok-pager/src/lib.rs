@@ -77,9 +77,61 @@ pub(crate) mod wrap_restore;
 pub use xai_grok_gboom as gboom;
 pub use xai_grok_pager_render::key;
 pub use xai_grok_pager_render::{
-    appearance, clipboard, glyphs, host, input, link_opener, modal_window_state, prompt_images,
-    render, search, syntax, terminal, theme, util,
+    appearance, glyphs, host, input, link_opener, modal_window_state, prompt_images, render,
+    search, syntax, terminal, theme, util,
 };
+
+#[cfg(not(test))]
+pub use xai_grok_pager_render::clipboard;
+
+/// Unit-test stand-in for [`xai_grok_pager_render::clipboard`]: copies report success without
+/// touching the system clipboard or the `last-copy.txt` backup file.
+#[cfg(test)]
+pub mod clipboard {
+    pub use xai_grok_pager_render::clipboard::*;
+
+    fn fake_copy_result() -> CopyResult {
+        CopyResult {
+            message: "Copied!",
+            message_lead: "Copied!",
+            ticks: 30,
+            delivery: ClipboardDelivery::Confirmed,
+            feedback: ClipboardFeedback::Copied,
+        }
+    }
+
+    /// Report a confirmed copy without writing anywhere.
+    pub fn copy_text(_text: &str) -> CopyResult {
+        fake_copy_result()
+    }
+
+    /// Report a confirmed copy without writing anywhere, so selection and toast tests see the real success path.
+    pub fn copy_text_or_file(_text: &str) -> CopyDelivery {
+        CopyDelivery::Clipboard {
+            result: fake_copy_result(),
+            file: None,
+        }
+    }
+
+    /// In-memory stand-in for the system clipboard provider used by text areas and list panes.
+    #[derive(Debug)]
+    pub struct SystemClipboard;
+
+    impl SystemClipboard {
+        pub fn try_set(_text: &str) -> ClipboardDelivery {
+            ClipboardDelivery::Confirmed
+        }
+    }
+
+    impl ClipboardProvider for SystemClipboard {
+        fn get(&mut self) -> Option<String> {
+            None
+        }
+
+        fn set(&mut self, _text: &str) {}
+    }
+}
+
 #[cfg(test)]
 pub mod test_util;
 pub mod trace_cmd;
