@@ -156,6 +156,9 @@ pub fn detect_hardline(command: &str) -> Option<HardlineHit>;
    - 去掉 shell 引号、`''`/`""` 空拼接、反斜杠转义，识别 `r\m`、`r''m`。
    - 折叠 `$IFS` / `${IFS}` 为空格。
    - 对 `bash -c` / `sh -c` / `cmd /c` / `pwsh -Command` 的内层字符串递归检测，最大深度 2。
+   - 复合语句（`if …; then …`、`do …; done`、子 shell、`case` 标签）按命令起点检查；
+     `$( … )` 与反引号命令替换递归检查内容，单引号内字面文本不检查。阶段 5 手工验证
+     发现 `if false; then rm -rf Q:/; fi` 此前会漏判，已补测试与实现。
 4. **误报控制**：
    - `echo "rm -rf /"`、`git commit -m "Remove-Item C:\"` 不能命中。
    - `rm -rf ./build`、`Remove-Item .\build -Recurse -Force` 不能命中。

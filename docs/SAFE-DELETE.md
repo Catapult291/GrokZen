@@ -29,7 +29,9 @@ YOLO 与 grant 之前调用它；即使用户此前授予了完全相同的命�
 
 检测会剥掉 `sudo`、`doas`、`env`、`exec`、`nohup`、`setsid`、`time`、`nice`、
 `timeout`、`chroot` 等包装，递归检查 `bash -c`、`sh -c`、`cmd /c`、`pwsh -Command`
-的内层命令，最多两层。
+的内层命令，最多两层。复合语句（`if …; then …`、`do …; done`、子 shell、`case` 标签）
+同样按命令起点检查，`$( … )` 与反引号命令替换会递归检查其内容；单引号内的字面文本
+不检查。
 
 | `code` | 拦截目标 |
 | --- | --- |

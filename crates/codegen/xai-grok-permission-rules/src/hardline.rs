@@ -138,6 +138,11 @@ fn detect_text(text: &str, depth: u8) -> Option<HardlineHit> {
     if has_diskpart_clean(text) {
         return Some(DISK_MANAGEMENT);
     }
+    // `$(...)` and backticks run their body as a command, so a quoted mention
+    // (`echo '$(rm -rf /)'`) stays inert while an executing substitution hits.
+    if let Some(hit) = detect_substitution(text, depth) {
+        return Some(hit);
+    }
 
     if let Some(tree) = try_parse_shell(text) {
         if let Some(hit) = raw_device_redirect_hit(&tree, text) {
@@ -169,6 +174,142 @@ fn fold_ifs(text: &str) -> String {
     text.replace("${IFS}", " ").replace("$IFS", " ")
 }
 
+/// Recursively checks command substitutions at this level. Single quotes make
+/// their body literal, so only unquoted and double-quoted substitutions count.
+fn detect_substitution(text: &str, depth: u8) -> Option<HardlineHit> {
+    if depth >= MAX_INLINE_DEPTH {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+    let mut quote = Quote::None;
+    while let Some(&byte) = bytes.get(index) {
+        let ch = byte as char;
+        match quote {
+            Quote::Single => {
+                if ch == '\'' {
+                    quote = Quote::None;
+                }
+                index += 1;
+            }
+            Quote::Double => match ch {
+                '\\' => index += 2,
+                '"' => {
+                    quote = Quote::None;
+                    index += 1;
+                }
+                '$' if bytes.get(index + 1) == Some(&b'(') => {
+                    let (inner, next) = substitution_body(text, index + 2)?;
+                    if let Some(hit) = detect_text(inner, depth + 1) {
+                        return Some(hit);
+                    }
+                    index = next;
+                }
+                '`' => {
+                    let (inner, next) = backtick_body(text, index + 1)?;
+                    if let Some(hit) = detect_text(inner, depth + 1) {
+                        return Some(hit);
+                    }
+                    index = next;
+                }
+                _ => index += 1,
+            },
+            Quote::None => match ch {
+                '\\' => index += 2,
+                '\'' => {
+                    quote = Quote::Single;
+                    index += 1;
+                }
+                '"' => {
+                    quote = Quote::Double;
+                    index += 1;
+                }
+                '$' if bytes.get(index + 1) == Some(&b'(') => {
+                    let (inner, next) = substitution_body(text, index + 2)?;
+                    if let Some(hit) = detect_text(inner, depth + 1) {
+                        return Some(hit);
+                    }
+                    index = next;
+                }
+                '`' => {
+                    let (inner, next) = backtick_body(text, index + 1)?;
+                    if let Some(hit) = detect_text(inner, depth + 1) {
+                        return Some(hit);
+                    }
+                    index = next;
+                }
+                _ => index += 1,
+            },
+        }
+    }
+    None
+}
+
+/// Returns the body of a `$( … )` starting after the opening `(` and the byte
+/// index just past its closing `)`. Nested parentheses and quotes are balanced.
+fn substitution_body(text: &str, start: usize) -> Option<(&str, usize)> {
+    let bytes = text.as_bytes();
+    let mut index = start;
+    let mut depth = 1usize;
+    let mut quote = Quote::None;
+    while let Some(&byte) = bytes.get(index) {
+        let ch = byte as char;
+        match quote {
+            Quote::Single => {
+                if ch == '\'' {
+                    quote = Quote::None;
+                }
+                index += 1;
+            }
+            Quote::Double => match ch {
+                '\\' => index += 2,
+                '"' => {
+                    quote = Quote::None;
+                    index += 1;
+                }
+                _ => index += 1,
+            },
+            Quote::None => match ch {
+                '\\' => index += 2,
+                '\'' => {
+                    quote = Quote::Single;
+                    index += 1;
+                }
+                '"' => {
+                    quote = Quote::Double;
+                    index += 1;
+                }
+                '(' => {
+                    depth += 1;
+                    index += 1;
+                }
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return text.get(start..index).map(|inner| (inner, index + 1));
+                    }
+                    index += 1;
+                }
+                _ => index += 1,
+            },
+        }
+    }
+    None
+}
+
+fn backtick_body(text: &str, start: usize) -> Option<(&str, usize)> {
+    let bytes = text.as_bytes();
+    let mut index = start;
+    while let Some(&byte) = bytes.get(index) {
+        match byte {
+            b'\\' => index += 2,
+            b'`' => return text.get(start..index).map(|inner| (inner, index + 1)),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
 fn is_fork_bomb(text: &str) -> bool {
     let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     compact.starts_with(':') && compact.contains(":(){:|:&};:")
@@ -194,7 +335,30 @@ fn raw_device_redirect_hit(tree: &Tree, src: &str) -> Option<HardlineHit> {
 }
 
 fn check_tokens(tokens: &[String], depth: u8) -> Option<HardlineHit> {
+    let tokens = strip_control_prefixes(tokens);
     let tokens = peel_prefixes(tokens);
+    if let Some(hit) = check_command_head(tokens, depth) {
+        return Some(hit);
+    }
+    // `case a in a) rm -rf /;; esac` keeps the label and the body in one
+    // segment because the label is not followed by a separator.
+    for (index, previous) in tokens.iter().enumerate() {
+        if index == 0 || !trim_quotes(previous.trim()).ends_with(')') {
+            continue;
+        }
+        let Some(rest) = tokens.get(index + 1..) else {
+            continue;
+        };
+        let candidate = strip_control_prefixes(rest);
+        let candidate = peel_prefixes(candidate);
+        if let Some(hit) = check_command_head(candidate, depth) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+fn check_command_head(tokens: &[String], depth: u8) -> Option<HardlineHit> {
     let head = head_name(tokens)?;
     let rest = tokens.get(1..).unwrap_or_default();
     match head.as_str() {
@@ -280,7 +444,8 @@ fn target_hit(raw: &str) -> Option<HardlineHit> {
 }
 
 fn classify_target(raw: &str) -> Option<HardlineHit> {
-    let trimmed = trim_quotes(raw.trim());
+    // `(rm -rf /)` leaves the closing subshell paren on the last word.
+    let trimmed = trim_quotes(raw.trim()).trim_end_matches(')');
     if trimmed.is_empty() {
         return None;
     }
@@ -615,6 +780,49 @@ fn recurse_inline(rest: &[String], depth: u8) -> Option<HardlineHit> {
     }
 }
 
+/// Compound statements put the command after a keyword: `if true; then rm …`,
+/// `while …; do rm …`, `(rm …)`, `{ rm …; }`, `case x in a) rm …;; esac`.
+/// The tokenizer splits at `;`/`|`/`&`/newlines, so the command still starts
+/// the segment but behind a keyword or a case label; drop those prefixes.
+fn strip_control_prefixes(mut tokens: &[String]) -> &[String] {
+    for _ in 0..8 {
+        let Some(first) = tokens.first() else {
+            return tokens;
+        };
+        let word = trim_quotes(first.trim());
+        let lower = word.to_ascii_lowercase();
+        let control = matches!(
+            lower.as_str(),
+            "if" | "then"
+                | "elif"
+                | "else"
+                | "do"
+                | "while"
+                | "until"
+                | "for"
+                | "case"
+                | "esac"
+                | "fi"
+                | "done"
+                | "in"
+                | "select"
+                | "function"
+                | "{"
+                | "}"
+                | "("
+                | ")"
+                | "!"
+                | ";"
+                | ";;"
+        ) || word.ends_with(')');
+        if !control {
+            return tokens;
+        }
+        tokens = tokens.get(1..).unwrap_or_default();
+    }
+    tokens
+}
+
 fn peel_prefixes(mut tokens: &[String]) -> &[String] {
     for _ in 0..8 {
         tokens = unwrap_wrappers(tokens);
@@ -706,6 +914,8 @@ fn head_name(tokens: &[String]) -> Option<String> {
     } else {
         decoded_base
     };
+    // Subshell/group punctuation sticks to the verb: `(rm`, `{rm`, `!rm`.
+    let base = base.trim_start_matches(['(', '{', '!']);
     let lower = base.to_ascii_lowercase();
     let name = lower.strip_suffix(".exe").unwrap_or(lower.as_str());
     Some(name.to_owned())
@@ -1023,6 +1233,42 @@ mod tests {
         assert_hit("rm -rf %USERPROFILE%");
         assert_hit("rm -rf %SystemDrive%");
         assert_miss("rm -rf $TARGET");
+    }
+
+    #[test]
+    fn compound_statements_hit() {
+        for command in [
+            "if true; then rm -rf /; fi",
+            "if false; then rm -rf C:\\; fi",
+            "while true; do rm -rf /; done",
+            "for x in 1; do rm -rf /; done",
+            "(rm -rf /)",
+            "{ rm -rf /; }",
+            "! rm -rf /",
+            "case a in a) rm -rf /;; esac",
+        ] {
+            assert_hit(command);
+        }
+        assert_miss("if [ -d ./build ]; then rm -rf ./build; fi");
+    }
+
+    #[test]
+    fn command_substitutions_hit_unless_quoted_literally() {
+        for command in [
+            "echo \"$(rm -rf /)\"",
+            "x=$(rm -rf /)",
+            "echo `rm -rf /`",
+            "echo \"$(bash -c 'rm -rf /')\"",
+        ] {
+            assert_hit(command);
+        }
+        for command in [
+            "echo '$(rm -rf /)'",
+            "echo \"\\$(rm -rf /)\"",
+            "echo \"$(git rev-parse HEAD)\"",
+        ] {
+            assert_miss(command);
+        }
     }
 
     #[test]
