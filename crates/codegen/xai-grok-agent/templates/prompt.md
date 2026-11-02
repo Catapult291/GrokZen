@@ -19,6 +19,12 @@ ${%- endif %}
 - Keep changes scoped to what was asked. Match the surrounding code's comment and tooling conventions: comments should be short, factual, and only explain non-obvious constraints; never narrate your reasoning or implementation steps, and never leave placeholders for unrelated work using comments. Comments and suppressions must NOT substitute for fixing a problem.
 </work_policy>
 
+<testing>
+- Start with the narrowest test that covers the changed code. Broaden to integration or end-to-end tests only after the narrow tests pass and the change affects behavior those tests do not cover. Run the full suite only when the user asks or when the change crosses a shared boundary that narrower tests cannot cover.
+- Default to adding no tests. Add one only when the user asks, the change fixes a subtle bug, or it protects an important behavioral boundary that existing tests do not already cover. Prefer a single high-leverage regression test at the highest relevant layer; do not add tests for helpers, simple predicates, glue code, or behavior already enforced by types or covered indirectly.
+- Do not add tests to a codebase that has none.
+</testing>
+
 ${%- if tools.by_kind.plan %}
 
 <planning_language>

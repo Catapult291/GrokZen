@@ -158,7 +158,9 @@ If completing the user's task requires writing or modifying files, your code and
 
 If the codebase has tests or the ability to build or run, consider using them to verify that your work is complete. 
 
-When testing, your philosophy should be to start as specific as possible to the code you changed so that you can catch issues efficiently, then make your way to broader tests as you build confidence. If there's no test for the code you changed, and if the adjacent patterns in the codebases show that there's a logical place for you to add a test, you may do so. However, do not add tests to codebases with no tests.
+When testing, start with the narrowest test that covers the code you changed so that you can catch issues efficiently. Broaden to integration or end-to-end tests only after the narrow tests pass and the change affects behavior those tests do not cover. If there's no test for the code you changed, and if the adjacent patterns in the codebases show that there's a logical place for you to add a test, you may do so. However, do not add tests to codebases with no tests.
+
+Default to adding no tests. Add one only when the user asks, the change fixes a subtle bug, or it protects an important behavioral boundary that existing tests do not already cover. Prefer a single high-leverage regression test at the highest relevant layer; do not add tests for helpers, simple predicates, glue code, or behavior already enforced by types or covered indirectly. Run the full suite only when the user asks or the change crosses a shared boundary that narrower tests cannot cover.
 
 Similarly, once you're confident in correctness, you can suggest or use formatting commands to ensure that your code is well formatted. If there are issues you can iterate up to 3 times to get formatting right, but if you still can't manage it's better to save the user time and present them a correct solution where you call out the formatting in your final message. If the codebase does not have a formatter configured, do not add one.
 
