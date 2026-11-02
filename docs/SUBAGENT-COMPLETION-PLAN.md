@@ -182,7 +182,7 @@ cargo test -p xai-grok-shell --lib agent::subagent -- --skip wake::
 
 ### 任务 E（P1）：补 §5 集成流程测试 — spawn → list → send → interrupt → resume
 
-**状态**：待办
+**状态**：已完成（`d6a53015`）
 
 **目标**：用 mock child runner 串起控制面一条完整流程，防止各工具单独测试通过、组合后行为漂移。
 
@@ -195,6 +195,8 @@ cargo test -p xai-grok-shell --lib agent::subagent -- --skip wake::
 3. interrupt/cancel 后，`ListAgents` 状态为 `cancelled`。
 4. 再 spawn 一个正常完成，`resume_from` 复用其会话，`ListAgents` 出现新的 `running` 记录。
 5. 过程中 `include_finished` / `parent_id` / `limit` 至少各断言一次。
+
+**实现发现**：`admitted_messages` 通道只对 wake 运行接通（`TestControl.admitted_messages` 在 `wake_agent_id.is_some()` 时才为 `Some`），普通 spawn 的运行中投递无法经该通道观察。测试因此分两段覆盖：运行中投递经 admission gate 的 `admission_entered` 观察；末尾 wake 续跑后的再次投递走 `admitted_messages` 通道，断言 `(Steer, text)` 被记录且 outcome 为 `Accepted`。
 
 **现状核对**：先查已有分散测试，避免重复：
 
@@ -292,6 +294,7 @@ rustfmt --edition 2024 --check <changed-file>
 | 2026-11-02 | 6.2 空 worktree 删除与清指针 | 通过 | `cargo test -p xai-grok-workspace --lib worktree`（112 passed，4 个任务 G 已知基线失败）；`cargo test -p xai-grok-shell --lib agent::subagent -- --skip wake::`（289 passed）；提交 `f61f131a` |
 | 2026-11-02 | 任务 C context=fork 映射 | 通过 | `cargo test -p xai-grok-tools --lib task::`（368 passed，0 failed，新增 3 例）；提交 `d376fca1` |
 | 2026-11-02 | 任务 D max_turns partial 可续跑 | 通过 | `cargo test -p xai-grok-tools --lib task::`（370 passed，0 failed，新增 2 例）；`cargo test -p xai-grok-shell --lib agent::subagent -- --skip wake::`（289 passed）；提交 `73e4cc18` |
+| 2026-11-02 | 任务 E 控制面 spawn→list→send→interrupt→resume 流程 | 通过 | `cargo test -p xai-grok-tools --lib task::`（371 passed，0 failed，新增 1 例 `control_plane_flow_spawn_list_send_interrupt_then_resume`）；提交 `d6a53015` |
 
 ## 6. 提交约定
 
