@@ -578,7 +578,12 @@ async fn create_uses_the_path_captured_before_cwd_changes() {
     else {
         panic!("expected Created at the captured path, got {status:?}");
     };
-    assert!(created.ends_with("/captured"));
+    // Leaf-component match: `ends_with("/captured")` would compare a RootDir
+    // component that no absolute child path can end with, on any platform.
+    assert_eq!(
+        Path::new(&created).file_name(),
+        Some(std::ffi::OsStr::new("captured"))
+    );
     assert!(!created.contains("later-home"));
     assert!(!created.contains("moved-after-resolve"));
     assert!(Path::new(&captured).join("tracked.txt").is_file());
