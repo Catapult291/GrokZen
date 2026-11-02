@@ -427,7 +427,11 @@ pub(in crate::implementations::grok_build::task::coordinator) fn finish_child(
     );
 }
 
-fn finish_child_with_result(coordinator: &mut TestCoordinator, id: &str, result: SubagentResult) {
+pub(in crate::implementations::grok_build::task::coordinator) fn finish_child_with_result(
+    coordinator: &mut TestCoordinator,
+    id: &str,
+    result: SubagentResult,
+) {
     coordinator.begin_terminalization(
         id,
         ChildRunOutput {
