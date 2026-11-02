@@ -56,6 +56,29 @@ pub fn foreground_block_budget_from_env() -> Duration {
         .unwrap_or(FOREGROUND_BLOCK_BUDGET)
 }
 
+/// Extra time a foreground caller waits for the actor's reply beyond the
+/// command's own timeout. Covers actor scheduling and the final snapshot read,
+/// so a stalled actor cannot pin the turn forever. Env:
+/// `GROK_TERMINAL_REPLY_GRACE_MS`.
+const REPLY_GRACE: Duration = Duration::from_secs(30);
+
+fn reply_grace_from_env() -> Duration {
+    std::env::var("GROK_TERMINAL_REPLY_GRACE_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(REPLY_GRACE)
+}
+
+/// Upper bound for control calls that must never block a cancel path.
+const CONTROL_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `timeout + grace`, capped at the background maximum when the sum overflows
+/// (`Duration::MAX` timeouts).
+fn reply_deadline(timeout: Duration, grace: Duration) -> Duration {
+    timeout.checked_add(grace).unwrap_or(BACKGROUND_MAX_RUNTIME)
+}
+
 /// Output-file size at which the actor kills the command, stopping an unbounded
 /// writer from filling the disk. Env override: `GROK_MAX_OUTPUT_FILE_BYTES`.
 const MAX_OUTPUT_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
@@ -2821,6 +2844,178 @@ impl LocalTerminalBackend {
     pub fn cancel_foreground_only(&self) {
         self.cancel_token.cancel();
     }
+
+    /// Foreground waits are bounded by the command timeout plus `reply_grace`.
+    /// On expiry the command is moved to the background (best effort,
+    /// `try_send`) and the caller gets an explicit `TimedOut` error instead of
+    /// hanging on a stalled actor.
+    async fn run_with_grace(
+        &self,
+        request: TerminalRunRequest,
+        reply_grace: Duration,
+    ) -> Result<TerminalRunResult, ComputerError> {
+        let deadline = reply_deadline(request.timeout, reply_grace);
+        let tool_call_id = request.tool_call_id.clone();
+        let output_file = request.output_file.clone();
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+
+        self.cmd_tx
+            .send(TerminalCommand::Run {
+                request,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| ComputerError::io("terminal actor shut down"))?;
+
+        match tokio::time::timeout(deadline, &mut reply_rx).await {
+            Ok(reply) => {
+                reply.map_err(|_| ComputerError::io("terminal actor dropped reply channel"))?
+            }
+            Err(_) => {
+                let (bg_tx, _bg_rx) = oneshot::channel();
+                if self
+                    .cmd_tx
+                    .try_send(TerminalCommand::BackgroundForeground {
+                        tool_call_id: tool_call_id.clone(),
+                        reply: bg_tx,
+                    })
+                    .is_err()
+                {
+                    tracing::warn!(
+                        tool_call_id = %tool_call_id,
+                        "terminal.actor.background_request_dropped"
+                    );
+                }
+                tracing::error!(
+                    tool_call_id = %tool_call_id,
+                    output_file = %output_file.display(),
+                    waited_ms = deadline.as_millis() as u64,
+                    "terminal.actor.reply_timeout"
+                );
+                Err(ComputerError::io_with_kind(
+                    format!(
+                        "terminal actor did not answer within {}ms; command may still be running (tool_call_id: {tool_call_id}, log: {})",
+                        deadline.as_millis(),
+                        output_file.display()
+                    ),
+                    std::io::ErrorKind::TimedOut,
+                ))
+            }
+        }
+    }
+
+    async fn get_task_with_timeout(&self, task_id: &str, cap: Duration) -> Option<TaskSnapshot> {
+        let lookup = async {
+            if let Some(registry) = &self.persistent_task_registry
+                && let Some(snapshot) = registry.get_task(task_id).await
+            {
+                return Some(snapshot);
+            }
+            let (reply_tx, reply_rx) = oneshot::channel();
+            self.cmd_tx
+                .send(TerminalCommand::GetTask {
+                    task_id: task_id.to_string(),
+                    reply: reply_tx,
+                })
+                .await
+                .ok()?;
+            reply_rx.await.ok().flatten()
+        };
+
+        match tokio::time::timeout(cap, lookup).await {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    timeout_ms = cap.as_millis() as u64,
+                    "terminal.actor.get_task_timeout"
+                );
+                None
+            }
+        }
+    }
+
+    async fn kill_task_with_timeout(
+        &self,
+        task_id: &str,
+        source: KillSource,
+        cap: Duration,
+    ) -> KillOutcome {
+        let kill = async {
+            if let Some(registry) = &self.persistent_task_registry {
+                let outcome = registry.kill_task(task_id, source).await;
+                if outcome != KillOutcome::NotFound {
+                    return outcome;
+                }
+            }
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if self
+                .cmd_tx
+                .send(TerminalCommand::Kill {
+                    task_id: task_id.to_string(),
+                    source,
+                    reply: reply_tx,
+                })
+                .await
+                .is_err()
+            {
+                return KillOutcome::NotFound;
+            }
+            reply_rx.await.unwrap_or(KillOutcome::NotFound)
+        };
+
+        match tokio::time::timeout(cap, kill).await {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    timeout_ms = cap.as_millis() as u64,
+                    "terminal.actor.kill_task_timeout"
+                );
+                KillOutcome::NotFound
+            }
+        }
+    }
+
+    async fn wait_for_completion_with_grace(
+        &self,
+        task_id: &str,
+        timeout: Option<Duration>,
+        reply_grace: Duration,
+    ) -> Option<TaskSnapshot> {
+        let deadline = timeout
+            .map(|timeout| reply_deadline(timeout, reply_grace))
+            .unwrap_or(BACKGROUND_MAX_RUNTIME);
+        let wait = async {
+            if let Some(registry) = &self.persistent_task_registry
+                && let Some(snapshot) = registry.wait_for_completion(task_id, timeout).await
+            {
+                return Some(snapshot);
+            }
+            let (reply_tx, reply_rx) = oneshot::channel();
+            self.cmd_tx
+                .send(TerminalCommand::WaitForCompletion {
+                    task_id: task_id.to_string(),
+                    timeout,
+                    reply: reply_tx,
+                })
+                .await
+                .ok()?;
+            reply_rx.await.ok().flatten()
+        };
+
+        match tokio::time::timeout(deadline, wait).await {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    waited_ms = deadline.as_millis() as u64,
+                    "terminal.actor.wait_for_completion_timeout"
+                );
+                None
+            }
+        }
+    }
 }
 
 impl Default for LocalTerminalBackend {
@@ -2832,19 +3027,7 @@ impl Default for LocalTerminalBackend {
 #[async_trait::async_trait]
 impl TerminalBackend for LocalTerminalBackend {
     async fn run(&self, request: TerminalRunRequest) -> Result<TerminalRunResult, ComputerError> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-
-        self.cmd_tx
-            .send(TerminalCommand::Run {
-                request,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| ComputerError::io("terminal actor shut down"))?;
-
-        reply_rx
-            .await
-            .map_err(|_| ComputerError::io("terminal actor dropped reply channel"))?
+        self.run_with_grace(request, reply_grace_from_env()).await
     }
 
     async fn run_background(
@@ -2876,20 +3059,8 @@ impl TerminalBackend for LocalTerminalBackend {
     }
 
     async fn get_task(&self, task_id: &str) -> Option<TaskSnapshot> {
-        if let Some(registry) = &self.persistent_task_registry
-            && let Some(snapshot) = registry.get_task(task_id).await
-        {
-            return Some(snapshot);
-        }
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.cmd_tx
-            .send(TerminalCommand::GetTask {
-                task_id: task_id.to_string(),
-                reply: reply_tx,
-            })
+        self.get_task_with_timeout(task_id, CONTROL_REPLY_TIMEOUT)
             .await
-            .ok()?;
-        reply_rx.await.ok().flatten()
     }
 
     async fn kill_task(&self, task_id: &str) -> KillOutcome {
@@ -2898,26 +3069,8 @@ impl TerminalBackend for LocalTerminalBackend {
     }
 
     async fn kill_task_with_source(&self, task_id: &str, source: KillSource) -> KillOutcome {
-        if let Some(registry) = &self.persistent_task_registry {
-            let outcome = registry.kill_task(task_id, source).await;
-            if outcome != KillOutcome::NotFound {
-                return outcome;
-            }
-        }
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if self
-            .cmd_tx
-            .send(TerminalCommand::Kill {
-                task_id: task_id.to_string(),
-                source,
-                reply: reply_tx,
-            })
+        self.kill_task_with_timeout(task_id, source, CONTROL_REPLY_TIMEOUT)
             .await
-            .is_err()
-        {
-            return KillOutcome::NotFound;
-        }
-        reply_rx.await.unwrap_or(KillOutcome::NotFound)
     }
 
     /// Durable records only: an in-process task has no record to delete, and its
@@ -2934,21 +3087,8 @@ impl TerminalBackend for LocalTerminalBackend {
         task_id: &str,
         timeout: Option<Duration>,
     ) -> Option<TaskSnapshot> {
-        if let Some(registry) = &self.persistent_task_registry
-            && let Some(snapshot) = registry.wait_for_completion(task_id, timeout).await
-        {
-            return Some(snapshot);
-        }
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.cmd_tx
-            .send(TerminalCommand::WaitForCompletion {
-                task_id: task_id.to_string(),
-                timeout,
-                reply: reply_tx,
-            })
+        self.wait_for_completion_with_grace(task_id, timeout, reply_grace_from_env())
             .await
-            .ok()?;
-        reply_rx.await.ok().flatten()
     }
 
     async fn list_tasks(&self) -> Vec<TaskSnapshot> {
@@ -3877,6 +4017,68 @@ mod tests {
     async fn backend_constructs_off_a_local_set() {
         let backend = LocalTerminalBackend::new_local(SearchShadowConfig::default());
         drop(backend);
+    }
+
+    /// A backend whose actor never runs: the channel stays open, so sends
+    /// succeed, but no reply is ever produced.
+    fn stalled_backend() -> (LocalTerminalBackend, mpsc::Receiver<TerminalCommand>) {
+        let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_SIZE);
+        (
+            LocalTerminalBackend {
+                cmd_tx,
+                cancel_token: CancellationToken::new(),
+                persistent_task_registry: None,
+            },
+            cmd_rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn run_times_out_when_actor_does_not_reply() {
+        let (backend, _cmd_rx) = stalled_backend();
+        let mut request = make_request("sleep 30");
+        request.timeout = Duration::from_millis(25);
+
+        let started = Instant::now();
+        let err = backend
+            .run_with_grace(request, Duration::from_millis(25))
+            .await
+            .err()
+            .expect("a stalled actor must not answer");
+        assert_eq!(err.io_error_kind(), Some(std::io::ErrorKind::TimedOut));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn wait_for_completion_times_out_when_actor_does_not_reply() {
+        let (backend, _cmd_rx) = stalled_backend();
+
+        let started = Instant::now();
+        let snapshot = backend
+            .wait_for_completion_with_grace(
+                "task",
+                Some(Duration::from_millis(25)),
+                Duration::from_millis(25),
+            )
+            .await;
+        assert!(snapshot.is_none());
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn control_calls_time_out_without_blocking() {
+        let (backend, _cmd_rx) = stalled_backend();
+        let cap = Duration::from_millis(25);
+
+        let started = Instant::now();
+        assert!(backend.get_task_with_timeout("task", cap).await.is_none());
+        assert_eq!(
+            backend
+                .kill_task_with_timeout("task", KillSource::ModelTool, cap)
+                .await,
+            KillOutcome::NotFound
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[tokio::test]
