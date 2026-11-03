@@ -151,6 +151,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                     Some(mgr)
                 },
                 is_chat_kind: false,
+                cancel_slot: Default::default(),
                 state,
                 notifications: NotificationSender {
                     gateway: GatewaySender::new(gateway_tx),

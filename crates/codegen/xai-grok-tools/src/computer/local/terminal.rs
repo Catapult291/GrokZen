@@ -395,26 +395,14 @@ impl ChildExitWake {
     #[cfg(unix)]
     fn watch(&self, _pid: u32) {}
 
+    /// Windows has no scalable per-child wake primitive here: a blocking
+    /// `WaitForSingleObject` thread per child exhausts the runtime's bounded
+    /// blocking pool (which also serves `tokio::fs` and tokio's windows pipe
+    /// reads), so a few long-lived commands starve every blocking operation.
+    /// The actor's 100ms tick already polls `try_wait`; exit latency stays
+    /// bounded without pinning a thread per child.
     #[cfg(not(unix))]
-    fn watch(&self, pid: u32) {
-        let notify = std::sync::Arc::clone(&self.notify);
-        tokio::task::spawn_blocking(move || {
-            use windows::Win32::Foundation::CloseHandle;
-            use windows::Win32::System::Threading::{
-                INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
-            };
-            // SAFETY: the handle is opened by pid at spawn time (the child is
-            // alive), used only for a synchronize wait, and closed here; an
-            // open failure falls back to the tick as the only trigger.
-            unsafe {
-                if let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
-                    WaitForSingleObject(handle, INFINITE);
-                    let _ = CloseHandle(handle);
-                }
-            }
-            notify.notify_one();
-        });
-    }
+    fn watch(&self, _pid: u32) {}
 }
 
 /// Sleeps until `deadline`; pends forever when there is none, mirroring
@@ -2767,28 +2755,43 @@ impl LocalTerminalBackend {
     /// `hydrate` only affects durable records: the actor-held ones are built
     /// from in-memory state, so there is nothing to skip for them.
     async fn list_tasks_inner(&self, hydrate: bool) -> Vec<TaskSnapshot> {
-        let mut tasks = Vec::new();
-        if let Some(registry) = &self.persistent_task_registry {
-            tasks.extend(if hydrate {
-                registry.list_tasks().await
-            } else {
-                registry.list_tasks_light().await
-            });
+        // Durable records and the actor reply both go through filesystem or
+        // queue work; a wedged one must not hold a tool-result reminder (and
+        // with it the turn) open.
+        let lookup = async {
+            let mut tasks = Vec::new();
+            if let Some(registry) = &self.persistent_task_registry {
+                tasks.extend(if hydrate {
+                    registry.list_tasks().await
+                } else {
+                    registry.list_tasks_light().await
+                });
+            }
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if self
+                .cmd_tx
+                .send(TerminalCommand::ListTasks {
+                    include_output: hydrate,
+                    reply: reply_tx,
+                })
+                .await
+                .is_err()
+            {
+                return tasks;
+            }
+            tasks.extend(reply_rx.await.unwrap_or_default());
+            tasks
+        };
+        match tokio::time::timeout(CONTROL_REPLY_TIMEOUT, lookup).await {
+            Ok(tasks) => tasks,
+            Err(_) => {
+                tracing::warn!(
+                    timeout_ms = CONTROL_REPLY_TIMEOUT.as_millis() as u64,
+                    "terminal.actor.list_tasks_timeout"
+                );
+                Vec::new()
+            }
         }
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if self
-            .cmd_tx
-            .send(TerminalCommand::ListTasks {
-                include_output: hydrate,
-                reply: reply_tx,
-            })
-            .await
-            .is_err()
-        {
-            return tasks;
-        }
-        tasks.extend(reply_rx.await.unwrap_or_default());
-        tasks
     }
 
     /// Local terminal backend whose explicit background commands are hosted
