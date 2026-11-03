@@ -2,6 +2,7 @@
 //!
 //! Pure prompt helpers live in [`crate::session::helpers::turn_summary`].
 
+use super::side_call::SideCallKind;
 use super::*;
 use crate::session::helpers::CACHE_MISS_SIDE_MODEL;
 
@@ -106,6 +107,7 @@ impl SessionActor {
         }
         let model = config.model.clone();
         let reasoning_effort = config.reasoning_effort;
+        let request_id = format!("xai-turn-summary-{}", uuid::Uuid::new_v4());
         let client = match xai_grok_sampler::SamplingClient::new(config) {
             Ok(c) => c,
             Err(e) => {
@@ -118,10 +120,10 @@ impl SessionActor {
                 ConversationItem::system(turn_summary::TURN_SUMMARY_SYSTEM),
                 ConversationItem::user(turn_summary::turn_summary_user_message(&user_text, &reply)),
             ],
-            model: Some(model),
+            model: Some(model.clone()),
             reasoning_effort,
             x_grok_conv_id: Some(format!("turn-summary-{}", uuid::Uuid::new_v4())),
-            x_grok_req_id: Some(format!("xai-turn-summary-{}", uuid::Uuid::new_v4())),
+            x_grok_req_id: Some(request_id.clone()),
             x_grok_session_id: Some(self.session_info.id.to_string()),
             x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
             length_policy: xai_grok_sampling_types::LengthPolicy::Fail,
@@ -147,6 +149,13 @@ impl SessionActor {
                 return;
             }
         };
+        self.log_side_inference_done(
+            SideCallKind::TurnSummary,
+            &model,
+            Some(&request_id),
+            client.api_backend(),
+            response.usage.as_ref(),
+        );
         let summary = turn_summary::clean_turn_summary_text(&response.assistant_text());
         if summary.is_empty() {
             tracing::debug!("turn summary: model returned empty summary");

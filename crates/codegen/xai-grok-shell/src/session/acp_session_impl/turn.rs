@@ -345,7 +345,7 @@ const COLD_CACHE_MIN_PROMPT_TOKENS: u32 = 50_000;
 const COLD_CACHE_MAX_HIT_RATE: f64 = 0.05;
 
 /// Whether this model call looks like a cold cache pool: prompt ≥50k tokens and cached-read <5% of it.
-fn is_cold_cache(prompt_tokens: u32, cached_prompt_tokens: u32) -> bool {
+pub(super) fn is_cold_cache(prompt_tokens: u32, cached_prompt_tokens: u32) -> bool {
     prompt_tokens >= COLD_CACHE_MIN_PROMPT_TOKENS
         && f64::from(cached_prompt_tokens) < COLD_CACHE_MAX_HIT_RATE * f64::from(prompt_tokens)
 }
@@ -3390,10 +3390,14 @@ impl SessionActor {
                 }
                 _ => None,
             };
+            // Read once: both the cache logs and `ModelResponseReceived` report it.
+            let model_id = self.current_model_id().await;
             xai_grok_telemetry::unified_log::info(
                 "shell.turn.inference_done",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({
+                    "channel": "main",
+                    "model": model_id.as_str(),
                     "loop_index": loop_index,
                     "model_elapsed_ms": model_elapsed_ms,
                     "elapsed_since_turn_start_ms": conv_turn_start.elapsed().as_millis() as u64,
@@ -3408,7 +3412,7 @@ impl SessionActor {
                 })),
             );
             // Cache-miss observability (G4 / H3): a large prompt that re-read almost nothing
-            // marks a cold pool; time+prompt_tokens align with AxonHub req / 3055 cold-cache-retry.
+            // marks a cold pool; time + prompt_tokens align with AxonHub req / 3055 cold-cache-retry.
             if let (Some(prompt), Some(cached)) = (prompt_tokens, cached_prompt_tokens)
                 && is_cold_cache(prompt, cached)
             {
@@ -3416,7 +3420,11 @@ impl SessionActor {
                     "shell.cache.cold",
                     Some(self.session_info.id.0.as_ref()),
                     Some(serde_json::json!({
+                        "channel": "main",
+                        "model": model_id.as_str(),
+                        "prompt_cache_key": self.session_info.id.0.as_ref(),
                         "loop_index": loop_index,
+                        "elapsed_since_turn_start_ms": conv_turn_start.elapsed().as_millis() as u64,
                         "prompt": prompt,
                         "cached": cached,
                         "gap_ms_from_prev": last_inference_done_at
@@ -3434,7 +3442,6 @@ impl SessionActor {
             turn_span_totals.record(&tracing::Span::current(), &response);
             let model_duration_ms = model_timer.elapsed().as_millis() as u64;
             {
-                let model_id = self.current_model_id().await;
                 xai_grok_telemetry::session_ctx::log_event(
                     xai_grok_telemetry::events::ModelResponseReceived {
                         model_id,

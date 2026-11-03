@@ -5,6 +5,35 @@ use super::*;
 
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use crate::session::helpers::CACHE_MISS_SIDE_MODEL;
+use xai_grok_sampling_types::TokenUsage;
+
+/// Low-cardinality label for an auxiliary (side-channel) model call.
+/// `shell.side.inference_done` carries it so main and side cache rates stay
+/// separable in session statistics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SideCallKind {
+    Btw,
+    Recap,
+    TitleRefresh,
+    Suggest,
+    TurnSummary,
+    MemoryFlush,
+    Dream,
+}
+
+impl SideCallKind {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Btw => "btw",
+            Self::Recap => "recap",
+            Self::TitleRefresh => "title_refresh",
+            Self::Suggest => "suggest",
+            Self::TurnSummary => "turn_summary",
+            Self::MemoryFlush => "memory_flush",
+            Self::Dream => "dream",
+        }
+    }
+}
 
 #[derive(Debug, PartialEq)]
 struct PromptCacheUsage {
@@ -40,28 +69,71 @@ impl From<&xai_grok_sampling_types::TokenUsage> for PromptCacheUsage {
     }
 }
 
-/// Logs the provider-reported prompt cache buckets for one auxiliary call.
-pub(crate) fn log_prompt_cache_usage(
-    call: &str,
-    backend: crate::sampling::ApiBackend,
-    response: &xai_grok_sampling_types::ConversationResponse,
-) {
-    let Some(usage) = response.usage.as_ref() else {
-        return;
-    };
-    let usage = PromptCacheUsage::from(usage);
-    tracing::info!(
-        call,
-        backend = ?backend,
-        prompt_tokens = usage.prompt_tokens,
-        cached_prompt_tokens = usage.cached_prompt_tokens,
-        cache_creation_prompt_tokens = usage.cache_creation_prompt_tokens,
-        uncached_prompt_tokens = usage.uncached_prompt_tokens,
-        cache_read_rate = usage.cache_read_rate,
-        cache_write_rate = usage.cache_write_rate,
-        cache_key_forwarded = backend.forwards_prompt_cache_key(),
-        "auxiliary call prompt cache usage"
-    );
+/// Side-channel usage logging shared by recap, title, summary, suggest, flush and dream.
+impl SessionActor {
+    /// Logs one auxiliary call's usage under the side channel.
+    /// `shell.side.inference_done` is the side-channel counterpart of
+    /// `shell.turn.inference_done`; `shell.cache.cold` marks the same
+    /// large-prompt/zero-hit condition so main and side cold events can be
+    /// aligned with AxonHub requests and 3055 `cold-cache-retry` by timestamp
+    /// plus prompt tokens.
+    pub(crate) fn log_side_inference_done(
+        &self,
+        kind: SideCallKind,
+        model: &str,
+        req_id: Option<&str>,
+        backend: crate::sampling::ApiBackend,
+        usage: Option<&TokenUsage>,
+    ) {
+        let Some(usage) = usage else {
+            return;
+        };
+        let usage = PromptCacheUsage::from(usage);
+        let session_id = self.session_info.id.0.as_ref();
+        tracing::info!(
+            call = kind.label(),
+            backend = ?backend,
+            prompt_tokens = usage.prompt_tokens,
+            cached_prompt_tokens = usage.cached_prompt_tokens,
+            cache_creation_prompt_tokens = usage.cache_creation_prompt_tokens,
+            uncached_prompt_tokens = usage.uncached_prompt_tokens,
+            cache_read_rate = usage.cache_read_rate,
+            cache_write_rate = usage.cache_write_rate,
+            cache_key_forwarded = backend.forwards_prompt_cache_key(),
+            "auxiliary call prompt cache usage"
+        );
+        xai_grok_telemetry::unified_log::info(
+            "shell.side.inference_done",
+            Some(session_id),
+            Some(serde_json::json!({
+                "channel": "side",
+                "kind": kind.label(),
+                "model": model,
+                "req_id": req_id,
+                "prompt_tokens": usage.prompt_tokens,
+                "cached_prompt_tokens": usage.cached_prompt_tokens,
+                "cache_creation_prompt_tokens": usage.cache_creation_prompt_tokens,
+                "uncached_prompt_tokens": usage.uncached_prompt_tokens,
+                "cache_read_rate": usage.cache_read_rate,
+                "cache_write_rate": usage.cache_write_rate,
+            })),
+        );
+        if super::turn::is_cold_cache(usage.prompt_tokens, usage.cached_prompt_tokens) {
+            xai_grok_telemetry::unified_log::info(
+                "shell.cache.cold",
+                Some(session_id),
+                Some(serde_json::json!({
+                    "channel": "side",
+                    "kind": kind.label(),
+                    "model": model,
+                    "req_id": req_id,
+                    "prompt": usage.prompt_tokens,
+                    "cached": usage.cached_prompt_tokens,
+                    "gap_ms_from_prev": serde_json::Value::Null,
+                })),
+            );
+        }
+    }
 }
 
 /// What differs between the two calls that reuse the parent's prompt cache.

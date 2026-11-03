@@ -1895,6 +1895,23 @@ mod tests {
         );
     }
 
+    /// Context compaction is manual-only (`/compact`). No settings key may
+    /// reintroduce an automatic threshold or trigger.
+    #[test]
+    fn no_automatic_context_compaction_setting_is_registered() {
+        let reg = SettingsRegistry::defaults();
+        let leaked: Vec<_> = reg
+            .all()
+            .iter()
+            .map(|meta| meta.key)
+            .filter(|key| key.contains("auto_compact") || key.contains("compaction_threshold"))
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "context compaction is manual-only; remove the automatic setting(s): {leaked:?}"
+        );
+    }
+
     /// Every static Enum's choice count must stay within `MAX_PICKER_CHOICES`
     /// (product guard; the chooser already scrolls within the viewport).
     #[test]
