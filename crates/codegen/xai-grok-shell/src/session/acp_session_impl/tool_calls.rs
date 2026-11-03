@@ -728,6 +728,11 @@ impl SessionActor {
                     .map(|_| state.turn_cancel.clone()),
             )
         };
+        // Publish this turn's token for the ACP agent's direct cancel path, so
+        // an Esc can trip it even while the command loop is busy.
+        if let Some(token) = turn_cancel.as_ref() {
+            self.cancel_slot.install(token.clone());
+        }
         let session_id: Arc<str> = Arc::from(&*self.session_info.id.0);
         let session_cwd = self.session_info.cwd.clone();
         let turn = i64::try_from(self.current_turn_number.get()).ok();

@@ -158,6 +158,7 @@ pub(super) async fn create_test_actor_with_memory(
         attribution_callback: None,
         auth_manager: None,
         is_chat_kind: false,
+        cancel_slot: Default::default(),
         state,
         notifications: NotificationSender::for_tests(
             GatewaySender::new(gateway_tx),

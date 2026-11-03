@@ -777,6 +777,9 @@ pub(crate) struct SessionActor {
     /// Chat-kind ACU/list sources product REST skills, never Build disk skills.
     pub(crate) is_chat_kind: bool,
     pub(crate) state: TokioMutex<State>,
+    /// Direct cooperative-cancel slot shared with the ACP agent; see
+    /// [`CancelSlot`](super::handle::CancelSlot).
+    pub(crate) cancel_slot: super::handle::CancelSlot,
     /// Notification transport: gateway, persistence channel, replay buffer.
     pub(crate) notifications: NotificationSender,
     pub(crate) permissions: PermissionHandle,
