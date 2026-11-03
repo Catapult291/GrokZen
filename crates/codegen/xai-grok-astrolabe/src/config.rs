@@ -139,9 +139,10 @@ pub struct AstrolabeToolsetConfig {
     ///
     /// `"session"` (index cache under the session directory, repository left
     /// untouched) is accepted but falls back to `"none"` with a warning: the
-    /// vendored Astrolabe 0.17.2 has no `store_dir` parameter. Track the
-    /// upstream knob in `astrolabe-open-items.md` item 6; do not patch the
-    /// store path locally.
+    /// vendored Astrolabe has no `store_dir` parameter (tracked through
+    /// upstream v0.17.7, 2026-11-02; `astrolabe_core::index::store_path` is
+    /// always `<root>/.astrolabe/index.redb`). Track the upstream knob in
+    /// `astrolabe-open-items.md` item 6; do not patch the store path locally.
     pub persist: String,
     /// Default `.gitignore` policy for the index. The session's
     /// `RespectGitignore` resource wins when present; this value is the
@@ -440,8 +441,8 @@ prewarm = true
         let cfg = AstrolabeConfig::from_toolset(&toolset);
         assert_eq!(cfg.mode, AstrolabeMode::Off);
         assert_eq!(cfg.index_root, IndexRoot::Git);
-        // `session` needs an upstream store_dir; memory-only is the fallback
-        // so the repository is left untouched.
+        // `session` needs an upstream store_dir (absent through v0.17.7);
+        // memory-only is the fallback so the repository is left untouched.
         assert_eq!(cfg.persist, IndexPersist::None);
         assert_eq!(cfg.lsp_fallback, LspFallback::Grok);
     }
