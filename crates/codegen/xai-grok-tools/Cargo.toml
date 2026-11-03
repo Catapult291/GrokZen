@@ -20,6 +20,7 @@ xai-grok-astrolabe = { workspace = true }
 xai-grok-auth = { workspace = true }
 xai-grok-codemode = { path = "../xai-grok-codemode" }
 xai-grok-config = { path = "../xai-grok-config" }
+xai-grok-telemetry = { workspace = true }
 xai-grok-permission-rules = { workspace = true }
 xai-grok-extra-ca = { workspace = true }
 xai-grok-feedback = { workspace = true }
