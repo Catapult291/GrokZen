@@ -24,6 +24,10 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
+
+/// Cross-cutting reminders are opportunistic: a wedged terminal actor or
+/// subagent coordinator must never extend a tool call indefinitely.
+const REMINDER_COLLECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 /// Process-global registry of external "tool packs" — functions that contribute additional tool registrations into every
 /// [`ToolRegistryBuilder::new`]. This inverts the dependency for harness code that must live outside this crate: instead of `xai-grok-tools`
 /// referencing an out-of-tree tool pack, the pack calls [`register_tool_pack`] at startup and registers itself here.
@@ -2012,14 +2016,29 @@ impl FinalizedToolset {
                 .is_none_or(|e| e.0);
         }
         let reminders = if reminders_enabled {
-            let mut r = Vec::new();
-            for reminder in &self.reminders {
-                let extra = reminder
-                    .collect_reminders(self.resources.clone(), &output)
-                    .await;
-                r.extend(extra);
+            // A wedged terminal actor or subagent coordinator must not hold the
+            // tool result (and with it the turn) open: completion reminders are
+            // opportunistic, so degrade to none rather than block.
+            let collect = async {
+                let mut r = Vec::new();
+                for reminder in &self.reminders {
+                    let extra = reminder
+                        .collect_reminders(self.resources.clone(), &output)
+                        .await;
+                    r.extend(extra);
+                }
+                r
+            };
+            match tokio::time::timeout(REMINDER_COLLECT_TIMEOUT, collect).await {
+                Ok(reminders) => reminders,
+                Err(_) => {
+                    tracing::warn!(
+                        timeout_ms = REMINDER_COLLECT_TIMEOUT.as_millis() as u64,
+                        "tool.reminder_collect_timeout"
+                    );
+                    Vec::new()
+                }
             }
-            r
         } else {
             Vec::new()
         };

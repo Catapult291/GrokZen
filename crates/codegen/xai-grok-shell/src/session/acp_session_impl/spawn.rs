@@ -70,7 +70,7 @@ fn drop_cli_catchall_allows(
 /// Only caps the blocking pool; pre-warming is reserved for process-lifetime runtimes (`xai_tty_utils::runtime`).
 pub(crate) fn build_session_runtime() -> std::io::Result<tokio::runtime::Runtime> {
     let mut builder = tokio::runtime::Builder::new_current_thread();
-    xai_tty_utils::runtime::apply_blocking_pool(builder.enable_all()).build()
+    xai_tty_utils::runtime::apply_session_blocking_pool(builder.enable_all()).build()
 }
 fn configured_memory_retrieval_mode(
     config: Option<&crate::config::MemoryConfig>,
@@ -1799,6 +1799,7 @@ pub(crate) async fn spawn_session_actor(
         auth_manager,
         is_chat_kind,
         state,
+        cancel_slot: Default::default(),
         notifications: NotificationSender {
             gateway: gateway.clone(),
             gateway_enabled: gateway_enabled.clone(),
@@ -2392,6 +2393,7 @@ pub(crate) async fn spawn_session_actor(
             xai_grok_telemetry::session_ctx::log_event_dual(telemetry_enabled, ev);
         });
     }
+    let cancel_slot_for_handle = session.cancel_slot.clone();
     let hosting = SESSIONS_ACTIVE.enter();
     tokio::task::spawn_local(async move {
         let _hosting = hosting;
@@ -2417,6 +2419,7 @@ pub(crate) async fn spawn_session_actor(
     let handle = SessionHandle {
         cmd_tx,
         persistence_tx: persistence.tx.clone(),
+        cancel_slot: cancel_slot_for_handle,
         current_prompt_id,
         registry_write_order: Default::default(),
         pending_interactions,

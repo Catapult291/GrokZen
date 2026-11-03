@@ -9,6 +9,33 @@ use tokio::sync::{mpsc, oneshot};
 use xai_file_utils::queue::UploadQueue;
 use xai_grok_sampling_types::ReasoningEffort;
 use xai_hunk_tracker::HunkTrackerHandle;
+
+/// Per-turn cooperative-cancellation token, shared with the ACP agent.
+///
+/// The session command loop also cancels [`State::turn_cancel`](crate::session::State),
+/// but a stalled loop must not delay the cancel: the agent trips this slot
+/// directly, so a tool future observing the token can return without waiting
+/// for the loop to process `SessionCommand::Cancel`.
+#[derive(Clone, Default)]
+pub struct CancelSlot(
+    std::sync::Arc<parking_lot::Mutex<Option<tokio_util::sync::CancellationToken>>>,
+);
+
+impl CancelSlot {
+    /// Install the token for the turn that is about to dispatch tools.
+    pub(crate) fn install(&self, token: tokio_util::sync::CancellationToken) {
+        *self.0.lock() = Some(token);
+    }
+
+    /// Cancel the installed token. Returns whether a turn token was present.
+    pub(crate) fn cancel_current(&self) -> bool {
+        let guard = self.0.lock();
+        guard.as_ref().is_some_and(|token| {
+            token.cancel();
+            true
+        })
+    }
+}
 /// Coarse lifecycle state of a session as known to the leader/agent.
 /// A grok session is a resumable log on disk with no terminal status field of its own, so "liveness" is residency plus turn state, not a pid.
 /// The agent's join-handle supervisor tracks this per session so a panicked actor is demoted to `Dormant` instead of lingering in the roster.
@@ -53,6 +80,9 @@ impl Drop for WorkGuard {
 pub struct SessionHandle {
     pub cmd_tx: mpsc::UnboundedSender<SessionCommand>,
     pub(crate) persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
+    /// Shared with the actor so a cancel can trip the active turn's token
+    /// without waiting for the command loop.
+    pub(crate) cancel_slot: CancelSlot,
     /// Shared with the actor so external cancellation can target subagents launched by the active turn only.
     pub current_prompt_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// Shared `Arc` with the actor (insert on issue, remove on resolve); never persisted.

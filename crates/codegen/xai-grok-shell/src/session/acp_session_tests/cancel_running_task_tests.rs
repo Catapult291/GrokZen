@@ -113,6 +113,7 @@ fn persist_ack_waits_for_disk_flush_before_success() {
                 attribution_callback: None,
                 auth_manager: None,
                 is_chat_kind: false,
+                cancel_slot: Default::default(),
                 state: TokioMutex::new(State {
                     running_task: None,
                     turn_cancel: tokio_util::sync::CancellationToken::new(),
@@ -655,6 +656,7 @@ fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history() {
                 attribution_callback: None,
                 auth_manager: None,
                 is_chat_kind: false,
+                cancel_slot: Default::default(),
                 state: TokioMutex::new(State {
                     running_task: None,
                     turn_cancel: tokio_util::sync::CancellationToken::new(),
@@ -999,6 +1001,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 attribution_callback: None,
                 auth_manager: None,
                 is_chat_kind: false,
+                cancel_slot: Default::default(),
                 state,
                 notifications: NotificationSender::for_tests(
                     GatewaySender::new(gateway_tx),
@@ -2573,6 +2576,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 attribution_callback: None,
                 auth_manager: None,
                 is_chat_kind: false,
+                cancel_slot: Default::default(),
                 state,
                 notifications: NotificationSender::for_tests(
                     GatewaySender::new(gateway_tx),

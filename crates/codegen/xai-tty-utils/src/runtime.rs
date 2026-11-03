@@ -31,6 +31,13 @@ pub const MAX_WORKER_THREADS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 /// Maximum Tokio blocking threads per runtime. Tokio's default is 512.
 pub const MAX_BLOCKING_THREADS: usize = 16;
 
+/// Per-session runtimes host the terminal actor, and tokio's Windows process
+/// pipes put every outstanding stdout/stderr read on the blocking pool (two
+/// threads per live child) alongside `tokio::fs`. A 16-thread pool starves
+/// after a handful of long-lived commands, so session runtimes get headroom;
+/// threads are still created lazily and kept only while needed.
+pub const SESSION_MAX_BLOCKING_THREADS: usize = 64;
+
 /// Tokio 1.52's condvar uses `Instant::now().checked_add(timeout)`; overflow is `None` (wait forever).
 pub const BLOCKING_THREAD_KEEP_ALIVE: Duration = Duration::MAX;
 
@@ -50,6 +57,17 @@ pub fn capped_worker_threads() -> NonZeroUsize {
 pub fn apply_blocking_pool(builder: &mut tokio::runtime::Builder) -> &mut tokio::runtime::Builder {
     builder
         .max_blocking_threads(MAX_BLOCKING_THREADS)
+        .thread_keep_alive(BLOCKING_THREAD_KEEP_ALIVE)
+}
+
+/// [`apply_blocking_pool`] with the larger per-session cap. Session runtimes
+/// are short-lived and host the terminal actor's pipe reads, so they need
+/// more headroom than process-lifetime service runtimes.
+pub fn apply_session_blocking_pool(
+    builder: &mut tokio::runtime::Builder,
+) -> &mut tokio::runtime::Builder {
+    builder
+        .max_blocking_threads(SESSION_MAX_BLOCKING_THREADS)
         .thread_keep_alive(BLOCKING_THREAD_KEEP_ALIVE)
 }
 
