@@ -1,5 +1,6 @@
 //! Memory concern for `SessionActor`: memory flush, the dream pipeline, memory tool registration, and note rewriting.
 
+use super::side_call::SideCallKind;
 use super::*;
 use xai_grok_telemetry::session_end::{self, Phase};
 
@@ -525,14 +526,15 @@ impl SessionActor {
             (client, model)
         };
         let session_id = self.session_info.id.to_string();
+        let req_id = format!("xai-dream-{}", uuid::Uuid::new_v4());
         let request = ConversationRequest {
             items: vec![
                 ConversationItem::system(crate::session::memory::dream::DREAM_SYSTEM_PROMPT),
                 ConversationItem::user(user_message),
             ],
-            model: Some(model),
+            model: Some(model.clone()),
             x_grok_conv_id: Some(format!("dream-{}", uuid::Uuid::new_v4())),
-            x_grok_req_id: Some(format!("xai-dream-{}", uuid::Uuid::new_v4())),
+            x_grok_req_id: Some(req_id.clone()),
             x_grok_session_id: Some(session_id),
             x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
             ..Default::default()
@@ -543,6 +545,13 @@ impl SessionActor {
             .map_err(|e| {
                 acp::Error::internal_error().data(format!("dream model call failed: {e}"))
             })?;
+        self.log_side_inference_done(
+            SideCallKind::Dream,
+            &model,
+            Some(&req_id),
+            sampling_client.api_backend(),
+            response.usage.as_ref(),
+        );
         Ok(response.assistant_text())
     }
 
@@ -668,11 +677,14 @@ impl SessionActor {
                 "MEMORY_FLUSH: using model={model}"
             );
             let session_id = self.session_info.id.to_string();
+            let req_id = format!("xai-flush-{}", uuid::Uuid::new_v4());
+            let model_for_log = model.clone();
+            let backend = sampling_client.api_backend();
             let request = ConversationRequest {
                 items,
                 model: Some(model),
                 x_grok_conv_id: Some(format!("flush-{}", uuid::Uuid::new_v4())),
-                x_grok_req_id: Some(format!("xai-flush-{}", uuid::Uuid::new_v4())),
+                x_grok_req_id: Some(req_id.clone()),
                 x_grok_session_id: Some(session_id.clone()),
                 x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
                 ..Default::default()
@@ -684,7 +696,7 @@ impl SessionActor {
                     .conversation_collect(request)
                     .await
                     .map_err(|e| format!("flush model call failed: {e}"))?;
-                Ok::<_, String>(response.assistant_text())
+                Ok::<_, String>((response.assistant_text(), response.usage))
             });
             // Abort the spawned task if this future is dropped (session cancellation), preventing orphan HTTP streams
             struct AbortOnDrop(tokio::task::AbortHandle);
@@ -694,19 +706,27 @@ impl SessionActor {
                 }
             }
             let _guard = AbortOnDrop(handle.abort_handle());
-            handle
+            let (response_text, usage) = handle
                 .await
                 .map_err(|e| {
                     acp::Error::internal_error()
                         .data(format!("flush stream task panicked: {e}"))
                 })?
-                .map_err(|e| acp::Error::internal_error().data(e))
+                .map_err(|e| acp::Error::internal_error().data(e))?;
+            self.log_side_inference_done(
+                SideCallKind::MemoryFlush,
+                &model_for_log,
+                Some(&req_id),
+                backend,
+                usage.as_ref(),
+            );
+            Ok::<_, acp::Error>((response_text, usage))
         }
         .await;
 
         // (outcome_string, response_length, accepted_length, was_truncated, written_path)
         let (outcome, response_len, accepted_len, was_truncated, flush_path) = match result {
-            Ok(response_text) => {
+            Ok((response_text, _usage)) => {
                 let resp_len = response_text.len();
                 match process_flush_response(&response_text, &self.memory.flush_config) {
                     FlushResult::NothingToStore => {

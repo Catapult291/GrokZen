@@ -8,7 +8,7 @@
 
 use super::*;
 
-use super::side_call::AuxCall;
+use super::side_call::{AuxCall, SideCallKind};
 use crate::session::helpers::{
     CACHE_MISS_SIDE_MODEL as TITLE_REFRESH_SIDE_MODEL, session_recap, session_summary,
 };
@@ -216,6 +216,9 @@ impl SessionActor {
         // The model then can't spend the call on a tool invocation that would leave empty text and waste the attempt
         let conv_id = format!("title-refresh-{}", uuid::Uuid::new_v4());
         let req_id = format!("xai-title-refresh-{}", uuid::Uuid::new_v4());
+        // Kept for usage logging; the request below takes ownership of the originals.
+        let model_for_log = model.clone();
+        let req_id_for_log = req_id.clone();
         let request = if shared_parent_prefix {
             // Parent path keeps the shared prompt-cache prefix for the common same-model case.
             let mut request = self.parent_cached_request(AuxCall {
@@ -268,7 +271,13 @@ impl SessionActor {
                 return None;
             }
         };
-        super::side_call::log_prompt_cache_usage("title_refresh", client.api_backend(), &response);
+        self.log_side_inference_done(
+            SideCallKind::TitleRefresh,
+            &model_for_log,
+            Some(&req_id_for_log),
+            client.api_backend(),
+            response.usage.as_ref(),
+        );
         let title = session_summary::clean_title_text(&response.assistant_text());
         if title.is_empty() {
             tracing::debug!("title refresh: model returned empty title");
