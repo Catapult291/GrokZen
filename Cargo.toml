@@ -412,7 +412,10 @@ zip = "9.0.5"
 zstd = "0.13"
 
 [profile.release]
-incremental = true
+# An interrupted build left stale incremental codegen behind -- LNK2019 on
+# `.llvm.<hash>` symbols that `cargo clean -p` could not repair. Keep release
+# non-incremental so a killed build cannot poison the cache again.
+incremental = false
 panic = "abort"
 
 # Hardened release profile for shipping to end users (alpha + stable).
