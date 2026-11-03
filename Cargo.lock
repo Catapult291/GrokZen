@@ -15626,6 +15626,7 @@ dependencies = [
  "xai-grok-otel",
  "xai-grok-permission-rules",
  "xai-grok-sandbox",
+ "xai-grok-telemetry",
  "xai-grok-test-support",
  "xai-grok-tools-api",
  "xai-grok-version",
