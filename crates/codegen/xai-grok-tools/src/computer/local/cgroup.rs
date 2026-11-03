@@ -375,6 +375,61 @@ mod linux {
             self._handle.abort();
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::path::PathBuf;
+        use std::time::Duration;
+
+        /// A cgroup-shaped directory: the monitor only needs `memory.events`
+        /// and `memory.current` to exist and be watchable.
+        fn scratch_cgroup() -> PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "grok-cgroup-monitor-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("memory.events"), "low 0\nhigh 0\nmax 0\noom 0\n").unwrap();
+            std::fs::write(dir.join("memory.current"), "1048576\n").unwrap();
+            dir
+        }
+
+        /// The terminal actor starts this monitor on a multi-thread runtime,
+        /// where `spawn_local` panics. Start it exactly as the actor does
+        /// (`use_spawn_local = false`) and prove the inotify loop delivers a
+        /// high-memory event.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn linux_memory_monitor_starts_off_a_local_set() {
+            let dir = scratch_cgroup();
+            let mut monitor = MemoryHighMonitor::start(dir.clone(), 1024 * 1024, false)
+                .await
+                .expect("monitor must start on a multi-thread runtime");
+
+            // Let the loop read the baseline counter before bumping it.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            std::fs::write(dir.join("memory.events"), "low 0\nhigh 1\nmax 0\noom 0\n").unwrap();
+
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let event = loop {
+                if let Some(event) = monitor.try_recv() {
+                    break event;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "memory.events change did not reach the monitor"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            };
+            assert_eq!(event.memory_high_threshold, 1024 * 1024);
+            assert_eq!(event.memory_current, 1024 * 1024);
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
 }
 
 // ============================================================================
