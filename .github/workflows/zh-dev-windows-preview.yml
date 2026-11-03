@@ -825,6 +825,13 @@ jobs:
           version: ${{ inputs.version }}
           release_build: 'false'
 
+      - name: Linux terminal actor 构造测试
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --frozen -j "$CARGO_BUILD_JOBS" \
+            -p xai-grok-tools --lib -- off_a_local_set --nocapture
+
   macos-arm-preview:
     name: macOS ARM64 预览版
     runs-on: macos-15
