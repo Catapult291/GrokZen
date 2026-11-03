@@ -560,20 +560,14 @@ impl SessionActor {
 
         if kill_background_tasks {
             self.log_cancel_step("kill_background_tasks", "start");
-            if self.startup_hints.is_subagent {
-                // Subagent teardown: only kill tasks owned by this session, not the parent's or sibling's tasks on the shared backend
-                self.agent
-                    .borrow()
-                    .tool_bridge()
-                    .kill_all_background_tasks_by_owner(&self.session_info.id.0)
-                    .await;
-            } else {
-                self.agent
-                    .borrow()
-                    .tool_bridge()
-                    .kill_all_background_tasks()
-                    .await;
-            }
+            // Owner-scoped for every session: the terminal backend is shared with
+            // sibling sessions and other instances, so a global sweep also kills
+            // their work (for example a long release build).
+            self.agent
+                .borrow()
+                .tool_bridge()
+                .kill_all_background_tasks_by_owner(&self.session_info.id.0)
+                .await;
             self.log_cancel_step("kill_background_tasks", "done");
         }
 
@@ -1145,19 +1139,13 @@ impl SessionActor {
         const KILL_FOREGROUND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
         self.log_cancel_step("kill_foreground_commands", "start");
         let killed = tokio::time::timeout(KILL_FOREGROUND_TIMEOUT, async {
-            if self.startup_hints.is_subagent {
-                self.agent
-                    .borrow()
-                    .tool_bridge()
-                    .kill_foreground_commands_by_owner(&self.session_info.id.0)
-                    .await;
-            } else {
-                self.agent
-                    .borrow()
-                    .tool_bridge()
-                    .kill_foreground_commands()
-                    .await;
-            }
+            // Owner-scoped like the background sweep: the backend is shared with
+            // sibling sessions and other instances.
+            self.agent
+                .borrow()
+                .tool_bridge()
+                .kill_foreground_commands_by_owner(&self.session_info.id.0)
+                .await;
         })
         .await;
         match killed {
