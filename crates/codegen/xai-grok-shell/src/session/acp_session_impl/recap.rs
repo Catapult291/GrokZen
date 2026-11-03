@@ -3,7 +3,7 @@
 //! Shared cache-aligned request setup lives in [`super::side_call`].
 //! Per-turn dashboard summary lifecycle lives in [`super::turn_summary`].
 
-use super::side_call::{AuxCall, log_prompt_cache_usage};
+use super::side_call::{AuxCall, SideCallKind};
 use super::*;
 
 use agent_client_protocol as acp;
@@ -162,25 +162,37 @@ impl SessionActor {
 
         // conversation_collect is one-shot (no sampler-actor retry)
         // /btw adds its own bounded transient-failure retry (the policy and predicate above)
+        // Keep the request id of the attempt that actually returned so usage logs stay attributable.
+        let last_req_id = std::cell::RefCell::new(base_request.x_grok_req_id.clone());
         use backon::Retryable as _;
         let attempts = std::cell::Cell::new(1u32);
-        let result =
-            (|| sampling_client.conversation_collect(build_side_question_attempt(&base_request)))
-                .retry(side_question_retry_policy())
-                .when(should_retry_side_question)
-                .notify(|e: &SamplingError, backoff: std::time::Duration| {
-                    attempts.set(attempts.get() + 1);
-                    tracing::warn!(
-                        backoff_ms = backoff.as_millis() as u64,
-                        error = %e,
-                        "side question transient failure; retrying"
-                    );
-                })
-                .await;
+        let result = (|| {
+            let request = build_side_question_attempt(&base_request);
+            *last_req_id.borrow_mut() = request.x_grok_req_id.clone();
+            sampling_client.conversation_collect(request)
+        })
+        .retry(side_question_retry_policy())
+        .when(should_retry_side_question)
+        .notify(|e: &SamplingError, backoff: std::time::Duration| {
+            attempts.set(attempts.get() + 1);
+            tracing::warn!(
+                backoff_ms = backoff.as_millis() as u64,
+                error = %e,
+                "side question transient failure; retrying"
+            );
+        })
+        .await;
 
         match result {
             Ok(response) => {
-                log_prompt_cache_usage("btw", sampling_client.api_backend(), &response);
+                let req_id = last_req_id.borrow().clone();
+                self.log_side_inference_done(
+                    SideCallKind::Btw,
+                    &model,
+                    req_id.as_deref(),
+                    sampling_client.api_backend(),
+                    response.usage.as_ref(),
+                );
                 let content = response.assistant_text();
                 if content.is_empty() {
                     let err = SideQuestionError::EmptyResponse;
@@ -406,6 +418,13 @@ impl SessionActor {
             }
         };
 
+        self.log_side_inference_done(
+            SideCallKind::Recap,
+            &model,
+            Some(&x_grok_req_id),
+            client.api_backend(),
+            response.usage.as_ref(),
+        );
         let raw_response = response.assistant_text();
         let summary = session_recap::clean_recap_text(&raw_response);
         if summary.is_empty() {
@@ -862,6 +881,13 @@ impl SessionActor {
                 return None;
             }
         };
+        self.log_side_inference_done(
+            SideCallKind::Suggest,
+            &request_model,
+            Some(&request_id),
+            sampling_client.api_backend(),
+            response.usage.as_ref(),
+        );
         let latency_ms = Some(started.elapsed().as_millis() as u64);
 
         let raw = response.assistant_text();

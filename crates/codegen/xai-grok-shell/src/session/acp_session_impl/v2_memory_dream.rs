@@ -1,5 +1,6 @@
 //! Restricted memory-v2 consolidation runner and model-plan decoder.
 
+use super::side_call::SideCallKind;
 use super::*;
 
 const V2_DREAM_MODEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
@@ -1193,6 +1194,7 @@ impl SessionActor {
         };
         let (model, reasoning_effort) =
             super::memory_capture::resolve_memory_model_and_effort(&self.models_manager, model);
+        let req_id = format!("xai-dream-v2-{}", uuid::Uuid::new_v4());
         let request = ConversationRequest {
             items: vec![
                 ConversationItem::system(V2_DREAM_SYSTEM_PROMPT),
@@ -1203,7 +1205,7 @@ impl SessionActor {
             reasoning_effort,
             json_schema: Some(dream_plan_schema()),
             x_grok_conv_id: Some(format!("dream-v2-{}", uuid::Uuid::new_v4())),
-            x_grok_req_id: Some(format!("xai-dream-v2-{}", uuid::Uuid::new_v4())),
+            x_grok_req_id: Some(req_id.clone()),
             x_grok_session_id: Some(self.session_info.id.to_string()),
             x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
             ..Default::default()
@@ -1220,6 +1222,13 @@ impl SessionActor {
             usage: xai_grok_telemetry::memory_telemetry::MemoryV2ModelUsage::default(),
         })?
         .map(|response| {
+            self.log_side_inference_done(
+                SideCallKind::Dream,
+                &model,
+                Some(&req_id),
+                sampling_client.api_backend(),
+                response.usage.as_ref(),
+            );
             let usage =
                 crate::session::memory_observation::memory_v2_model_usage(&model, &response);
             (response.assistant_text(), usage)

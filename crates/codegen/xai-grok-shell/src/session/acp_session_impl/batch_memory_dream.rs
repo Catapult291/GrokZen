@@ -4,6 +4,7 @@ use crate::extensions::memory::{MemoryDreamDisposition, MemoryDreamResponse};
 use crate::extensions::notification::SessionUpdate;
 use crate::session::SessionActor;
 use crate::session::acp_session::memory_capture::resolve_memory_model_and_effort;
+use crate::session::acp_session::side_call::SideCallKind;
 use crate::session::batch_dream::{
     BatchDreamLimit, BatchDreamOptions, BatchDreamReport, BatchDreamStop, ModelReply,
     run_batch_dream,
@@ -131,11 +132,19 @@ impl SessionActor {
                         attempt_request.x_grok_req_id =
                             Some(format!("xai-dream-v2-batch-{}", uuid::Uuid::new_v4()));
                     }
+                    let attempt_req_id = attempt_request.x_grok_req_id.clone();
                     match sampling_client
                         .conversation_collect_with_idle_timeout(attempt_request, MODEL_IDLE_TIMEOUT)
                         .await
                     {
                         Ok(response) => {
+                            self.log_side_inference_done(
+                                SideCallKind::Dream,
+                                model.as_str(),
+                                attempt_req_id.as_deref(),
+                                sampling_client.api_backend(),
+                                response.usage.as_ref(),
+                            );
                             let truncated = response.stop_reason == Some(StopReason::Length);
                             break (Some(response), truncated);
                         }
