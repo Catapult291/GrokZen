@@ -224,6 +224,7 @@ fn wedged_child_handle() -> (
         context_window_selection: Default::default(),
         cmd_tx,
         persistence_tx,
+        cancel_slot: Default::default(),
         registry_write_order: Default::default(),
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
         active_work: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),

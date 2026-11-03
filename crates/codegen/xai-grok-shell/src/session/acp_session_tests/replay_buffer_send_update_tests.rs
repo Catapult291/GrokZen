@@ -104,6 +104,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         attribution_callback: None,
         auth_manager: None,
         is_chat_kind: false,
+        cancel_slot: Default::default(),
         state,
         notifications: NotificationSender {
             gateway,

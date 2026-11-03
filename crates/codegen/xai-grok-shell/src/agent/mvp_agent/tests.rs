@@ -1269,6 +1269,7 @@ pub(super) fn make_test_handle(
         context_window_selection: Default::default(),
         cmd_tx,
         persistence_tx,
+        cancel_slot: Default::default(),
         registry_write_order: Default::default(),
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(

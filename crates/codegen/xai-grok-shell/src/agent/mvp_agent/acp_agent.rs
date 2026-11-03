@@ -1897,6 +1897,20 @@ impl acp::Agent for MvpAgent {
             ),
         );
         if let Some(handle) = handle {
+            // Trip the active turn's token before the command loop is asked to
+            // do anything: bookkeeping can queue behind a busy loop, but the
+            // tool future's cancellation must not wait for it.
+            let direct_cancel = handle.cancel_slot.cancel_current();
+            xai_grok_telemetry::unified_log::info(
+                "shell.cancel.direct",
+                Some(args.session_id.0.as_ref()),
+                Some(serde_json::json!({
+                    "had_token": direct_cancel,
+                    "trigger": cancel_trigger
+                        .as_ref()
+                        .map(crate::session::CancelTrigger::as_str),
+                })),
+            );
             let cancel_subagents = args
                 .meta
                 .as_ref()
