@@ -2961,6 +2961,29 @@ mod tests {
         assert!(client.default_headers.contains_key(USER_AGENT));
     }
 
+    // Automatic compaction is gone: the per-model `compaction_at_tokens` value stays parsed for
+    // compatibility, but no request may carry `x-compaction-at`.
+    #[test]
+    fn compaction_at_tokens_never_emits_the_auto_compaction_header() {
+        use xai_grok_sampling_types::{CompactionAtTokens, CompactionsRemaining};
+        let cfg = SamplerConfig {
+            compaction_at_tokens: Some(CompactionAtTokens::Fixed(100_000)),
+            compactions_remaining: Some(CompactionsRemaining::Fixed(1)),
+            ..minimal_config()
+        };
+        let client = SamplingClient::new(cfg).expect("build");
+        let SentRequest { builder, .. } = client.post("http://localhost/test");
+        let req = builder.build().expect("build request");
+        assert!(
+            req.headers().contains_key(USER_AGENT),
+            "sanity: this is the built request's header map"
+        );
+        assert!(
+            req.headers().get("x-compaction-at").is_none(),
+            "a request must never advertise an automatic compaction point"
+        );
+    }
+
     // Regression: a past change dropped HeaderInjector (traceparent) from sampling requests.
     #[test]
     fn header_injector_is_called_in_post() {
