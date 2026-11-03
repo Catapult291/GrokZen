@@ -1967,6 +1967,31 @@ fn user_override_parses_compactions_remaining_from_toml() {
         Some(CompactionsRemaining::Dynamic(true)),
     );
 }
+/// Automatic compaction is gone, so the per-model `compaction_at_tokens` value must stay out of
+/// the request headers even when it is configured. The sampler never derives `x-compaction-at`
+/// from it either (covered by the sampler crate's request-level test).
+#[test]
+fn compaction_at_tokens_never_emits_the_auto_compaction_header() {
+    use xai_grok_sampling_types::CompactionAtTokens;
+    let mut model = test_model_entry(
+        "grok-4.5",
+        "https://api.example.com/v1",
+        Some("sk-test"),
+        None,
+        None,
+    );
+    model.info.compaction_at_tokens = Some(CompactionAtTokens::Enabled(true));
+    let creds = resolve_credentials(&model, None);
+    let config = sampling_config_for_model(&model, creds, None, None, None, None);
+    assert_eq!(
+        config.compaction_at_tokens,
+        Some(CompactionAtTokens::Enabled(true)),
+        "the compatibility field is still carried for parsing, not for sending"
+    );
+    assert!(!config.extra_headers.contains_key("x-compaction-at"));
+    assert!(!config.extra_headers.contains_key("X-compaction-at"));
+    xai_grok_sampler::SamplingClient::new(config).expect("client should build");
+}
 #[test]
 fn compaction_mode_precedence_env_over_config_over_remote_over_default() {
     use xai_chat_state::CompactionMode;
