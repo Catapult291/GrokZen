@@ -36,7 +36,7 @@
   },
   {
     "category": "fixes",
-    "description": "**Astrolabe** — vendored engine upgraded to v0.17.2 with Phase A–E fixes (freshness, LSP unification, multi-session resources, routing and evaluation); upstream v0.17.7 `store_dir` behavior is tracked.",
+    "description": "**Astrolabe** — vendored engine upgraded to v0.17.2 alongside improvements to index freshness, LSP unification, multi-session resources, and search routing/evaluation; upstream v0.17.7 `store_dir` behavior is tracked.",
     "breaking_change": false
   },
   {
