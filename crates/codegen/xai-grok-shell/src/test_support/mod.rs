@@ -24,6 +24,45 @@ fn redirect_unified_log_for_tests() {
     xai_grok_telemetry::unified_log::redirect_to_temp_for_tests();
 }
 
+/// Keep this crate's unit-test binary off the real `~/.grok` unless the caller already chose a
+/// home. Tests that dispatch real tools share session, persistence, hook, and telemetry state
+/// with any live Grok Build instance on the same home; contention there can block a test
+/// indefinitely. Runs pre-main so the value lands before `grok_home()`'s process-wide `OnceLock`
+/// is first read.
+#[ctor::ctor]
+fn isolate_grok_home_for_tests() {
+    if std::env::var_os("GROK_HOME").is_some() {
+        return;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "grok-shell-test-home-{}-{nanos}",
+        std::process::id()
+    ));
+    if std::fs::create_dir_all(&home).is_err() {
+        return;
+    }
+    // SAFETY: constructors run before libtest starts its worker threads.
+    unsafe { std::env::set_var("GROK_HOME", &home) };
+}
+
+#[cfg(test)]
+mod tests {
+    /// Guards the ctor above: if it stops running, unit tests silently go back to sharing the
+    /// developer's live `~/.grok`, where a tool-dispatching test can block indefinitely.
+    #[test]
+    fn unit_test_binary_uses_a_private_grok_home() {
+        assert_ne!(
+            xai_grok_config::grok_home(),
+            xai_grok_config::default_grok_home(),
+            "unit tests are sharing the real ~/.grok; set GROK_HOME for this test run"
+        );
+    }
+}
+
 /// Prepend the hermetic git binary (via `GIT_BIN_PATH`) to `PATH`.
 /// `Command::new("git")` in test helpers then resolves to the Bazel-provided static binary instead of system-installed git.
 /// Safe to call multiple times; only the first call mutates `PATH`.
