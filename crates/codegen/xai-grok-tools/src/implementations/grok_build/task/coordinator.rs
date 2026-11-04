@@ -1042,11 +1042,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             .values()
             .map(|child| &child.request)
             .chain(self.active.values().map(|child| &child.request))
-            .chain(
-                self.queued
-                    .iter()
-                    .map(|queued| queued.request.as_ref()),
-            )
+            .chain(self.queued.iter().map(|queued| queued.request.as_ref()))
             .chain(self.completed.values().map(|child| &child.request))
             .filter(|request| {
                 !request.owner.is_workflow()
@@ -1333,8 +1329,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             // continuation turn, so it stays wake-eligible. Any other cancel
             // path (user/owner stop) still refuses wakes.
             wake_eligible: !explicitly_killed
-                && (!was_cancelled
-                    && !output.result.cancelled
+                && (!was_cancelled && !output.result.cancelled
                     || output.result.stop_reason == xai_tool_types::stop_reason::MAX_TURNS),
             result: output.result.clone(),
         };

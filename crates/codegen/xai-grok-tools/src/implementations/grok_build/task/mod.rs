@@ -32,16 +32,16 @@ use self::backend::SubagentBackendResource;
 use self::types::CurrentPromptIdResource;
 
 use self::types::*;
+use self::types::{
+    ActiveAgentMessageOperation, ActiveAgentMessageOutcome, ActiveAgentMessageRequest,
+    SubagentSnapshotStatus,
+};
 use crate::types::output::ToolOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::{SessionFolder, SharedResources};
 use crate::types::tool::{ToolKind, ToolNamespace};
 use xai_tool_types::{
     SubagentCompletedOutput, SubagentContextMode, SubagentIsolationMode, TaskToolInput,
-};
-use self::types::{
-    ActiveAgentMessageOperation, ActiveAgentMessageOutcome, ActiveAgentMessageRequest,
-    SubagentSnapshotStatus,
 };
 
 pub const TASK_TOOL_NAME: &str = "task";
@@ -474,27 +474,20 @@ impl xai_tool_runtime::Tool for TaskTool {
         // reports "still running" from the child runtime.
         if let Some(resume_id) = resume_from.clone() {
             let query = backend.backend().query(&resume_id, false, None);
-            let snapshot = match tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                query,
-            )
-            .await
-            {
-                Ok(snapshot) => snapshot,
-                Err(_elapsed) => {
-                    tracing::debug!(
-                        resume_from = %resume_id,
-                        "resume running-check query timed out; falling through to resume"
-                    );
-                    None
-                }
-            };
+            let snapshot =
+                match tokio::time::timeout(std::time::Duration::from_secs(2), query).await {
+                    Ok(snapshot) => snapshot,
+                    Err(_elapsed) => {
+                        tracing::debug!(
+                            resume_from = %resume_id,
+                            "resume running-check query timed out; falling through to resume"
+                        );
+                        None
+                    }
+                };
             let still_running = matches!(
                 snapshot.map(|snapshot| snapshot.status),
-                Some(
-                    SubagentSnapshotStatus::Initializing
-                        | SubagentSnapshotStatus::Running { .. }
-                )
+                Some(SubagentSnapshotStatus::Initializing | SubagentSnapshotStatus::Running { .. })
             );
             if still_running {
                 let outcome = backend
@@ -518,17 +511,15 @@ impl xai_tool_runtime::Tool for TaskTool {
                     )
                     .await;
                 return match outcome {
-                    ActiveAgentMessageOutcome::Accepted { message_id } => {
-                        Ok(ToolOutput::Text(
-                            format!(
-                                "Subagent '{resume_id}' is still running; the prompt was queued \
+                    ActiveAgentMessageOutcome::Accepted { message_id } => Ok(ToolOutput::Text(
+                        format!(
+                            "Subagent '{resume_id}' is still running; the prompt was queued \
                                  as a follow-up (message {message_id}) and will run as its next \
                                  turn. Resume with resume_from once it completes instead if a \
                                  separate continuation is needed."
-                            )
-                            .into(),
-                        ))
-                    }
+                        )
+                        .into(),
+                    )),
                     other => Err(xai_tool_runtime::ToolError::custom(
                         "resume_followup_rejected",
                         format!(
@@ -722,7 +713,8 @@ impl xai_tool_runtime::Tool for TaskTool {
         // Fork seeding only applies to a fresh spawn: a resume resolves its
         // own conversation source (transcript copy) and wins, matching the
         // child runtime's fail-closed precedence.
-        let fork_context = input.context == Some(SubagentContextMode::Fork) && resume_from.is_none();
+        let fork_context =
+            input.context == Some(SubagentContextMode::Fork) && resume_from.is_none();
         if input.context == Some(SubagentContextMode::Fork) && resume_from.is_some() {
             tracing::debug!(
                 subagent_id = %id,

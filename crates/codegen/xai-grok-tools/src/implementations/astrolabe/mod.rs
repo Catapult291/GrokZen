@@ -572,7 +572,8 @@ impl xai_tool_runtime::Tool for ResolveContextTool {
         let engine = open_engine(&env).await?;
         let paths = env.paths;
         let deny = env.deny;
-        let out = blocking_lookup(&ctx, move || engine.resolve_context(&paths, &deny, input)).await?;
+        let out =
+            blocking_lookup(&ctx, move || engine.resolve_context(&paths, &deny, input)).await?;
         Ok(match out {
             Some(out) => text_output(out.map_err(engine_error)?.text),
             None => text_output(LOOKUP_CANCELLED.to_string()),
@@ -1353,8 +1354,8 @@ mod tests {
     async fn real_rust_analyzer_answers_references_definition_and_hover() {
         use std::collections::BTreeMap;
 
-        use crate::implementations::lsp::{LspBackendAdapter, LspManager, LspOperation};
         use crate::implementations::lsp::config::LspServerConfig;
+        use crate::implementations::lsp::{LspBackendAdapter, LspManager, LspOperation};
 
         let Some(binary) = stable_rust_analyzer() else {
             eprintln!("no stable-toolchain rust-analyzer; skipping");
@@ -1431,7 +1432,10 @@ mod tests {
             references.contains("src/lib.rs:1 [declaration]"),
             "references: {references}"
         );
-        assert!(references.contains("src/lib.rs:6"), "references: {references}");
+        assert!(
+            references.contains("src/lib.rs:6"),
+            "references: {references}"
+        );
 
         let mut resources = Resources::new();
         resources.insert(Cwd(tmp.path().to_path_buf()));
@@ -1466,12 +1470,7 @@ mod tests {
         let hover = backend
             .dispatch(&LspToolInput {
                 operation: LspOperation::Hover,
-                file_path: Some(
-                    tmp.path()
-                        .join("src/lib.rs")
-                        .to_string_lossy()
-                        .into_owned(),
-                ),
+                file_path: Some(tmp.path().join("src/lib.rs").to_string_lossy().into_owned()),
                 line: Some(5),
                 character: Some(4),
                 query: None,
@@ -1771,18 +1770,17 @@ mod tests {
             "get_languages must name the index-first languages: {}",
             text.text
         );
-        assert!(
-            text.text.contains("goto_definition = go"),
-            "{}",
-            text.text
-        );
+        assert!(text.text.contains("goto_definition = go"), "{}", text.text);
     }
 
     /// Both dead ends of `lsp_fallback = grok` — nothing registered, and a
     /// registered pool that cannot answer — carry the same config pointers.
     #[test]
     fn no_host_lsp_note_names_the_config_and_the_astrolabe_fallback() {
-        for note in [no_host_lsp_note(None), no_host_lsp_note(Some("No LSP server configured"))] {
+        for note in [
+            no_host_lsp_note(None),
+            no_host_lsp_note(Some("No LSP server configured")),
+        ] {
             assert!(note.contains("lsp_fallback = grok"), "{note}");
             assert!(note.contains("~/.grok/lsp.json"), "{note}");
             assert!(note.contains("<cwd>/.grok/lsp.json"), "{note}");
@@ -1800,7 +1798,11 @@ mod tests {
         let setup = crate::implementations::lsp::LSP_SERVER_SETUP;
         assert!(setup.contains("~/.grok/lsp.json"), "{setup}");
         assert!(setup.contains("<cwd>/.grok/lsp.json"), "{setup}");
-        assert!(no_host_lsp_note(None).contains(setup), "{}", no_host_lsp_note(None));
+        assert!(
+            no_host_lsp_note(None).contains(setup),
+            "{}",
+            no_host_lsp_note(None)
+        );
     }
 
     /// `find_symbol` and `resolve_context` hand the turn back when it is
@@ -1814,8 +1816,7 @@ mod tests {
         let mut ctx = crate::types::tool_metadata::test_ctx(resources.into_shared());
         let token = tokio_util::sync::CancellationToken::new();
         token.cancel();
-        ctx.extensions
-            .insert(xai_tool_runtime::Cancellation(token));
+        ctx.extensions.insert(xai_tool_runtime::Cancellation(token));
         let output = xai_tool_runtime::Tool::run(
             &FindSymbolTool,
             ctx,
@@ -1836,8 +1837,7 @@ mod tests {
         let mut ctx = crate::types::tool_metadata::test_ctx(resources.into_shared());
         let token = tokio_util::sync::CancellationToken::new();
         token.cancel();
-        ctx.extensions
-            .insert(xai_tool_runtime::Cancellation(token));
+        ctx.extensions.insert(xai_tool_runtime::Cancellation(token));
         let output = xai_tool_runtime::Tool::run(
             &ResolveContextTool,
             ctx,

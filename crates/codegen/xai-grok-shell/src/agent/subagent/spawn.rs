@@ -342,9 +342,7 @@ fn log_limit_notice(notice: coordinator::SubagentLimitNotice) {
         SubagentLimitDecision::RejectedAtConcurrentLimit { limit } => {
             (SubagentLimitDisposition::Failed, limit as u64)
         }
-        SubagentLimitDecision::RejectedAtTotalAgentsLimit => {
-            (SubagentLimitDisposition::Failed, 0)
-        }
+        SubagentLimitDecision::RejectedAtTotalAgentsLimit => (SubagentLimitDisposition::Failed, 0),
     };
     xai_grok_telemetry::session_ctx::log_event(SubagentLimitHit::session_concurrent(
         notice.parent_session_id,
@@ -456,7 +454,8 @@ impl AutoWakeInputs {
         Self {
             run_in_background: completion.disposition.backgrounded,
             cancelled: completion.result.cancelled,
-            max_turns_partial: completion.result.stop_reason == xai_tool_types::stop_reason::MAX_TURNS,
+            max_turns_partial: completion.result.stop_reason
+                == xai_tool_types::stop_reason::MAX_TURNS,
             auto_wake_enabled: completion.completion_data.auto_wake_enabled,
             block_waited: completion.disposition.waiter_delivered,
             explicitly_killed: completion.disposition.explicitly_killed,
