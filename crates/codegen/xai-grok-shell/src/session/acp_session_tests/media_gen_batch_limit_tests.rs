@@ -18,7 +18,8 @@ fn image_gen_call(id: &str) -> ToolCallResponse {
         kind: "function".to_string(),
         function: crate::sampling::types::ToolCallFunction::new(
             "image_gen",
-            r#"{"prompt":"media-gen-batch-limit test"}"#,
+            // Distinct prompts: identical arguments are same-batch duplicates and get deduped.
+            serde_json::json!({ "prompt": format!("media-gen-batch-limit test {id}") }).to_string(),
         ),
     }
 }

@@ -2062,6 +2062,9 @@ mod session_thread_tests;
 #[path = "acp_session_tests/status_line_payload_tests.rs"]
 mod status_line_payload_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/tool_call_dedup_tests.rs"]
+mod tool_call_dedup_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/tool_call_telemetry_tests.rs"]
 mod tool_call_telemetry_tests;
 #[cfg(test)]
