@@ -19,7 +19,7 @@ fn read_file_call(id: &str, target: &str) -> ToolCallResponse {
     }
 }
 
-fn drain_tool_call_statuses(
+pub(super) fn drain_tool_call_statuses(
     event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
 ) -> Vec<(String, acp::ToolCallStatus)> {
     let mut statuses = Vec::new();

@@ -368,6 +368,7 @@ impl SessionActor {
         let mut final_result: Option<ToolLoop> = None;
         let mut deferred_followups: Vec<ConversationItem> = Vec::new();
         let tool_calls = self.drop_duplicate_tool_calls(tool_calls).await;
+        let tool_calls = self.skip_gated_side_effect_calls(tool_calls).await;
         let tool_calls = self.reject_excess_media_gen_calls(tool_calls).await?;
         if !tool_calls.is_empty() {
             if tool_calls.len() > 1 {
@@ -489,6 +490,93 @@ impl SessionActor {
             crate::extensions::notification::HookAnnotationKind::Note,
             &format!(
                 "已去重 {dropped} 条同轮重复的工具调用（deduped tool_call ×{dropped}: {tools}）"
+            ),
+        )
+        .await;
+        tool_calls
+    }
+    /// Side-effect gate (方法 3): skip an identical call to a side-effect-classified tool while
+    /// the earlier one is executing or shortly after it finished, instead of re-running it.
+    /// Complements the same-batch dedup, which cannot see calls across batches.
+    async fn skip_gated_side_effect_calls(
+        &self,
+        tool_calls: Vec<crate::sampling::types::ToolCallResponse>,
+    ) -> Vec<crate::sampling::types::ToolCallResponse> {
+        let mut gated: Vec<(usize, String, super::side_effect_gate::SkipReason, String)> =
+            Vec::new();
+        for (idx, call) in tool_calls.iter().enumerate() {
+            let Some(class) = super::side_effect_gate::side_effect_class(
+                self.agent
+                    .borrow()
+                    .tool_bridge()
+                    .tool_kind(&call.function.name),
+                &call.function.name,
+            ) else {
+                continue;
+            };
+            if let Some((first_id, reason)) = self
+                .side_effect_gate
+                .check(class, &call.function.name, &call.function.arguments)
+            {
+                gated.push((idx, call.function.name.clone(), reason, first_id));
+            }
+        }
+        if gated.is_empty() {
+            return tool_calls;
+        }
+
+        let mut gated_indices = std::collections::HashSet::with_capacity(gated.len());
+        let mut gated_by_name: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (idx, name, reason, first_id) in &gated {
+            let Some(call) = tool_calls.get(*idx) else {
+                continue;
+            };
+            gated_indices.insert(*idx);
+            *gated_by_name.entry(name.clone()).or_default() += 1;
+            tracing::warn!(
+                session_id = %self.session_info.id.0,
+                tool = %name,
+                call_id = %call.id,
+                duplicate_of = %first_id,
+                ?reason,
+                "side-effect gate skipped duplicate tool call"
+            );
+            self.chat_state_handle
+                .push_tool_result(ConversationItem::tool_result(
+                    call.id.clone(),
+                    format!(
+                        "Duplicate side-effect tool call skipped: `{name}` with identical \
+                         arguments {} as `{first_id}`. This call was not executed.",
+                        reason.description()
+                    ),
+                ));
+        }
+
+        let gated_count = gated.len();
+        let tool_calls: Vec<_> = tool_calls
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, call)| (!gated_indices.contains(&idx)).then_some(call))
+            .collect();
+        let tools = gated_by_name
+            .iter()
+            .map(|(name, count)| format!("{name}×{count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        xai_grok_telemetry::unified_log::warn(
+            "shell.tool_call.side_effect_gated",
+            Some(self.session_info.id.0.as_ref()),
+            Some(serde_json::json!({
+                "skipped": gated_count,
+                "kept": tool_calls.len(),
+                "tools": tools,
+            })),
+        );
+        self.send_hook_annotation_with_kind(
+            crate::extensions::notification::HookAnnotationKind::Note,
+            &format!(
+                "已拦截 {gated_count} 条重复的副作用工具调用（side-effect gate ×{gated_count}: {tools}）"
             ),
         )
         .await;
@@ -895,8 +983,23 @@ impl SessionActor {
                     .and_then(|path| file_locks.get(path).cloned());
                 let tools_execute_span = tracing::Span::current();
                 let turn_cancel = turn_cancel.clone();
+                let side_effect_class = super::side_effect_gate::side_effect_class(
+                    authored_tool_kind,
+                    &prepared.tool_name,
+                );
+                let side_effect_gate = std::sync::Arc::clone(&self.side_effect_gate);
+                let side_effect_arguments = prepared.authored_arguments().to_string();
                 async move {
                     let exec_start = std::time::Instant::now();
+                    // Registered when execution actually starts; dropped at block end so a
+                    // cancelled dispatch cannot leave a stale in-flight entry behind.
+                    let _side_effect_guard = side_effect_class.map(|class| {
+                        side_effect_gate.begin(
+                            &prepared.tool_name,
+                            &side_effect_arguments,
+                            &prepared.call_id,
+                        )
+                    });
                     let tool_span = crate::session::telemetry::tool_execution_span(
                         &tools_execute_span,
                         session_id.as_ref(),
