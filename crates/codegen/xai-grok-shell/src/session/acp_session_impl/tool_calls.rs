@@ -83,6 +83,28 @@ fn should_flush_held_queue_before_wait(
 ) -> bool {
     has_interruptible_wait && steer && !goal_loop_active
 }
+/// Same-batch duplicate indices keyed on `(name, canonical arguments)`, paired with the call id of
+/// the first occurrence. The first call stays; later identical calls are dropped.
+fn duplicate_tool_call_indices(
+    calls: &[crate::sampling::types::ToolCallResponse],
+) -> Vec<(usize, String)> {
+    let mut first_by_signature: std::collections::HashMap<(String, String), String> =
+        std::collections::HashMap::new();
+    let mut duplicates = Vec::new();
+    for (idx, call) in calls.iter().enumerate() {
+        let signature = (
+            call.function.name.clone(),
+            xai_grok_sampling_types::canonical_tool_arguments(&call.function.arguments),
+        );
+        match first_by_signature.get(&signature) {
+            Some(first_id) => duplicates.push((idx, first_id.clone())),
+            None => {
+                first_by_signature.insert(signature, call.id.clone());
+            }
+        }
+    }
+    duplicates
+}
 use crate::tools::tool_context::BlockingWaitGuard;
 /// Clears `awaiting_plan_approval` (and re-persists) when the [`SessionActor::request_plan_approval`] await resolves or is dropped.
 /// Resolve means a decision came back; drop means the model turn was cancelled, so a cancelled in-session approval can never strand the bit `true`.
@@ -345,6 +367,7 @@ impl SessionActor {
         }
         let mut final_result: Option<ToolLoop> = None;
         let mut deferred_followups: Vec<ConversationItem> = Vec::new();
+        let tool_calls = self.drop_duplicate_tool_calls(tool_calls).await;
         let tool_calls = self.reject_excess_media_gen_calls(tool_calls).await?;
         if !tool_calls.is_empty() {
             if tool_calls.len() > 1 {
@@ -400,6 +423,76 @@ impl SessionActor {
             return Ok(final_result);
         }
         Ok(ToolLoop::Continue)
+    }
+    /// Drop same-batch duplicates before any call is prepared, permission-checked, or dispatched.
+    /// A dropped call still gets a paired `tool_result` because the assistant item carries its id,
+    /// but no ToolCall update: it never enters execution, so the UI shows only calls that run.
+    async fn drop_duplicate_tool_calls(
+        &self,
+        tool_calls: Vec<crate::sampling::types::ToolCallResponse>,
+    ) -> Vec<crate::sampling::types::ToolCallResponse> {
+        let duplicates = duplicate_tool_call_indices(&tool_calls);
+        if duplicates.is_empty() {
+            return tool_calls;
+        }
+
+        let mut dropped_ids = std::collections::HashSet::with_capacity(duplicates.len());
+        let mut dropped_by_name: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (idx, first_id) in &duplicates {
+            let Some(call) = tool_calls.get(*idx) else {
+                continue;
+            };
+            dropped_ids.insert(*idx);
+            *dropped_by_name
+                .entry(call.function.name.clone())
+                .or_default() += 1;
+            tracing::warn!(
+                session_id = %self.session_info.id.0,
+                tool = %call.function.name,
+                call_id = %call.id,
+                duplicate_of = %first_id,
+                "dropping same-batch duplicate tool call"
+            );
+            self.chat_state_handle
+                .push_tool_result(ConversationItem::tool_result(
+                    call.id.clone(),
+                    format!(
+                        "Duplicate tool call skipped: `{}` with identical arguments was already \
+                         requested as `{first_id}` in this batch. This call was not executed.",
+                        call.function.name
+                    ),
+                ));
+        }
+
+        let dropped = dropped_ids.len();
+        let tool_calls: Vec<_> = tool_calls
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, call)| (!dropped_ids.contains(&idx)).then_some(call))
+            .collect();
+        let tools = dropped_by_name
+            .iter()
+            .map(|(name, count)| format!("{name}×{count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        xai_grok_telemetry::unified_log::warn(
+            "shell.tool_call.batch_deduped",
+            Some(self.session_info.id.0.as_ref()),
+            Some(serde_json::json!({
+                "dropped": dropped,
+                "kept": tool_calls.len(),
+                "tools": tools,
+            })),
+        );
+        self.send_hook_annotation_with_kind(
+            crate::extensions::notification::HookAnnotationKind::Note,
+            &format!(
+                "已去重 {dropped} 条同轮重复的工具调用（deduped tool_call ×{dropped}: {tools}）"
+            ),
+        )
+        .await;
+        tool_calls
     }
     /// Per-name media-gen counts that exceed this session's cap.
     pub(super) fn media_gen_over_cap(

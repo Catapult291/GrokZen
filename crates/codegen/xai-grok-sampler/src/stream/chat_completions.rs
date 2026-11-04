@@ -267,7 +267,7 @@ pub fn stream_chat_completions<'a>(
         }
 
         // ── Build the final response ─────────────────────────────────
-        let tool_calls: Vec<ToolCall> = tool_call_acc
+        let mut tool_calls: Vec<ToolCall> = tool_call_acc
             .into_values()
             .map(|(id, name, arguments)| ToolCall {
                 id: std::sync::Arc::<str>::from(id),
@@ -275,6 +275,18 @@ pub fn stream_chat_completions<'a>(
                 arguments: std::sync::Arc::<str>::from(arguments),
             })
             .collect();
+
+        let dropped_tool_calls = xai_grok_sampling_types::dedup_tool_calls_by_signature(
+            &mut tool_calls,
+        );
+        if dropped_tool_calls > 0 {
+            tracing::warn!(
+                request_id = %request_id,
+                dropped = dropped_tool_calls,
+                kept = tool_calls.len(),
+                "dropped duplicate tool calls from one response batch"
+            );
+        }
 
         // Tool calls override the stop reason, even an explicit `length`.
         // NOTE: the Messages backend has the opposite precedence: Length wins there

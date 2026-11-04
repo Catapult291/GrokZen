@@ -51,6 +51,52 @@ fn sanitize_tool_arguments(id: &str, name: &str, arguments: Arc<str>) -> Arc<str
     }
 }
 
+/// Canonical argument text for same-round tool-call deduplication.
+/// Parsed JSON is re-serialized with object keys sorted recursively, so calls differing only in
+/// key order or whitespace compare equal; unparseable text is kept verbatim so distinct malformed
+/// calls never merge.
+pub fn canonical_tool_arguments(arguments: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(arguments) {
+        Ok(value) => canonicalize_json(value).to_string(),
+        Err(_) => arguments.to_owned(),
+    }
+}
+
+/// `serde_json` is built with `preserve_order`, so a `Map` keeps insertion order; re-inserting
+/// entries in sorted order is what makes the key independent of the model's serialization.
+fn canonicalize_json(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<_> = map.into_iter().collect();
+            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            serde_json::Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonicalize_json(value)))
+                    .collect(),
+            )
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(canonicalize_json).collect())
+        }
+        other => other,
+    }
+}
+
+/// Drop calls that repeat an earlier `(name, canonical arguments)` in the same assistant batch.
+/// The first occurrence and its `call_id` are kept; returns how many calls were removed.
+pub fn dedup_tool_calls_by_signature(tool_calls: &mut Vec<ToolCall>) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    let before = tool_calls.len();
+    tool_calls.retain(|call| {
+        seen.insert((
+            call.name.clone(),
+            canonical_tool_arguments(call.arguments.as_ref()),
+        ))
+    });
+    before - tool_calls.len()
+}
+
 use serde::{Deserialize, Serialize};
 
 use crate::rs;
@@ -3904,6 +3950,32 @@ mod tests {
     }
 
     // ========== strip_images tests ==========
+
+    #[test]
+    fn dedup_tool_calls_uses_canonical_arguments() {
+        let call = |id: &str, name: &str, arguments: &str| ToolCall {
+            id: id.into(),
+            name: name.to_string(),
+            arguments: arguments.into(),
+        };
+        let mut calls = vec![
+            call("c1", "read_file", r#"{"path":"x","limit":10}"#),
+            // Same call, keys in a different order.
+            call("c2", "read_file", r#"{ "limit": 10, "path": "x" }"#),
+            // Different arguments.
+            call("c3", "read_file", r#"{"path":"y","limit":10}"#),
+            // Same arguments, different tool.
+            call("c4", "search_code", r#"{"path":"x","limit":10}"#),
+            // Unparseable calls only merge byte-for-byte.
+            call("c5", "read_file", r#"{"path":"#),
+            call("c6", "read_file", r#"{"path":"#),
+            call("c7", "read_file", r#"{"path": "x""#),
+        ];
+
+        assert_eq!(dedup_tool_calls_by_signature(&mut calls), 2);
+        let ids: Vec<&str> = calls.iter().map(|c| c.id.as_ref()).collect();
+        assert_eq!(ids, vec!["c1", "c3", "c4", "c5", "c7"]);
+    }
 
     #[test]
     fn test_strip_images_removes_user_images() {
