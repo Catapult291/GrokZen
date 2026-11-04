@@ -156,6 +156,27 @@ impl MarkdownContent {
         self.state.borrow().renderer.source().to_string()
     }
 
+    /// Replace the whole source, keeping pretty/raw mode and continuing to stream from there.
+    ///
+    /// Used when a display transform rewrites text that was already rendered (raw tool-call XML
+    /// folding changes an earlier summary as more copies arrive). Wrapped output is rebuilt lazily
+    /// on the next [`output`](Self::output).
+    pub fn replace_source(&mut self, text: &str) {
+        let expanded = xai_grok_pager_render::appearance::expand_tabs(text);
+        let mut renderer = StreamingMarkdownRenderer::new(md_style::style(), !self.current_raw);
+        renderer.push_and_render(&expanded, Some(get_syntect()));
+        let state = self.state.get_mut();
+        state.renderer = renderer;
+        state.cache_width = 0;
+        state.cache_generation = 0;
+        state.cache_theme = theme_cache::current_kind();
+        state.cache_lines.clear();
+        state.cache_joiners.clear();
+        state.frozen_pre_wrap_count = 0;
+        state.frozen_wrapped_count = 0;
+        self.generation += 1;
+    }
+
     /// Whether the source markdown is empty (zero-alloc, unlike `text()`).
     pub fn is_empty(&self) -> bool {
         self.state.borrow().renderer.source().is_empty()
