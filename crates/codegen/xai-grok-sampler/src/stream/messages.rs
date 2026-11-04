@@ -523,6 +523,17 @@ pub fn stream_messages<'a>(
             None
         };
 
+        let dropped_tool_calls =
+            xai_grok_sampling_types::dedup_tool_calls_by_signature(&mut assistant_tool_calls);
+        if dropped_tool_calls > 0 {
+            tracing::warn!(
+                request_id = %request_id,
+                dropped = dropped_tool_calls,
+                kept = assistant_tool_calls.len(),
+                "dropped duplicate tool calls from one response batch"
+            );
+        }
+
         let stop_reason = if final_stop_reason == Some(StopReason::Length) {
             // Length wins even over completed tool_use blocks
             // The provider closes a block it cut mid-stream, so the trailing call's arguments may be silently truncated

@@ -387,6 +387,15 @@ impl From<crate::messages::MessagesResponse> for ConversationItem {
             }
         }
 
+        let dropped_tool_calls = dedup_tool_calls_by_signature(&mut tool_calls);
+        if dropped_tool_calls > 0 {
+            tracing::warn!(
+                dropped = dropped_tool_calls,
+                kept = tool_calls.len(),
+                "dropped duplicate tool calls from one response batch"
+            );
+        }
+
         ConversationItem::Assistant(AssistantItem {
             content: Arc::<str>::from(content),
             tool_calls,
