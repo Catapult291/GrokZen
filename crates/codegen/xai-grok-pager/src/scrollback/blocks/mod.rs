@@ -1,4 +1,5 @@
 mod agent;
+mod agent_tool_call_fold;
 mod bg_task;
 mod btw;
 mod cancel_cause;

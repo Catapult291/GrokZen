@@ -1,9 +1,13 @@
 use crate::scrollback::block::BlockContent;
 use crate::scrollback::types::{AccentStyle, BlockContext, BlockOutput};
 
+use super::agent_tool_call_fold::{fold_raw_tool_calls, mentions_start_marker};
 use super::markdown_content::MarkdownContent;
 use super::mermaid_content::{self, MermaidContent};
 use crate::appearance::AppearanceConfig;
+
+/// How much of the already-emitted text is kept to spot a start marker split across chunks.
+const PROBE_CHARS: usize = 32;
 
 /// Block displaying an agent message with streaming markdown support. When text arrives in chunks, call
 /// `push_chunk()` to append without re-rendering everything.
@@ -16,21 +20,36 @@ pub struct AgentMessageBlock {
     video_refs: Vec<crate::prompt_images::ScrollbackVideoRef>,
     /// Detected ` ```mermaid ` diagrams and render skeleton, populated at construction/finish (never per streaming chunk) like the media refs.
     mermaid: MermaidContent,
+    /// Verbatim text once raw tool-call XML folding rewrote the displayed source; `None` while
+    /// `content` still holds the text unchanged.
+    raw_source: Option<String>,
+    /// Tail of the emitted text, used to catch a start marker whose bytes straddle two chunks.
+    probe: String,
 }
 
 impl AgentMessageBlock {
     /// Create a new agent message block with complete text.
     pub fn new(text: impl Into<String>) -> Self {
         let text = text.into();
-        let image_refs = crate::prompt_images::extract_image_refs(&text);
-        let video_refs = crate::prompt_images::extract_video_refs(&text);
-        let content = MarkdownContent::new(text);
+        let folded = fold_raw_tool_calls(&text, true);
+        let image_refs = crate::prompt_images::extract_image_refs(&folded);
+        let video_refs = crate::prompt_images::extract_video_refs(&folded);
+        let raw_source = (folded != text).then(|| text.clone());
+        let content = if raw_source.is_some() {
+            let mut content = MarkdownContent::streaming();
+            content.push_chunk(&folded);
+            content
+        } else {
+            MarkdownContent::new(folded)
+        };
         let mermaid = content.mermaid_content();
         Self {
             content,
             image_refs,
             video_refs,
             mermaid,
+            raw_source,
+            probe: String::new(),
         }
     }
 
@@ -41,37 +60,107 @@ impl AgentMessageBlock {
             image_refs: Vec::new(),
             video_refs: Vec::new(),
             mermaid: MermaidContent::default(),
+            raw_source: None,
+            probe: String::new(),
         }
     }
 
     /// Push a streaming chunk of markdown text.
     pub fn push_chunk(&mut self, chunk: &str) {
-        self.content.push_chunk(chunk);
+        if let Some(raw) = self.raw_source.as_mut() {
+            raw.push_str(chunk);
+            self.refresh_folded(false, false);
+        } else if mentions_start_marker(&self.probe, chunk) {
+            let mut raw = self.content.text();
+            raw.push_str(chunk);
+            self.raw_source = Some(raw);
+            self.refresh_folded(false, false);
+        } else {
+            self.content.push_chunk(chunk);
+            self.note_probe(chunk);
+        }
     }
 
     /// Push a chunk without rendering immediately.
     pub fn push_chunk_deferred(&mut self, chunk: &str) {
-        self.content.push_chunk_deferred(chunk);
+        if let Some(raw) = self.raw_source.as_mut() {
+            raw.push_str(chunk);
+            self.refresh_folded(true, false);
+        } else if mentions_start_marker(&self.probe, chunk) {
+            let mut raw = self.content.text();
+            raw.push_str(chunk);
+            self.raw_source = Some(raw);
+            self.refresh_folded(true, false);
+        } else {
+            self.content.push_chunk_deferred(chunk);
+            self.note_probe(chunk);
+        }
     }
 
-    /// Get the source markdown text.
+    /// Get the source markdown text with any raw tool-call XML intact.
     pub fn text(&self) -> String {
-        self.content.text()
+        match &self.raw_source {
+            Some(raw) => raw.clone(),
+            None => self.content.text(),
+        }
     }
 
     /// Whether the source markdown is empty (zero-alloc, unlike `text()`).
     pub fn is_empty(&self) -> bool {
-        self.content.is_empty()
+        match &self.raw_source {
+            Some(raw) => raw.is_empty(),
+            None => self.content.is_empty(),
+        }
     }
 
     /// Finish streaming and do a full re-render for safety.
     pub fn finish(&mut self) {
+        if self.raw_source.is_some() {
+            self.refresh_folded(false, true);
+        }
         self.content.finish();
         let text = self.content.text();
         self.image_refs = crate::prompt_images::extract_image_refs(&text);
         self.video_refs = crate::prompt_images::extract_video_refs(&text);
         // Detection runs once the render is final, after the renderer freezes, never per streaming chunk
         self.mermaid = self.content.mermaid_content();
+        self.probe.clear();
+    }
+
+    /// Re-derive the displayed text after `raw_source` grew, appending the delta when the folded
+    /// prefix is unchanged and replacing the whole source when an earlier summary changed.
+    fn refresh_folded(&mut self, deferred: bool, final_chunk: bool) {
+        let Some(raw) = self.raw_source.as_deref() else {
+            return;
+        };
+        let folded = fold_raw_tool_calls(raw, final_chunk);
+        let current = self.content.text();
+        if folded == current {
+            return;
+        }
+        if let Some(delta) = folded.strip_prefix(current.as_str()) {
+            if deferred {
+                self.content.push_chunk_deferred(delta);
+            } else {
+                self.content.push_chunk(delta);
+            }
+        } else {
+            self.content.replace_source(&folded);
+        }
+    }
+
+    fn note_probe(&mut self, chunk: &str) {
+        self.probe.push_str(chunk);
+        let excess = self.probe.chars().count().saturating_sub(PROBE_CHARS);
+        if excess > 0 {
+            let cut = self
+                .probe
+                .char_indices()
+                .nth(excess)
+                .map(|(index, _)| index)
+                .unwrap_or(self.probe.len());
+            self.probe.drain(..cut);
+        }
     }
 
     /// The detected Mermaid diagrams for this message (empty until finished or constructed from complete text).
@@ -80,7 +169,18 @@ impl AgentMessageBlock {
     }
 
     /// Set the raw mode, re-rendering if it changed.
+    /// Raw mode reveals the verbatim text, so the folded XML can be inspected on demand.
     pub fn set_raw_mode(&mut self, raw: bool) {
+        if let Some(source) = self.raw_source.clone() {
+            let target = if raw {
+                source
+            } else {
+                fold_raw_tool_calls(&source, true)
+            };
+            if target != self.content.text() {
+                self.content.replace_source(&target);
+            }
+        }
         self.content.set_raw_mode(raw);
     }
 
@@ -99,7 +199,7 @@ impl AgentMessageBlock {
     /// When `raw` is false, returns the rendered text (styles stripped).
     pub fn copy_text(&self, raw: bool) -> String {
         if raw {
-            self.content.text()
+            self.text()
         } else {
             self.content.rendered_plain_text()
         }
@@ -220,6 +320,101 @@ mod tests {
             cwd: None,
             locale: Default::default(),
         }
+    }
+
+    fn shown_text(out: &BlockOutput) -> String {
+        out.lines
+            .iter()
+            .flat_map(|line| line.content.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    const RETRIED_BLOBS: &str = "改用正确的参数继续查。\n\
+<tool_call><function=search_code><parameter=glob>*.rs\n</parameter><parameter=query>alpha</parameter></function></tool_call>\n\
+<tool_call><function=search_code><parameter=glob>*.rs\n</parameter><parameter=query>beta</parameter></function></tool_call>\n\
+<tool_call><function=search_code><parameter=glob>*.rs\n</parameter><parameter=query>gamma</parameter></function></tool_call>\n";
+
+    #[test]
+    fn raw_tool_call_xml_collapses_to_one_summary_line() {
+        let block = AgentMessageBlock::new(RETRIED_BLOBS);
+        let shown = shown_text(&block.output(&ctx(80, false)));
+        assert!(!shown.contains("<tool_call"), "{shown}");
+        assert_eq!(shown.matches("tool_call XML").count(), 1, "{shown}");
+        assert!(shown.contains("tool_call XML ×3"), "{shown}");
+        assert!(shown.contains("search_code(glob=*.rs) ×3"), "{shown}");
+        // The verbatim source survives for raw copy and export.
+        assert_eq!(block.copy_text(true), RETRIED_BLOBS);
+        assert_eq!(block.text(), RETRIED_BLOBS);
+    }
+
+    #[test]
+    fn streaming_marker_split_across_chunks_never_renders_raw_xml() {
+        let mut block = AgentMessageBlock::streaming();
+        block.push_chunk("prose\n<tool_ca");
+        let partial = shown_text(&block.output(&ctx(80, false)));
+        assert!(!partial.contains("<tool_ca"), "{partial}");
+
+        block.push_chunk(
+            "ll><function=read_file><parameter=target_file>a.rs</parameter></function></tool_call>",
+        );
+        block.finish();
+        let shown = shown_text(&block.output(&ctx(80, false)));
+        assert!(shown.contains("read_file(target_file=a.rs)"), "{shown}");
+        assert!(!shown.contains("<tool_call"), "{shown}");
+        assert!(block.text().contains("<tool_call>"), "raw source kept");
+    }
+
+    #[test]
+    fn unterminated_stream_is_folded_on_finish() {
+        let raw = "后台启动。\n<tool_call><function=monitor><parameter=command>tail -f log";
+        let mut block = AgentMessageBlock::streaming();
+        block.push_chunk(raw);
+        let streaming = shown_text(&block.output(&ctx(80, false)));
+        assert!(!streaming.contains("<tool_call"), "{streaming}");
+
+        block.finish();
+        let shown = shown_text(&block.output(&ctx(80, false)));
+        assert!(shown.contains("tool_call XML ×1"), "{shown}");
+        assert!(shown.contains("monitor(command=tail -f log)"), "{shown}");
+        assert_eq!(block.text(), raw);
+    }
+
+    #[test]
+    fn eight_identical_blobs_render_one_summary_line() {
+        let blob = "<tool_call><function=run_terminal_command><parameter=block_until_ms>0</parameter><parameter=command>python script.py</parameter></function></tool_call>\n";
+        let raw = format!("后台启动。\n{}", blob.repeat(8));
+        let block = AgentMessageBlock::new(&raw);
+        let shown = shown_text(&block.output(&ctx(100, false)));
+        assert!(!shown.contains("<tool_call"), "{shown}");
+        assert_eq!(shown.matches("tool_call XML").count(), 1, "{shown}");
+        assert!(shown.contains("tool_call XML ×8"), "{shown}");
+        assert!(
+            shown.contains("run_terminal_command(block_until_ms=0) ×8"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn raw_mode_reveals_the_original_xml() {
+        let mut block = AgentMessageBlock::new(RETRIED_BLOBS);
+        block.set_raw_mode(true);
+        let raw = shown_text(&block.output(&ctx(200, true)));
+        assert!(raw.contains("<tool_call>"), "{raw}");
+
+        block.set_raw_mode(false);
+        let pretty = shown_text(&block.output(&ctx(200, false)));
+        assert!(!pretty.contains("<tool_call>"), "{pretty}");
+        assert!(pretty.contains("tool_call XML ×3"), "{pretty}");
+    }
+
+    #[test]
+    fn prose_without_xml_is_untouched() {
+        let md = "plain **markdown** stays put\n";
+        let block = AgentMessageBlock::new(md);
+        assert_eq!(block.text(), md);
+        assert!(shown_text(&block.output(&ctx(80, false))).contains("markdown"));
     }
 
     #[test]
