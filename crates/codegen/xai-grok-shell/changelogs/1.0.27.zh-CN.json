@@ -36,7 +36,7 @@
   },
   {
     "category": "fixes",
-    "description": "**Astrolabe** —— vendored 引擎升级至 v0.17.2，并完成 Phase A–E（新鲜度、LSP 统一、多会话资源、路由与评测）；跟踪上游 v0.17.7 的 `store_dir` 行为。",
+    "description": "**Astrolabe** —— vendored 引擎升级至 v0.17.2，并同步改进索引新鲜度、LSP 统一、多会话资源与检索路由/评测；跟踪上游 v0.17.7 的 `store_dir` 行为。",
     "breaking_change": false
   },
   {

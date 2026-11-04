@@ -54,7 +54,7 @@
       ]
     },
     {
-      "text": "Astrolabe 升级至 v0.17.2 并完成 Phase A–E：索引新鲜度、LSP 统一、资源与多会话、路由与评测，另跟踪上游 v0.17.7 的 store_dir 行为。",
+      "text": "Astrolabe 升级至 v0.17.2，并同步改进索引新鲜度、LSP 统一、多会话资源与检索路由/评测，另跟踪上游 v0.17.7 的 store_dir 行为。",
       "commits": [
         "2a6fd377a7250f1f72ecf1728322114e1bb2ad90",
         "969d81d68328438cd492d643117f30ad49185d58",
