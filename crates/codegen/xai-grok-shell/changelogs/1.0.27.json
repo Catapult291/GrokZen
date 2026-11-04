@@ -1,12 +1,47 @@
 [
   {
-    "category": "fixes",
-    "description": "**Queued messages** no longer appear twice when sent immediately.",
+    "category": "features",
+    "description": "**Subagent delegation** — built-in types (`explore` / `plan` / `implementer` / `general-purpose`) are selectable by name, with `list_agents`, `label`, `output_schema` structured results, `context: fork`, depth and total-agent budgets, `max_turns` partial resume, parallel fan-out, and automatic cleanup of unchanged worktrees with apply/discard.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Side-effect tool gate** — identical `(name, canonical arguments)` calls for side-effecting tools are skipped while the first is running or within its class window; same-batch duplicates are dropped before dispatch and no longer appear as separate rows.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Delete hardline and safe-delete** — `always-approve` now denies unrecoverable targets (drive roots, system directories, home roots, raw devices, format/diskpart/shadow-copy deletion, fork bombs, shutdown) before YOLO; `scripts/windows/safe-delete.ps1` is the deletion channel for literal Windows paths.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Cache and background observability** — side-channel inference and cold-cache events carry model, prompt cache key, and turn-relative timing; background finalization steps and lock waits are logged.",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "**Dashboard spinners** no longer freeze when background tasks are running.",
+    "description": "**Manual compaction only** — automatic and two-pass compaction paths are removed; `/context` prompts for manual `/compact` at 80% usage.",
+    "breaking_change": true
+  },
+  {
+    "category": "fixes",
+    "description": "**Terminal stalls and cancellation** — foreground waits have a hard cap; per-turn cancellation tokens reach tool dispatch; the terminal actor emits heartbeats, stall reports, and I/O timeouts; cancelling one session no longer kills another session's builds.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Tool-call noise** — raw `tool_call` XML left in assistant text is folded into a one-line summary in the pager.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Astrolabe** — vendored engine upgraded to v0.17.2 with Phase A–E fixes (freshness, LSP unification, multi-session resources, routing and evaluation); upstream v0.17.7 `store_dir` behavior is tracked.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Test baseline** — repaired pre-existing pager test failures (clipboard isolation, path separators, feedback modal, doctor, slash registration, privacy banner), stabilized session list ordering, and isolated unit tests from the developer's live `~/.grok`.",
     "breaking_change": false
   }
 ]

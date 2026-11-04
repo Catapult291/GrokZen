@@ -1,0 +1,99 @@
+{
+  "schema": 1,
+  "tag": "release-v1.0.27",
+  "prerelease": false,
+  "previous_tag": "release-v1.0.26",
+  "community": [
+    {
+      "text": "子代理委派按内置类型路由：explore / plan / implementer / general-purpose 可直接选用，新增 list_agents、label、output_schema 结构化结果、context: fork、深度与总量预算、max_turns partial 续跑，同一步内可并行 fan-out。",
+      "commits": [
+        "f3b494268f7a0deb66b1b9e42cd25bb930318d54",
+        "231153fe5a08fe888298809b4858e373775b1f8f"
+      ]
+    },
+    {
+      "text": "子代理 worktree 收尾：无改动自动删除并清空指针，改动可 apply / discard；新增 [subagents] worktree_base（默认 head）与本地指标汇总。",
+      "commits": [
+        "eaf0fe7055f8158029082d529872fb8a8329fec8",
+        "1f332c4c1707304eff028085b2b8a1967fe01467"
+      ]
+    },
+    {
+      "text": "终端与取消链路加固：前台命令等待加硬上限，每轮取消令牌接入工具调度，终端 actor 增加心跳、停摆报告与 I/O 超时，取消只清理本会话任务。",
+      "commits": [
+        "1beaa4d4d34f4ffbd936d239af0cec375915cf8a",
+        "b9a32bba4aa215840b6901b81e4241d6fd63572d",
+        "5675d8a1df03eba98a5ba3535e104d13bd4adf41",
+        "9186c0ab49f7518a415ef16e4aba7a6171f26dbf",
+        "ba8f8fdeb94b33e792f3fb2f3be8f5451433c315",
+        "3c7a41cb0903916e878c1c5c1795a3fcf035bf55"
+      ]
+    },
+    {
+      "text": "删除防护：always-approve 下先于 YOLO 拒绝盘根、系统目录、主目录根、裸设备、格式化/diskpart/卷影删除等不可恢复操作；新增 Windows safe-delete.ps1 作为字面路径删除通道。",
+      "commits": [
+        "ad04329181777b2acde3c3f903491203ce524e0d",
+        "7589b6215e116eb345438f2a9ec1bd944316f81a",
+        "755d099d8b36b539423e9e556ca3129eae699634",
+        "fe258faf7b8fa5daa20c2195c243e6384497fdc1",
+        "6a317fc89ea64c336c7d02049468085a34863376"
+      ]
+    },
+    {
+      "text": "工具调用重复防护：同轮按 (name, 规范化参数) 去重、副作用工具执行闸，以及 pager 折叠正文残留的 tool_call XML。",
+      "commits": [
+        "f51d63612100070a017c5153c8a299032a477f5a",
+        "f6e33e3f277bc3613c0bdb052a5a80d16f8d275c",
+        "0920d3f3396da82a92a3c0b5d047b0c0a0bf2dce"
+      ]
+    },
+    {
+      "text": "移除自动上下文压缩与两遍压缩，仅保留手动 /compact；/context 在用量达到 80% 时提示。",
+      "commits": [
+        "4e24332422b9e326a175fc297570fc51241a98aa"
+      ]
+    },
+    {
+      "text": "Astrolabe 升级至 v0.17.2 并完成 Phase A–E：索引新鲜度、LSP 统一、资源与多会话、路由与评测，另跟踪上游 v0.17.7 的 store_dir 行为。",
+      "commits": [
+        "2a6fd377a7250f1f72ecf1728322114e1bb2ad90",
+        "969d81d68328438cd492d643117f30ad49185d58",
+        "96d788d9eee78816f4cb861615e08e6f4287a997",
+        "94eadd3ef4b995818331046974c42811d10f49db",
+        "ccae60dbf1ca99a9ebdbd9508c719617d00b9109",
+        "3fd86c19eaa177489d4d71d0cbe5ad3d3d68b983",
+        "849851a8575e5fd6a73fab5d46188e00bba9f792"
+      ]
+    },
+    {
+      "text": "缓存与后台可观测性：旁路推理独立统计、cold 事件补齐模型与轮次相对时间；自动转后台记录收尾步骤与锁等待，后台化收尾查询加 5 秒上限。",
+      "commits": [
+        "d8ca6c5c4c4a92941b4bb27fd3c40045af2f4bb4",
+        "7f9703996561b68bfba911d5c8d47ef43090859f",
+        "bd081bddb9c8f1ee46d63007ca2fb88bb32e885d",
+        "489594e1d2b5d55de076d6f9f3ff91881e9b7ff5"
+      ]
+    },
+    {
+      "text": "测试与构建基线：修复 pager 既有失败、隔离系统剪贴板与测试 GROK_HOME，release 构建关闭增量编译。",
+      "commits": [
+        "8d572eb215be467ebe989802bc3427ac329dda0a",
+        "4d72ad435c3cf03b719c8e093cedb614d6acae07",
+        "95573ef5f448b1689aeab25c4b5d583ac8ea785a",
+        "f557c09c9e8c8a7732a1e7c1dadf2f48102288ea",
+        "aca78dfd973479f38165f9c79b45423091980895",
+        "1ef6bc994878774cab319d591619a8e1d1baf05a",
+        "82e7789631fe443259f09b7835893dc7fb7fde51",
+        "d217200d99c3e96340e3f9e4819686a4e59d3402",
+        "3606baae164c70f42f0efe678f175fde006f50cd",
+        "67da86fda291d3a4b36996aa21becac4a292ca52",
+        "66c354abfab72515c0c518a00ba6cda5b619dddb"
+      ]
+    }
+  ],
+  "upstream": [],
+  "notices": [
+    "自动上下文压缩已移除：请在需要时手动执行 /compact；接近窗口上限时沿用既有截断路径。",
+    "子代理 worktree_base 默认为 head；如需从默认分支创建 worktree，设置 [subagents] worktree_base = \"default_branch\"。"
+  ]
+}

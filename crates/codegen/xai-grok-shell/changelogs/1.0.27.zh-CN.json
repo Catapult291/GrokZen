@@ -1,12 +1,47 @@
 [
   {
-    "category": "fixes",
-    "description": "**排队消息**在立即发送后不再重复显示。",
+    "category": "features",
+    "description": "**子代理委派** —— 内置类型（`explore` / `plan` / `implementer` / `general-purpose`）可按名称选用，新增 `list_agents`、`label`、`output_schema` 结构化结果、`context: fork`、深度与总量预算、`max_turns` partial 续跑、并行 fan-out，以及无改动 worktree 自动清理与 apply/discard。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**副作用工具执行闸** —— 同一 `(name, 规范化参数)` 的副作用调用在执行中或冷却窗口内直接跳过；同批重复调用在派发前丢弃，不再显示为独立行。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**删除 hardline 与 safe-delete** —— `always-approve` 下先于 YOLO 拒绝不可恢复目标（盘根、系统目录、主目录根、裸设备、格式化/diskpart/卷影删除、fork bomb、关机）；Windows 删除统一走 `scripts/windows/safe-delete.ps1`。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**缓存与后台可观测性** —— 旁路推理与 cold 事件补齐模型、prompt cache key 与轮次相对时间；自动转后台后的收尾步骤与锁等待写入日志。",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "**仪表盘加载动画**在后台任务运行时不再冻结。",
+    "description": "**仅保留手动压缩** —— 移除自动压缩与两遍压缩；`/context` 在用量达到 80% 时提示手动 `/compact`。",
+    "breaking_change": true
+  },
+  {
+    "category": "fixes",
+    "description": "**终端卡死与取消** —— 前台等待加硬上限；每轮取消令牌接入工具调度；终端 actor 增加心跳、停摆报告与 I/O 超时；取消一个会话不再误杀其他会话的构建。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**工具调用噪音** —— pager 将正文残留的 `tool_call` XML 折叠为单行摘要。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Astrolabe** —— vendored 引擎升级至 v0.17.2，并完成 Phase A–E（新鲜度、LSP 统一、多会话资源、路由与评测）；跟踪上游 v0.17.7 的 `store_dir` 行为。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**测试基线** —— 修复 pager 既有失败（剪贴板隔离、路径分隔符、反馈弹窗、Doctor、slash 注册、隐私横幅等），稳定会话列表排序，并让单元测试使用独立的 `~/.grok`。",
     "breaking_change": false
   }
 ]
