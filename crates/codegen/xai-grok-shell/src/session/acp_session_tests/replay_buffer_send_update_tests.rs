@@ -115,6 +115,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         },
         permissions: PermissionHandle::allow_all(),
         tool_context,
+        side_effect_gate: Default::default(),
         deny_read_globs: Vec::new(),
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
         mcp_strategy: std::cell::Cell::new(McpInitStrategy::Blocking),

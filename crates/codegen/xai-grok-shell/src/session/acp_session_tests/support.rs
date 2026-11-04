@@ -356,6 +356,7 @@ async fn create_test_actor_inner(
         ),
         permissions: xai_grok_workspace::permission::PermissionHandle::allow_all(),
         tool_context,
+        side_effect_gate: Default::default(),
         deny_read_globs: Vec::new(),
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
         mcp_strategy: std::cell::Cell::new(McpInitStrategy::Blocking),
