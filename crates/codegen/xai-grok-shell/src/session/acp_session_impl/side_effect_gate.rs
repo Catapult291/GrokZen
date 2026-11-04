@@ -231,7 +231,11 @@ mod tests {
             "call_1",
             finished,
         );
-        gate.finish_at("run_terminal_command", r#"{"command":"git status"}"#, finished);
+        gate.finish_at(
+            "run_terminal_command",
+            r#"{"command":"git status"}"#,
+            finished,
+        );
 
         let args = r#"{"command":"git status"}"#;
         // Short-lived: gated inside 60s, free after.
@@ -274,7 +278,11 @@ mod tests {
             None
         );
         assert_eq!(
-            gate.check(SideEffectClass::LongLived, "read_file", r#"{"command":"a"}"#),
+            gate.check(
+                SideEffectClass::LongLived,
+                "read_file",
+                r#"{"command":"a"}"#
+            ),
             None
         );
     }
@@ -315,10 +323,7 @@ mod tests {
             side_effect_class(Some(ToolKind::Workflow), "anything"),
             Some(SideEffectClass::LongLived)
         );
-        assert_eq!(
-            side_effect_class(Some(ToolKind::Read), "read_file"),
-            None
-        );
+        assert_eq!(side_effect_class(Some(ToolKind::Read), "read_file"), None);
         assert_eq!(
             side_effect_class(None, "run_terminal_command"),
             Some(SideEffectClass::ShortLived)

@@ -289,13 +289,8 @@ fn second_session_with_different_knobs_reuses_the_first_engine_config() {
     // A different deny set is a different EngineKey: it may open a fresh
     // engine with its own config (item 10 dual-policy behavior).
     let deny = DenyPolicy::new(&["*.secret".to_string()]);
-    let other = engine_for_session(
-        &root,
-        &second_cfg,
-        first_cfg.respect_gitignore,
-        &deny,
-    )
-    .expect("deny-keyed engine");
+    let other = engine_for_session(&root, &second_cfg, first_cfg.respect_gitignore, &deny)
+        .expect("deny-keyed engine");
     assert!(
         !Arc::ptr_eq(&first, &other),
         "a different deny set must not reuse the first engine"

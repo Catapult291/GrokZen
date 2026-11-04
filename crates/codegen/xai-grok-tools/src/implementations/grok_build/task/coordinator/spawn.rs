@@ -89,10 +89,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         self.inherit_resume_subagent_type(request.as_mut());
         let running = self.session_running_count(&request.parent_session_id);
         let total_for_root = self.total_agents_for_root(&request.parent_session_id);
-        match self
-            .admission
-            .admit(&request, running, total_for_root)
-        {
+        match self.admission.admit(&request, running, total_for_root) {
             AdmissionDecision::Start => {
                 self.metrics.record_spawn(&request.subagent_type);
                 self.log_spawn_accepted(&request, "started");

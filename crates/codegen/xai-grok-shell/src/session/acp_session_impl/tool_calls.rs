@@ -514,9 +514,9 @@ impl SessionActor {
             ) else {
                 continue;
             };
-            if let Some((first_id, reason)) = self
-                .side_effect_gate
-                .check(class, &call.function.name, &call.function.arguments)
+            if let Some((first_id, reason)) =
+                self.side_effect_gate
+                    .check(class, &call.function.name, &call.function.arguments)
             {
                 gated.push((idx, call.function.name.clone(), reason, first_id));
             }

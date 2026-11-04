@@ -1,8 +1,8 @@
 use pretty_assertions::assert_eq;
 
 use super::{
-    Admission, AdmissionDecision, AdmissionError, LimitBehavior, SubagentLimits,
-    DEFAULT_MAX_TOTAL_AGENTS,
+    Admission, AdmissionDecision, AdmissionError, DEFAULT_MAX_TOTAL_AGENTS, LimitBehavior,
+    SubagentLimits,
 };
 use crate::implementations::grok_build::task::types::{SubagentOwner, SubagentRequest};
 
