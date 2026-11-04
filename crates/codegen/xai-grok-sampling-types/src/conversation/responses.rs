@@ -77,6 +77,15 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
         );
     }
 
+    let dropped_tool_calls = dedup_tool_calls_by_signature(&mut tool_calls);
+    if dropped_tool_calls > 0 {
+        tracing::warn!(
+            dropped = dropped_tool_calls,
+            kept = tool_calls.len(),
+            "dropped duplicate tool calls from one response batch"
+        );
+    }
+
     tracing::info!(model_id = %model_id, ?model_fingerprint, ?reasoning_effort, "response_to_conversation_items setting model metadata on AssistantItem");
     items.push(ConversationItem::Assistant(AssistantItem {
         content: Arc::<str>::from(content),
