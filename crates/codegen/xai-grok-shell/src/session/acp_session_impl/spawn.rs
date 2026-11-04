@@ -1809,6 +1809,7 @@ pub(crate) async fn spawn_session_actor(
         },
         permissions,
         tool_context,
+        side_effect_gate: Default::default(),
         deny_read_globs,
         mcp_state: mcp_state.clone(),
         mcp_strategy: std::cell::Cell::new(mcp_strategy),

@@ -123,6 +123,8 @@ use active_agent_message_presentation::*;
 mod post_tool_use_delivery;
 #[path = "acp_session_impl/tool_calls.rs"]
 mod tool_calls;
+#[path = "acp_session_impl/side_effect_gate.rs"]
+mod side_effect_gate;
 use post_tool_use_delivery::*;
 #[path = "acp_session_impl/image_strip.rs"]
 mod image_strip;
@@ -784,6 +786,10 @@ pub(crate) struct SessionActor {
     pub(crate) notifications: NotificationSender,
     pub(crate) permissions: PermissionHandle,
     pub(crate) tool_context: ToolContext,
+    /// Side-effect tool execution gate (方法 3): session-scoped short-window dedup for tools
+    /// whose repeated execution amplifies effects. Shared with dispatch futures, which is why
+    /// it is an `Arc`. See `side_effect_gate`.
+    pub(crate) side_effect_gate: std::sync::Arc<side_effect_gate::SideEffectGate>,
     /// Managed Read-deny glob patterns, resolved once at construction.
     /// (Re-)injected into the ToolBridge so the Grep tool excludes policy-forbidden paths.
     pub(crate) deny_read_globs: Vec<String>,
@@ -2064,6 +2070,9 @@ mod status_line_payload_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/tool_call_dedup_tests.rs"]
 mod tool_call_dedup_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/side_effect_gate_tests.rs"]
+mod side_effect_gate_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/tool_call_telemetry_tests.rs"]
 mod tool_call_telemetry_tests;
