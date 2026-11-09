@@ -2,7 +2,8 @@
 //!
 //! Registers, updates, finalizes, searches, and downloads session replicas for cross-host session replication.
 //! The write methods (`register`, `update`, `finalize`) are safe to call without checking the result.
-//! The read methods (`search`, `get_session`, `download_file`) return typed results.
+//! The read methods (`search`, `get_session`, `download_file`) return typed results and do not
+//! gate on credentials themselves; callers decide whether to construct a client at all.
 
 use anyhow::{Context, Result};
 use reqwest::RequestBuilder;

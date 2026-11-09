@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Subcommand;
-use xai_grok_login::{AuthManager, try_ensure_fresh_auth};
+use xai_grok_login::{AuthManager, GrokAuth, try_ensure_fresh_auth};
 use xai_grok_shell::agent::config::Config as AgentConfig;
 use xai_grok_shell::session::merge::MergedSession;
 use xai_grok_shell::util::grok_home::grok_home;
@@ -56,20 +56,30 @@ pub async fn run(
         agent_config.endpoints.proxy_url(),
     ));
 
-    let client = xai_grok_shell::agent::session_registry_client::SessionRegistryClient::new(
-        agent_config.endpoints.proxy_url(),
-        String::new(),
+    // Skip the remote lane entirely without credentials (a session token or a
+    // deployment key): an unauthenticated registry read would only draw a 401
+    // and the "Run `grok-zh login`" hint, which is a dead suggestion in builds
+    // without the login channel.
+    let client = remote_lane_enabled(
+        auth.as_ref(),
+        agent_config.endpoints.deployment_key.as_deref(),
     )
-    .with_deployment_key(agent_config.endpoints.deployment_key.clone())
-    .with_alpha_test_key(agent_config.endpoints.alpha_test_key.clone())
-    .with_auth(auth_manager.clone());
+    .then(|| {
+        xai_grok_shell::agent::session_registry_client::SessionRegistryClient::new(
+            agent_config.endpoints.proxy_url(),
+            String::new(),
+        )
+        .with_deployment_key(agent_config.endpoints.deployment_key.clone())
+        .with_alpha_test_key(agent_config.endpoints.alpha_test_key.clone())
+        .with_auth(auth_manager.clone())
+    });
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
 
     match args.command {
         SessionsCommand::List { limit } => {
             let sessions = xai_grok_shell::session::merge::fetch_merged(
-                Some(&client),
+                client.as_ref(),
                 cwd.to_str(),
                 xai_grok_shell::session::merge::CwdScope::WithSiblings,
                 None,
@@ -103,6 +113,9 @@ pub async fn run(
             let (local_resp, remote_results) = tokio::join!(
                 execute_search(IndexDecision::settled(&search), &root, &req),
                 async {
+                    let Some(client) = client.as_ref() else {
+                        return Vec::new();
+                    };
                     tokio::time::timeout(
                         REMOTE_TIMEOUT,
                         client.search(Some(&req.query), remote_limit),
@@ -235,12 +248,10 @@ pub async fn run(
                 );
             }
             // Always attempt the remote delete when authenticated and not
-            // ZDR — `list` / `search` likewise query remote unconditionally
-            // rather than gating on storage mode (which the CLI cannot
-            // resolve here: it builds config without remote settings). The
-            // backend delete is idempotent (a `404` is treated as success),
-            // so this is safe for local-only sessions with no remote copy.
-            // ZDR teams never upload, so there is nothing remote to delete.
+            // ZDR. The backend delete is idempotent (a `404` is treated as
+            // success), so this is safe for local-only sessions with no
+            // remote copy. ZDR teams never upload, so there is nothing
+            // remote to delete.
             let needs_remote = auth.as_ref().is_some_and(|a| !a.is_zdr_team());
 
             // Pass `cwd = None` so the session is found by id regardless of which workspace it was created in
@@ -277,6 +288,13 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Whether the CLI's remote registry lane has credentials to ride on. The two
+/// bearer branches in `GrokAuthCredentials::apply` are the deployment key and
+/// the user token; an alpha-test key alone never authenticates a request.
+fn remote_lane_enabled(auth: Option<&GrokAuth>, deployment_key: Option<&str>) -> bool {
+    auth.is_some() || deployment_key.is_some()
 }
 
 /// Print sessions grouped by worktree label, preserving the original table
@@ -359,5 +377,26 @@ fn print_sessions_grouped(sessions: &[MergedSession], locale: &LocaleContext) {
             locale.named_static_text("sessions.list.no_label", "(no label)"),
             members,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xai_grok_login::GrokAuth;
+
+    #[test]
+    fn remote_lane_enabled_with_session_auth() {
+        assert!(remote_lane_enabled(Some(&GrokAuth::test_default()), None));
+    }
+
+    #[test]
+    fn remote_lane_enabled_with_deployment_key_only() {
+        assert!(remote_lane_enabled(None, Some("deploy-key")));
+    }
+
+    #[test]
+    fn remote_lane_disabled_without_credentials() {
+        assert!(!remote_lane_enabled(None, None));
     }
 }
