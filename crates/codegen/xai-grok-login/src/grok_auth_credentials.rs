@@ -34,9 +34,11 @@ impl std::fmt::Debug for GrokAuthCredentials {
 }
 impl GrokAuthCredentials {
     /// Static credentials from a snapshot token. No refresh capability.
+    /// An empty token normalizes to `None`: callers that build a client without a token
+    /// then send no `Authorization` header and get the honest "Not authenticated." 401 hint.
     pub fn new(user_token: Option<String>) -> Self {
         Self {
-            user_token,
+            user_token: user_token.filter(|t| !t.is_empty()),
             deployment_key: None,
             alpha_test_key: None,
             auth_manager: None,
@@ -165,5 +167,30 @@ mod tests {
         let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
         let creds = GrokAuthCredentials::new(None).with_auth_manager(mgr);
         assert!(creds.resolve().user_token.is_none());
+    }
+
+    #[test]
+    fn new_normalizes_empty_token_to_none() {
+        let creds = GrokAuthCredentials::new(Some(String::new()));
+        assert!(creds.user_token.is_none());
+        assert_eq!(creds.auth_error_hint(), "Not authenticated.");
+    }
+
+    #[test]
+    fn apply_omits_authorization_when_no_credentials() {
+        let creds = GrokAuthCredentials::new(Some(String::new()));
+        let request = creds
+            .apply(
+                reqwest::Client::new().get("http://localhost/"),
+                "http://localhost/",
+            )
+            .build()
+            .unwrap();
+        assert!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .is_none()
+        );
     }
 }
