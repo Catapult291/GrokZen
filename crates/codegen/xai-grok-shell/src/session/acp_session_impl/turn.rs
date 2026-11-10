@@ -2753,6 +2753,7 @@ impl SessionActor {
         let mut turn_span_totals = TurnSpanTotals::default();
         let mut structured_output_retries: u32 = 0;
         let mut media_gen_resamples: u32 = 0;
+        let mut text_tool_call_recoveries: u32 = 0;
         let structured_output_validator = json_schema.as_ref().map(|schema| {
             jsonschema::validator_for(schema).map_err(|e| format!("invalid output schema: {e}"))
         });
@@ -3554,6 +3555,7 @@ impl SessionActor {
                 self.signals_handle().record_model_fingerprint(fp);
             }
             let fallback_text = response.fallback_text();
+            let sampled_assistant_text = response.assistant_text();
             let stop_reason = response.stop_reason;
             let response_is_empty = response.is_empty();
             let turn_refused =
@@ -3696,6 +3698,57 @@ impl SessionActor {
                 }
             }
             if tool_calls.is_empty() {
+                // A reply that is nothing but text-encoded tool calls ran nothing; re-ask instead of
+                // ending the turn with no answer. Prose plus XML is a real reply and is left alone.
+                if super::text_tool_calls::is_tool_call_only(&sampled_assistant_text) {
+                    if text_tool_call_recoveries < MAX_TEXT_TOOL_CALL_RECOVERIES {
+                        text_tool_call_recoveries += 1;
+                        tracing::warn!(
+                            session_id = %self.session_info.id,
+                            prompt_id = %req_id,
+                            attempt = text_tool_call_recoveries,
+                            max = MAX_TEXT_TOOL_CALL_RECOVERIES,
+                            chars = sampled_assistant_text.len(),
+                            "assistant reply carried tool calls as text only — asking for a structured retry"
+                        );
+                        xai_grok_telemetry::unified_log::warn(
+                            "shell.turn.text_tool_call_retry",
+                            Some(self.session_info.id.0.as_ref()),
+                            Some(serde_json::json!({
+                                "attempt": text_tool_call_recoveries,
+                                "max_retries": MAX_TEXT_TOOL_CALL_RECOVERIES,
+                                "chars": sampled_assistant_text.len(),
+                            })),
+                        );
+                        self.push_system_reminder(TEXT_TOOL_CALL_RECOVERY_REMINDER);
+                        salvage.round_boundary();
+                        continue;
+                    }
+                    tracing::error!(
+                        session_id = %self.session_info.id,
+                        prompt_id = %req_id,
+                        retries = text_tool_call_recoveries,
+                        chars = sampled_assistant_text.len(),
+                        "assistant kept emitting tool calls as text; completing the turn with a notice"
+                    );
+                    xai_grok_telemetry::unified_log::warn(
+                        "shell.turn.text_tool_call_gave_up",
+                        Some(self.session_info.id.0.as_ref()),
+                        Some(serde_json::json!({
+                            "retries": text_tool_call_recoveries,
+                            "chars": sampled_assistant_text.len(),
+                        })),
+                    );
+                    self.send_update(
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::Text(acp::TextContent::new(
+                                TEXT_TOOL_CALL_ONLY_NOTICE,
+                            )),
+                        )),
+                        None,
+                    )
+                    .await;
+                }
                 if !schema_ok
                     && !turn_refused
                     && !salvage.is_truncated()
@@ -3998,6 +4051,19 @@ impl SessionActor {
 }
 /// Discard an egregious (2x cap) media-gen generation and re-sample this many times; later over-caps in the same turn use first-K.
 const MAX_MEDIA_GEN_OVER_CAP_RESAMPLES: u32 = 1;
+/// Re-samples spent on a reply whose only content is text-encoded tool calls: the provider defect
+/// is transient, so ask again, but never loop on it.
+const MAX_TEXT_TOOL_CALL_RECOVERIES: u32 = 2;
+/// Correction after a text-encoded tool call. The calls never ran, so the model must re-issue them;
+/// running them from prose would execute markup that the tool-call channel never carried.
+const TEXT_TOOL_CALL_RECOVERY_REMINDER: &str = "Your previous reply contained tool-call XML as \
+     plain text instead of real tool calls, so none of them ran. Re-issue every call you still need \
+     through the tool-call channel with valid JSON arguments, then continue the task. When you are \
+     done, answer in prose and keep the tool-call markup out of the message body.";
+/// Shown when the retries are exhausted: the turn would otherwise end with only the folded XML line.
+const TEXT_TOOL_CALL_ONLY_NOTICE: &str = "The model returned its tool calls as plain text, so none \
+     of them were executed. Send the request again, or switch models — the provider's tool-call \
+     stream dropped the calls.";
 /// Tool kinds whose identical repeats are almost never productive, so they get tighter thresholds than everything else.
 /// A production turn repeated one `ToolKind::Plan` call (`todo_write`) with byte-identical arguments 12 times (224 in the turn).
 /// Names are client-renameable and vary by toolset (`read_file`, `hashline_read`, `Read`; `todo_write`, `todowrite`); the registered kind does not.
