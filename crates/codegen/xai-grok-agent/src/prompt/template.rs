@@ -527,7 +527,7 @@ mod tests {
     fn test_apply_patch_template_plan_present_includes_planning() {
         let prompt = render_apply_patch(&default_renderer(), &default_placeholders());
         assert!(
-            prompt.contains("## Planning"),
+            prompt.contains("<planning>"),
             "Planning section should be present when plan tool exists"
         );
         assert!(
