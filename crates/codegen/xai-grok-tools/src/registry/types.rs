@@ -1582,24 +1582,41 @@ impl FinalizedToolset {
     pub async fn get_resource_cloned<T: Clone + Send + Sync + 'static>(&self) -> Option<T> {
         self.resources.lock().await.get::<T>().cloned()
     }
-    /// Get only built-in tool definitions (exclude MCP tools). TODO: use ToolNamespace metadata
-    /// instead of the "__" string heuristic. This breaks if a built-in tool ever has "__" in its
-    /// name or an MCP server omits the delimiter.
-    pub fn tool_definitions_builtins_only(&self) -> Vec<ToolDefinition> {
+    /// Get only built-in tool definitions (exclude MCP tools), plus MCP tools listed in
+    /// `declared_mcp` (session-scoped discovery activation — see [`DeclaredMcpTools`]).
+    /// TODO: use ToolNamespace metadata instead of the "__" string heuristic. This breaks if a
+    /// built-in tool ever has "__" in its name or an MCP server omits the delimiter.
+    ///
+    /// [`DeclaredMcpTools`]: crate::types::resources::DeclaredMcpTools
+    pub fn tool_definitions_builtins_only(
+        &self,
+        declared_mcp: Option<&std::collections::HashSet<String>>,
+    ) -> Vec<ToolDefinition> {
         self.tools
             .read()
             .iter()
-            .filter(|t| !t.client_name.contains("__"))
+            .filter(|t| {
+                !t.client_name.contains("__")
+                    || declared_mcp.is_some_and(|d| d.contains(&t.client_name))
+            })
             .map(|t| t.definition.clone())
             .collect()
     }
     /// Built-in definitions with `use_tool` advertised inline-only. The Anthropic Messages API rejects the file-form
     /// schema's root-level union, and Messages-backed models must not see the file forms at all.
-    pub fn tool_definitions_builtins_only_inline_mcp(&self) -> Vec<ToolDefinition> {
+    /// MCP tools in `declared_mcp` are included (they carry no file forms; `inline_mcp_definition`
+    /// is `None` for dynamically registered MCP tools anyway).
+    pub fn tool_definitions_builtins_only_inline_mcp(
+        &self,
+        declared_mcp: Option<&std::collections::HashSet<String>>,
+    ) -> Vec<ToolDefinition> {
         self.tools
             .read()
             .iter()
-            .filter(|t| !t.client_name.contains("__"))
+            .filter(|t| {
+                !t.client_name.contains("__")
+                    || declared_mcp.is_some_and(|d| d.contains(&t.client_name))
+            })
             .map(|t| {
                 t.inline_mcp_definition
                     .clone()
@@ -4263,7 +4280,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(toolset.tool_definitions().len(), 3);
-        let builtins = toolset.tool_definitions_builtins_only();
+        let builtins = toolset.tool_definitions_builtins_only(None);
         assert_eq!(builtins.len(), 2);
         for def in &builtins {
             assert!(
@@ -4272,6 +4289,62 @@ mod tests {
                 def.function.name
             );
         }
+    }
+    /// Codemode Phase 1: an MCP tool declared via `DeclaredMcpTools` becomes model-visible so the
+    /// model can call it directly on later turns without another `search_tool` round-trip.
+    #[tokio::test]
+    async fn declared_mcp_tool_emitted_in_builtin_definitions() {
+        let tmp = TempDir::new().unwrap();
+        let builder = ToolRegistryBuilder::new();
+        let config = ToolServerConfig {
+            tools: vec![
+                ToolConfig::for_tool::<grok_build::ReadFileTool>(),
+                ToolConfig::for_tool::<grok_build::GrepTool>(),
+            ],
+            behavior_preset: None,
+        };
+        let ctx = test_session_context(&tmp);
+        let toolset = builder.finalize(config, ctx).unwrap();
+        toolset
+            .register_tool(
+                "linear__save_issue".to_string(),
+                FakeMcpTool {
+                    description: "Create or update a Linear issue".into(),
+                },
+                Some(serde_json::json!({"type": "object", "properties": {}})),
+            )
+            .unwrap();
+
+        // Undeclared: hidden (unchanged behavior).
+        assert!(toolset
+            .tool_definitions_builtins_only(None)
+            .iter()
+            .all(|d| !d.function.name.contains("__")));
+
+        let declared =
+            std::collections::HashSet::from(["linear__save_issue".to_string()]);
+        let defs = toolset.tool_definitions_builtins_only(Some(&declared));
+        assert_eq!(defs.len(), 3);
+        assert_eq!(
+            defs.iter()
+                .filter(|d| d.function.name == "linear__save_issue")
+                .count(),
+            1
+        );
+        let inline = toolset.tool_definitions_builtins_only_inline_mcp(Some(&declared));
+        assert_eq!(
+            inline.iter()
+                .filter(|d| d.function.name == "linear__save_issue")
+                .count(),
+            1
+        );
+
+        // A declared name that is not registered stays out of the list.
+        let bogus = std::collections::HashSet::from(["other__missing".to_string()]);
+        assert!(toolset
+            .tool_definitions_builtins_only(Some(&bogus))
+            .iter()
+            .all(|d| !d.function.name.contains("__")));
     }
     /// §6-4 (codemode acceptance): codemode ships in the model-visible builtin
     /// set while MCP tools stay hidden behind search/use even when codemode
@@ -4299,7 +4372,7 @@ mod tests {
                 Some(serde_json::json!({"type": "object", "properties": {}})),
             )
             .unwrap();
-        let builtins = toolset.tool_definitions_builtins_only();
+        let builtins = toolset.tool_definitions_builtins_only(None);
         let names: Vec<&str> = builtins.iter().map(|d| d.function.name.as_str()).collect();
         assert!(
             names.contains(&"codemode"),

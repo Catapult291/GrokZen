@@ -604,6 +604,44 @@ pub struct EnabledNativeToolNames(pub std::collections::HashSet<String>);
 /// Enabled native tools keyed by canonical registry ID with client-facing names.
 #[derive(Debug, Clone, Default)]
 pub struct NativeToolClientNames(pub std::collections::HashMap<String, String>);
+/// MCP tools declared into the model-visible tool list for this session.
+///
+/// Populated when a tool comes back from a `search_tool` hit or a successful
+/// `use_tool` dispatch (gateway-indexed tools are excluded — they dispatch
+/// through the managed gateway, not the local registry). Declared tools are
+/// emitted in `tool_definitions_builtins_only` / `..._inline_mcp` so the model
+/// can call them directly by their `server__tool` name on later turns without
+/// another `search_tool` round-trip. Session-scoped, not persisted.
+#[derive(Debug, Clone, Default)]
+pub struct DeclaredMcpTools(pub std::collections::HashSet<String>);
+
+impl DeclaredMcpTools {
+    /// Extend the declared set with `names`, inserting the resource if absent.
+    /// Returns how many names were newly declared.
+    pub async fn declare(
+        resources: &SharedResources,
+        names: impl Iterator<Item = String>,
+    ) -> usize {
+        let mut guard = resources.lock().await;
+        let entry = guard.get_or_default::<DeclaredMcpTools>();
+        let before = entry.0.len();
+        entry.0.extend(names);
+        let added = entry.0.len() - before;
+        if added > 0 {
+            tracing::info!(
+                declared = added,
+                total = entry.0.len(),
+                "declared MCP tools into the model-visible tool list"
+            );
+        }
+        added
+    }
+
+    /// Whether `name` has been declared this session.
+    pub fn contains(&self, name: &str) -> bool {
+        self.0.contains(name)
+    }
+}
 impl EnabledNativeToolNames {
     /// Whether `name` is an enabled native (non-MCP) tool.
     pub fn contains(&self, name: &str) -> bool {

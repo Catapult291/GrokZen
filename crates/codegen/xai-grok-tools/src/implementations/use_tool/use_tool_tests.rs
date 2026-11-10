@@ -176,7 +176,6 @@ async fn dispatches_via_ctx_inner_dispatch() {
         expected_tool_name: "linear__save_issue".into(),
         return_output: ToolOutput::Text("issue created".into()),
     });
-
     let result = xai_tool_runtime::Tool::run(
         &tool,
         ctx,
@@ -191,6 +190,75 @@ async fn dispatches_via_ctx_inner_dispatch() {
         panic!("expected text output");
     };
     assert_eq!("issue created", msg.text);
+}
+
+/// Codemode Phase 1: a successful local dispatch activates the tool into `DeclaredMcpTools`
+/// (model-visible on later turns). A failed dispatch must not.
+#[tokio::test]
+async fn successful_dispatch_declares_tool_for_direct_calls() {
+    let resources = crate::types::resources::Resources::default().into_shared();
+    let ctx = ctx_with_dispatch(MockToolDispatch {
+        expected_tool_name: "linear__save_issue".into(),
+        return_output: ToolOutput::Text("issue created".into()),
+    });
+    let ctx = {
+        let mut ctx = ctx;
+        ctx.extensions.insert(resources.clone());
+        ctx
+    };
+
+    let result = xai_tool_runtime::Tool::run(
+        &UseTool,
+        ctx,
+        UseToolInput::Inline(InlineMcpInvocation {
+            tool_name: "linear__save_issue".into(),
+            tool_input: serde_json::json!({}),
+        }),
+    )
+    .await;
+    result.unwrap_or_else(|e| panic!("dispatch should succeed: {e}"));
+
+    let guard = resources.lock().await;
+    let declared = guard
+        .get::<crate::types::resources::DeclaredMcpTools>()
+        .expect("DeclaredMcpTools should exist after a dispatch");
+    assert!(
+        declared.contains("linear__save_issue"),
+        "successful dispatch must declare the tool; got {:?}",
+        declared
+    );
+}
+
+#[tokio::test]
+async fn failed_dispatch_does_not_declare() {
+    let resources = crate::types::resources::Resources::default().into_shared();
+    let ctx = {
+        let mut ctx = ctx_with_dispatch(NotFoundDispatch);
+        ctx.extensions.insert(resources.clone());
+        ctx
+    };
+
+    let result = xai_tool_runtime::Tool::run(
+        &UseTool,
+        ctx,
+        UseToolInput::Inline(InlineMcpInvocation {
+            tool_name: "bad__tool".into(),
+            tool_input: serde_json::json!({}),
+        }),
+    )
+    .await;
+    assert!(result.is_err());
+
+    let declared = resources
+        .lock()
+        .await
+        .get::<crate::types::resources::DeclaredMcpTools>()
+        .map(|d| d.0.clone())
+        .unwrap_or_default();
+    assert!(
+        !declared.contains("bad__tool") && declared.is_empty(),
+        "failed dispatch must not declare; got {declared:?}"
+    );
 }
 
 #[tokio::test]

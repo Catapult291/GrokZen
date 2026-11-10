@@ -270,6 +270,20 @@ impl xai_tool_runtime::Tool for SearchTool {
         let limit = input.limit.unwrap_or(5) as usize;
         let snapshot = tool_index.search_snapshot(&input.query, limit);
 
+        // Codemode Phase 1: declare every returned non-gateway tool so the model can call it
+        // directly by `server__tool` name on later turns. Gateway-indexed tools are excluded —
+        // they dispatch through the managed gateway, which direct model calls cannot reach.
+        let discovered: Vec<String> = snapshot
+            .results
+            .iter()
+            .filter(|r| r.managed_gateway_tool.is_none())
+            .map(|r| r.tool_name.clone())
+            .collect();
+        if !discovered.is_empty() {
+            use crate::types::resources::DeclaredMcpTools;
+            DeclaredMcpTools::declare(&resources, discovered.into_iter()).await;
+        }
+
         // Event: search_tool.search (telemetry — before grouping)
         let all_results_json: Vec<serde_json::Value> = snapshot
             .results
@@ -413,7 +427,7 @@ mod tests {
             })));
         let mut ctx =
             xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
-        ctx.extensions.insert(resources);
+        ctx.extensions.insert(resources.clone());
 
         let output = SearchTool
             .run(
@@ -452,6 +466,70 @@ mod tests {
         assert!(
             !output.content.contains("managed_gateway_tools"),
             "provenance must not enter the model-visible content"
+        );
+        // Gateway tools dispatch through the managed gateway — they must not be declared
+        // as directly callable.
+        let guard = resources.lock().await;
+        let declared = guard
+            .get::<crate::types::resources::DeclaredMcpTools>()
+            .map(|d| d.0.clone());
+        assert!(
+            !declared
+                .unwrap_or_default()
+                .contains("grafana__search_dashboards"),
+            "gateway-indexed tools must not be declared for direct calls"
+        );
+    }
+
+    /// Codemode Phase 1: a non-gateway search hit is declared into `DeclaredMcpTools`,
+    /// making it directly callable (model-visible) on the next turn.
+    #[tokio::test]
+    async fn search_tool_declares_local_hit_for_direct_calls() {
+        let resources = crate::types::resources::Resources::default().into_shared();
+        resources
+            .lock()
+            .await
+            .insert(ToolIndex(std::sync::Arc::new(StaticToolIndex {
+                snapshot: SearchSnapshot {
+                    results: vec![ToolSearchResult {
+                        tool_name: "linear__save_issue".into(),
+                        server_name: "linear".into(),
+                        description: "Create or update a Linear issue".into(),
+                        score: 1.0,
+                        parameters: vec![],
+                        input_schema: serde_json::json!({"type": "object"}),
+                        managed_gateway_tool: None,
+                    }],
+                    total_hidden_tools: 0,
+                    is_ready: true,
+                },
+            })));
+        let mut ctx =
+            xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+        ctx.extensions.insert(resources.clone());
+
+        let output = SearchTool
+            .run(
+                ctx,
+                SearchToolInput {
+                    query: "linear issue".into(),
+                    limit: Some(5),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(output, ToolOutput::SearchTool(_)),
+            "expected search tool output"
+        );
+        let guard = resources.lock().await;
+        let declared = guard
+            .get::<crate::types::resources::DeclaredMcpTools>()
+            .expect("DeclaredMcpTools should exist after a search hit");
+        assert!(
+            declared.contains("linear__save_issue"),
+            "search hit must be declared; got {:?}",
+            declared
         );
     }
 

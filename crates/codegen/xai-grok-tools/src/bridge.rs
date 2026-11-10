@@ -145,14 +145,29 @@ impl ToolBridge {
         self.registry.get_tool_metadata(tool_name).map(|m| m.kind())
     }
 
-    /// Get only built-in tool definitions (exclude MCP tools).
+    /// Built-in tool definitions (excluding MCP tools, except session-declared MCP tools —
+    /// see [`DeclaredMcpTools`]).
     pub async fn tool_definitions_builtins_only(&self) -> Vec<ToolDefinition> {
-        self.registry.tool_definitions_builtins_only()
+        let declared = self.declared_mcp_tools().await;
+        self.registry.tool_definitions_builtins_only(declared.as_ref())
     }
 
-    /// Built-in tool definitions with `use_tool` advertised inline-only (no MCP file forms).
+    /// Built-in tool definitions with `use_tool` advertised inline-only (no MCP file forms),
+    /// plus any MCP tools declared into this session's model-visible set.
     pub async fn tool_definitions_builtins_only_inline_mcp(&self) -> Vec<ToolDefinition> {
-        self.registry.tool_definitions_builtins_only_inline_mcp()
+        let declared = self.declared_mcp_tools().await;
+        self.registry
+            .tool_definitions_builtins_only_inline_mcp(declared.as_ref())
+    }
+
+    /// Clone the session-scoped `DeclaredMcpTools` resource, if present.
+    async fn declared_mcp_tools(&self) -> Option<std::collections::HashSet<String>> {
+        self.registry
+            .resources
+            .lock()
+            .await
+            .get::<crate::types::resources::DeclaredMcpTools>()
+            .map(|d| d.0.clone())
     }
 
     /// Render a prompt template through [`TemplateRenderer`] with extra agent-specific context fields. The template can use
