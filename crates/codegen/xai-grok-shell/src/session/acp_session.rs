@@ -97,6 +97,8 @@ mod cross_turn_loop;
 mod goal;
 #[path = "acp_session_impl/named_workflow_args.rs"]
 mod named_workflow_args;
+#[path = "acp_session_impl/text_tool_calls.rs"]
+mod text_tool_calls;
 #[path = "acp_session_impl/turn.rs"]
 mod turn;
 #[path = "acp_session_impl/workflow.rs"]
