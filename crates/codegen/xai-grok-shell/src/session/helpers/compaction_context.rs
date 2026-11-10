@@ -243,8 +243,8 @@ fn to_system_reminder_inner(
             .collect();
         let hint = if let Some(names) = mcp_tool_names {
             format!(
-                "\nTo use MCP tools, you MUST call `{}` first to retrieve the tool's input schema before calling `{}`. NEVER guess parameter names — always use the exact schema returned by `{}`.",
-                names.search, names.call, names.search
+                "\nTo use MCP tools, you MUST call `{}` first to retrieve the tool's input schema. NEVER guess parameter names — always use the exact schema returned by `{}`.\nA tool found via `{}` stays callable for the rest of the session: call it by its qualified `server__tool` name directly (or via `{}`) on later turns without searching again.",
+                names.search, names.search, names.search, names.call
             )
         } else {
             String::new()

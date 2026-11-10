@@ -154,7 +154,8 @@ impl Agent {
         self.backend_search_enabled
     }
 
-    /// Built-in tool definitions only (excludes MCP tools).
+    /// Built-in tool definitions only (excludes MCP tools), except MCP tools declared into
+    /// the model-visible set this session (see [`DeclaredMcpTools`]).
     pub async fn tool_definitions_builtins_only(&self) -> Vec<ToolDefinition> {
         self.tool_bridge.tool_definitions_builtins_only().await
     }

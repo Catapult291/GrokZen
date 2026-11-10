@@ -144,6 +144,19 @@ fn is_local_tool_id_rejection(err: &xai_tool_runtime::ToolError, tool_name: &str
         && err.detail == format!("invalid tool name: '{tool_name}'")
 }
 
+/// Codemode Phase 1: mark a successfully dispatched local MCP tool as declared, so it becomes
+/// model-visible (directly callable) on later turns without another `search_tool` round-trip.
+async fn declare_local_mcp_tool(ctx: &xai_tool_runtime::ToolCallContext, tool_name: &str) {
+    let Ok(resources) = crate::types::tool_metadata::shared_resources(ctx) else {
+        return;
+    };
+    crate::types::resources::DeclaredMcpTools::declare(
+        &resources,
+        std::iter::once(tool_name.to_owned()),
+    )
+    .await;
+}
+
 async fn gateway_lookup(
     ctx: &xai_tool_runtime::ToolCallContext,
     tool_name: &str,
@@ -213,6 +226,7 @@ pub async fn dispatch_mcp_tool(
         {
             match dispatch_local_mcp(dispatch, tool_name, tool_input.clone(), ctx.clone()).await {
                 Ok(local_output) => {
+                    declare_local_mcp_tool(ctx, tool_name).await;
                     return Ok(local_output.without_managed_gateway_provenance());
                 }
                 Err(err)
@@ -250,14 +264,17 @@ pub async fn dispatch_mcp_tool(
         ));
     }
 
-    dispatch_local_mcp(
+    let output = dispatch_local_mcp(
         dispatch.expect("dispatch is set for local MCP path"),
         tool_name,
         tool_input,
         ctx.clone(),
     )
     .await
-    .map(ToolOutput::without_managed_gateway_provenance)
+    .map(ToolOutput::without_managed_gateway_provenance)?;
+
+    declare_local_mcp_tool(ctx, tool_name).await;
+    Ok(output)
 }
 
 /// Check MCP routing eligibility without dispatching or probing a remote tool.

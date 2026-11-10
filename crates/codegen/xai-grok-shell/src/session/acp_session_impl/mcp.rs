@@ -17,7 +17,7 @@ pub(super) fn attach_elicitation_tx(
 }
 /// MCP tool-usage hint appended to every injected reminder. The codemode sentence is
 /// conditionally rendered so toolsets without codemode never emit "prefer ``".
-pub(super) const MCP_HINT_TEMPLATE: &str = "\nTo use MCP tools, you MUST call `${{ tools.by_kind.search_tool }}` first to retrieve the tool's input schema before calling `${{ tools.by_kind.use_tool }}`. NEVER guess parameter names — always use the exact schema returned by `${{ tools.by_kind.search_tool }}`.\n${% if tools.by_kind.codemode %}For multi-step MCP work (discover + N calls + post-process), prefer `${{ tools.by_kind.codemode }}`: write a short JS script that runs the whole sequence in one sandboxed call, and only the final returned JSON re-enters context.${% endif %}";
+pub(super) const MCP_HINT_TEMPLATE: &str = "\nTo use MCP tools, you MUST call `${{ tools.by_kind.search_tool }}` first to retrieve the tool's input schema. NEVER guess parameter names — always use the exact schema returned by `${{ tools.by_kind.search_tool }}`.\nA tool found via `${{ tools.by_kind.search_tool }}` stays callable for the rest of the session: call it by its qualified `server__tool` name directly (or via `${{ tools.by_kind.use_tool }}`) on later turns without searching again.${% if tools.by_kind.codemode %}For multi-step MCP work (discover + N calls + post-process), prefer `${{ tools.by_kind.codemode }}`: write a short JS script that runs the whole sequence in one sandboxed call, and only the final returned JSON re-enters context.${% endif %}";
 
 impl SessionActor {
     /// Waits until init is complete, starting it if nothing owns it. An abandoned pass is re-owned once.
