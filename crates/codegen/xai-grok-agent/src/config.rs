@@ -364,6 +364,16 @@ pub fn grok_build_hashline_toolset(
 fn codex_toolset() -> ToolServerConfig {
     ToolServerConfig {
         tools: vec![
+            // Index tools lead: skill layers name `search_code` across every
+            // preset, and first-come `by_kind.search` must stay on search_code
+            // ahead of the codex grep tool.
+            (&astrolabe::SearchCodeTool).into(),
+            (&astrolabe::ResolveContextTool).into(),
+            (&astrolabe::FindSymbolTool).into(),
+            (&astrolabe::GetLanguagesTool).into(),
+            (&astrolabe::FindReferencesTool).into(),
+            (&astrolabe::GotoDefinitionTool).into(),
+            (&astrolabe::GetDiagnosticsTool).into(),
             bash_tool_config(),
             (&codex::CodexReadFileTool).into(),
             (&codex::ApplyPatchTool).into(),
@@ -1770,10 +1780,12 @@ mod tests {
     }
     /// `grep` is removed from every Grok Build toolset; `search_code` owns the
     /// content-search slot (`by_kind.search`) and the index tools ship in the
-    /// read-only presets. `resolve_context` still wins task-start routing via
-    /// its description, so it need not lead the Search slot.
+    /// presets that carry skill layers — including `codex`, whose harness
+    /// still surfaces skill names that reference `search_code`.
+    /// `resolve_context` still wins task-start routing via its description, so
+    /// it need not lead the Search slot.
     #[test]
-    fn index_tools_lead_the_search_slot_and_ship_in_read_only_presets() {
+    fn index_tools_lead_the_search_slot() {
         let index_tools = [
             ToolConfig::from(&astrolabe::SearchCodeTool).id,
             ToolConfig::from(&astrolabe::ResolveContextTool).id,
@@ -1787,6 +1799,10 @@ mod tests {
             ("grok-build-plan", grok_build_plan_toolset()),
             ("general-purpose", general_purpose_toolset()),
             ("workspace grok-build", workspace_grok_build_toolset()),
+            (
+                "codex",
+                toolset_for_preset("codex").expect("known preset"),
+            ),
         ] {
             for id in &index_tools {
                 assert!(
