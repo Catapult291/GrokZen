@@ -2,7 +2,7 @@
 
 pub mod types;
 
-pub use types::SearchToolInput;
+pub use types::{SearchDetailLevel, SearchToolInput};
 
 use crate::types::output::{SearchToolOutput, ToolOutput};
 use crate::types::tool::{ToolKind, ToolNamespace};
@@ -17,16 +17,26 @@ pub const SEARCH_TOOL_NAME: &str = "search_tool";
 /// `MAX_MCP_DESCRIPTION_LENGTH` constant. Descriptions exceeding this are truncated.
 pub const MAX_MCP_DESCRIPTION_LENGTH: usize = 2048;
 
+/// Description cap for `detail: "brief"` hits. A short blurb plus parameter
+/// names is usually enough to shortlist a tool; the full schema is one
+/// `detail: "full"` re-search away.
+pub const MAX_BRIEF_DESCRIPTION_LENGTH: usize = 320;
+
 const TRUNCATION_SUFFIX: &str = "\u{2026} [truncated]";
 
 /// Truncate a string to `MAX_MCP_DESCRIPTION_LENGTH` chars, appending a
 /// suffix if truncated. Operates on char boundaries to avoid splitting
 /// multi-byte characters.
 pub fn truncate_description(s: &str) -> String {
-    if s.len() <= MAX_MCP_DESCRIPTION_LENGTH || s.chars().count() <= MAX_MCP_DESCRIPTION_LENGTH {
+    truncate_description_to(s, MAX_MCP_DESCRIPTION_LENGTH)
+}
+
+/// [`truncate_description`] with an explicit char cap (used by `brief` hits).
+pub fn truncate_description_to(s: &str, max_chars: usize) -> String {
+    if s.len() <= max_chars || s.chars().count() <= max_chars {
         return s.to_owned();
     }
-    let budget = MAX_MCP_DESCRIPTION_LENGTH - TRUNCATION_SUFFIX.len();
+    let budget = max_chars - TRUNCATION_SUFFIX.len();
     let truncated: String = s.chars().take(budget).collect();
     format!("{truncated}{TRUNCATION_SUFFIX}")
 }
@@ -218,6 +228,10 @@ impl crate::types::tool_metadata::ToolMetadata for SearchTool {
         "Search for MCP tools by keyword and retrieve their input schemas.\n\n\
          After searching, don't call the hits one by one in separate rounds; to chain \
          multiple MCP steps into a single round, put them in one `codemode` script.\n\n\
+         Optional `detail` controls per-hit verbosity: \"full\" (default) includes the \
+         input schema; \"brief\" gives description + parameter names without the schema; \
+         \"name\" gives names only. Sweep a large catalog cheaply with \"brief\" or \
+         \"name\", then re-search the chosen tool with \"full\" before calling it.\n\n\
          If status is \"partial\", some servers may still be connecting."
     }
 }
@@ -312,13 +326,28 @@ impl xai_tool_runtime::Tool for SearchTool {
         // (best-matching server first). snapshot.results is sorted by BM25 score descending, so the first tool per server is
         // the highest-scoring — used as the group score.
         let mut groups: Vec<(String, f32, Vec<serde_json::Value>)> = Vec::new();
+        let detail = input.detail.unwrap_or_default();
         for r in &snapshot.results {
-            let tool_json = serde_json::json!({
-                "tool_name": r.tool_name,
-                "description": truncate_description(&r.description),
-                "score": r.score,
-                "input_schema": r.input_schema,
-            });
+            let tool_json = match detail {
+                SearchDetailLevel::Full => serde_json::json!({
+                    "tool_name": r.tool_name,
+                    "description": truncate_description(&r.description),
+                    "score": r.score,
+                    "input_schema": r.input_schema,
+                }),
+                SearchDetailLevel::Brief => serde_json::json!({
+                    "tool_name": r.tool_name,
+                    "description": truncate_description_to(
+                        &r.description,
+                        MAX_BRIEF_DESCRIPTION_LENGTH,
+                    ),
+                    "parameters": r.parameters,
+                    "score": r.score,
+                }),
+                SearchDetailLevel::Name => serde_json::json!({
+                    "tool_name": r.tool_name,
+                }),
+            };
             if let Some(group) = groups
                 .iter_mut()
                 .find(|(name, _, _)| name == &r.server_name)
@@ -447,6 +476,7 @@ mod tests {
                 SearchToolInput {
                     query: "grafana".into(),
                     limit: Some(5),
+                    detail: None,
                 },
             )
             .await
@@ -526,6 +556,7 @@ mod tests {
                 SearchToolInput {
                     query: "linear issue".into(),
                     limit: Some(5),
+                    detail: None,
                 },
             )
             .await
@@ -596,6 +627,7 @@ mod tests {
                 SearchToolInput {
                     query: "issue dashboard".into(),
                     limit: Some(5),
+                    detail: None,
                 },
             )
             .await
@@ -640,6 +672,7 @@ mod tests {
                 SearchToolInput {
                     query: "confluence".into(),
                     limit: Some(5),
+                    detail: None,
                 },
             )
             .await
@@ -666,6 +699,93 @@ mod tests {
         assert!(
             !note.contains("parent session"),
             "must not assume a parent session (tool is shared with top-level sessions), got: {note}"
+        );
+    }
+
+    /// Codemode Phase 4: `detail` controls per-hit verbosity. `full` (the
+    /// default, also for `None`) keeps the legacy shape with `input_schema`;
+    /// `brief` swaps the schema for parameter names and shortens the
+    /// description; `name` lists names only.
+    #[tokio::test]
+    async fn search_tool_detail_levels_control_hit_verbosity() {
+        let long_description = "x".repeat(1000);
+        async fn run_with_detail(
+            snapshot: SearchSnapshot,
+            detail: Option<SearchDetailLevel>,
+        ) -> serde_json::Value {
+            let resources = crate::types::resources::Resources::default().into_shared();
+            resources
+                .lock()
+                .await
+                .insert(ToolIndex(std::sync::Arc::new(StaticToolIndex { snapshot })));
+            let mut ctx =
+                xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+            ctx.extensions.insert(resources);
+            let output = SearchTool
+                .run(
+                    ctx,
+                    SearchToolInput {
+                        query: "linear issue".into(),
+                        limit: Some(5),
+                        detail,
+                    },
+                )
+                .await
+                .unwrap();
+            let ToolOutput::SearchTool(output) = output else {
+                panic!("expected search tool output");
+            };
+            let json: serde_json::Value = serde_json::from_str(&output.content).unwrap();
+            json.pointer("/results/0/tools/0").unwrap().clone()
+        }
+
+        let make_snapshot = || SearchSnapshot {
+            results: vec![ToolSearchResult {
+                tool_name: "linear__save_issue".into(),
+                server_name: "linear".into(),
+                description: long_description.clone(),
+                score: 1.0,
+                parameters: vec!["team_id".into(), "title".into()],
+                input_schema: serde_json::json!({"type": "object"}),
+                managed_gateway_tool: None,
+            }],
+            total_hidden_tools: 0,
+            is_ready: true,
+        };
+
+        // `None` and explicit `full` keep the legacy schema shape.
+        for detail in [None, Some(SearchDetailLevel::Full)] {
+            let hit = run_with_detail(make_snapshot(), detail).await;
+            assert!(hit.get("input_schema").is_some(), "full hit: {hit}");
+            assert!(hit.get("parameters").is_none(), "full hit: {hit}");
+            assert_eq!(
+                hit.get("description").unwrap().as_str().unwrap().len(),
+                1000,
+                "full description is capped at MAX_MCP_DESCRIPTION_LENGTH (2048), not truncated here"
+            );
+        }
+
+        // `brief`: description capped short, schema replaced by parameter names.
+        let hit = run_with_detail(make_snapshot(), Some(SearchDetailLevel::Brief)).await;
+        assert!(hit.get("input_schema").is_none(), "brief hit: {hit}");
+        assert_eq!(
+            hit.get("parameters"),
+            Some(&serde_json::json!(["team_id", "title"])),
+            "brief hit: {hit}"
+        );
+        let brief_desc = hit.get("description").unwrap().as_str().unwrap();
+        assert!(
+            brief_desc.ends_with(TRUNCATION_SUFFIX)
+                && brief_desc.chars().count() <= MAX_BRIEF_DESCRIPTION_LENGTH,
+            "brief description must be capped at {MAX_BRIEF_DESCRIPTION_LENGTH} chars: {brief_desc}"
+        );
+
+        // `name`: names only, no description/parameters/schema/score.
+        let hit = run_with_detail(make_snapshot(), Some(SearchDetailLevel::Name)).await;
+        assert_eq!(
+            hit,
+            serde_json::json!({"tool_name": "linear__save_issue"}),
+            "name hit must be exactly the tool name: {hit}"
         );
     }
 

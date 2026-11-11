@@ -620,7 +620,10 @@ pub async fn execute(
 }
 
 /// Enforce the return-size budget: oversized values are replaced by a
-/// `{ truncated, preview, original_bytes }` envelope.
+/// `{ truncated, summarized, preview, original_bytes }` envelope, where
+/// `summarized` is a structural digest of the original value (array length +
+/// first items / top-level object keys), so the model can decide what a
+/// follow-up script should extract without refetching everything.
 fn fit_return(value: serde_json::Value, max_bytes: usize) -> (serde_json::Value, bool) {
     let text = match serde_json::to_string(&value) {
         Ok(t) => t,
@@ -641,11 +644,87 @@ fn fit_return(value: serde_json::Value, max_bytes: usize) -> (serde_json::Value,
     (
         serde_json::json!({
             "truncated": true,
+            "summarized": summarize_value(&value),
             "preview": text[..cut].to_string(),
             "original_bytes": text.len(),
         }),
         true,
     )
+}
+
+/// How many leading array items a `summarized` digest keeps.
+const SUMMARIZE_MAX_ITEMS: usize = 5;
+/// Byte budget per item kept in a `summarized` digest (oversized items are
+/// replaced by a `{ truncated, preview, original_bytes }` record, same shape
+/// as the top-level truncation envelope).
+const SUMMARIZE_MAX_ITEM_BYTES: usize = 384;
+/// How many top-level object keys a `summarized` digest keeps.
+const SUMMARIZE_MAX_KEYS: usize = 100;
+
+/// Structural digest of an oversized return value. Top-level only — nested
+/// structures are shown as their (budgeted) JSON.
+fn summarize_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(items) => {
+            let shown: Vec<serde_json::Value> = items
+                .iter()
+                .take(SUMMARIZE_MAX_ITEMS)
+                .map(|item| summarize_item(item))
+                .collect();
+            serde_json::json!({
+                "type": "array",
+                "length": items.len(),
+                "itemsShown": shown.len(),
+                "items": shown,
+            })
+        }
+        serde_json::Value::Object(map) => {
+            let keys: Vec<&String> = map.keys().take(SUMMARIZE_MAX_KEYS).collect();
+            serde_json::json!({
+                "type": "object",
+                "keyCount": map.len(),
+                "keys": keys,
+                "keysTruncated": map.len() > SUMMARIZE_MAX_KEYS,
+            })
+        }
+        serde_json::Value::String(s) => serde_json::json!({
+            "type": "string",
+            "length": s.chars().count(),
+        }),
+        other => serde_json::json!({ "type": json_kind(other) }),
+    }
+}
+
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+/// Budget one digest item: kept whole when its JSON fits; otherwise replaced
+/// by the same `{ truncated, preview, original_bytes }` shape as the
+/// top-level truncation envelope.
+fn summarize_item(item: &serde_json::Value) -> serde_json::Value {
+    let Ok(text) = serde_json::to_string(item) else {
+        return serde_json::json!({ "truncated": true, "preview": serde_json::Value::Null, "original_bytes": 0 });
+    };
+    if text.len() <= SUMMARIZE_MAX_ITEM_BYTES {
+        return item.clone();
+    }
+    let mut cut = SUMMARIZE_MAX_ITEM_BYTES.min(text.len());
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    serde_json::json!({
+        "truncated": true,
+        "preview": text[..cut].to_string(),
+        "original_bytes": text.len(),
+    })
 }
 
 #[cfg(test)]
