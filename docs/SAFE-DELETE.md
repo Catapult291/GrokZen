@@ -7,8 +7,6 @@ Bash 命令，包括 `rm`、`del`、`rd`、`Remove-Item` 等删除命令，默�
 本仓库用两层互相独立的防护缩小这一暴露面：权限层的 hardline 检查拦灾难性目标，
 `scripts/windows/safe-delete.ps1` 作为模型执行删除的唯一通道。
 
-完整设计与后续阶段见[删除防护计划](DELETE-GUARD-PLAN.md)。
-
 ## 两层防护
 
 | 层 | 位置 | 作用 | 覆盖范围 |
