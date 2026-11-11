@@ -730,8 +730,12 @@ fn description_template_renders_without_search_use_tool() {
     let rendered = renderer
         .render(&super::Codemode.description_template())
         .expect("codemode description must not require search_tool/use_tool in the toolset");
-    assert!(rendered.contains("use_tool"));
     assert!(rendered.contains("searchTool"));
+    assert!(rendered.contains("useTool"));
+    assert!(
+        rendered.contains("STRONG PREFERENCE"),
+        "description must keep the positive routing trigger: {rendered}"
+    );
 }
 
 /// 缺口1: the description must warn that approving the outer call batch-authorizes

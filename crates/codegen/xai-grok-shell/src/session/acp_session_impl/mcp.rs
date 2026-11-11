@@ -15,9 +15,9 @@ pub(super) fn attach_elicitation_tx(
         client.set_elicitation_tx(Some(tx));
     }
 }
-/// MCP tool-usage hint appended to every injected reminder. The codemode sentence is
-/// conditionally rendered so toolsets without codemode never emit "prefer ``".
-pub(super) const MCP_HINT_TEMPLATE: &str = "\nTo use MCP tools, you MUST call `${{ tools.by_kind.search_tool }}` first to retrieve the tool's input schema. NEVER guess parameter names — always use the exact schema returned by `${{ tools.by_kind.search_tool }}`.\nA tool found via `${{ tools.by_kind.search_tool }}` stays callable for the rest of the session: call it by its qualified `server__tool` name directly (or via `${{ tools.by_kind.use_tool }}`) on later turns without searching again.${% if tools.by_kind.codemode %}For multi-step MCP work (discover + N calls + post-process), prefer `${{ tools.by_kind.codemode }}`: write a short JS script that runs the whole sequence in one sandboxed call, and only the final returned JSON re-enters context.${% endif %}";
+/// MCP tool-usage hint appended to every injected reminder. The codemode routing
+/// block is conditionally rendered so toolsets without codemode never emit "prefer ``".
+pub(super) const MCP_HINT_TEMPLATE: &str = "\nTo use MCP tools, you MUST call `${{ tools.by_kind.search_tool }}` first to retrieve the tool's input schema. NEVER guess parameter names — always use the exact schema returned by `${{ tools.by_kind.search_tool }}`.\nA tool found via `${{ tools.by_kind.search_tool }}` stays callable for the rest of the session: call it by its qualified `server__tool` name directly (or via `${{ tools.by_kind.use_tool }}`) on later turns without searching again.${% if tools.by_kind.codemode %}\nMCP routing: the default is direct calls — batch independent calls into the same round. For mechanical multi-step MCP work, prefer `${{ tools.by_kind.codemode }}`: write a short JS script that runs the whole sequence in one sandboxed call, and only the final returned JSON re-enters context. Mechanical means the steps need no per-step judgment: large intermediate results that only get filtered or aggregated, merging results across many items or tools, or long chains whose later arguments are decided by earlier outputs. Keep calling directly when the next step depends on reading a result in context, or when a call is a write, needs approval, or produces rich output (images, tables).${% endif %}";
 
 impl SessionActor {
     /// Waits until init is complete, starting it if nothing owns it. An abandoned pass is re-owned once.
@@ -1605,6 +1605,14 @@ mod hint_template_tests {
             .render(MCP_HINT_TEMPLATE)
             .expect("render with codemode");
         assert!(with.contains("prefer `codemode`"), "got: {with}");
+        assert!(
+            with.contains("Keep calling directly when the next step depends"),
+            "routing block must state when direct calls win: {with}"
+        );
+        assert!(
+            with.contains("Mechanical means the steps need no per-step judgment"),
+            "routing block must define mechanical work: {with}"
+        );
 
         let without = TemplateRenderer::new(tools(false), HashMap::new())
             .render(MCP_HINT_TEMPLATE)
@@ -1616,6 +1624,10 @@ mod hint_template_tests {
         assert!(
             !without.contains("For multi-step MCP work"),
             "codemode sentence must be omitted entirely: {without}"
+        );
+        assert!(
+            !without.contains("Mechanical means"),
+            "routing block must be omitted entirely: {without}"
         );
         assert!(
             without.contains("NEVER guess parameter names"),
