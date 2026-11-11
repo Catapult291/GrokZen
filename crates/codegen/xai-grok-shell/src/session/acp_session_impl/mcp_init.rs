@@ -705,14 +705,19 @@ pub(super) fn register_mcp_tool(
         return;
     }
 
-    if !reg.model_visible {
+    if !reg.exposure.is_registerable() {
         tracing::debug!(
-            "Skipping app-only MCP tool '{}' from '{}'",
+            "Skipping hidden MCP tool '{}' from '{}'",
             qualified_name,
             server_name
         );
         return;
     }
+    // Codemode Phase 2: record the resolved exposure so the snapshot refresher can
+    // republish it as `McpToolExposures` (search_tool / use_tool read it to route).
+    mcp_state
+        .tool_exposures
+        .insert(qualified_name.clone(), reg.exposure);
     if let Err(e) = tool_bridge.register_mcp_tools(reg.name, reg.tool, Some(reg.input_schema)) {
         tracing::warn!(
             "Failed to register tool '{}' from MCP server '{}': {}",

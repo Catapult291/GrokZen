@@ -311,6 +311,7 @@ async fn run_add(args: AddArgs, locale: &LocaleContext) -> Result<()> {
         tool_timeout_sec: None,
         tool_timeouts: None,
         expose_image_base64: None,
+        tool_exposure: None,
     };
 
     // Policy check BEFORE persist (the same gate as the TUI Add): a denied

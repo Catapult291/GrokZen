@@ -546,6 +546,7 @@ pub(crate) mod mcp_dispatcher;
 #[cfg(test)]
 mod mcp_dispatcher_e2e_tests;
 pub(crate) mod mcp_elicitation;
+pub(crate) mod mcp_exposure_policy;
 pub(crate) mod mcp_restart;
 pub mod mcp_servers;
 pub mod memory;

@@ -46,6 +46,7 @@ fn known_mcp_server_fields_cover_serialized_keys() {
         tool_timeout_sec: Some(20),
         tool_timeouts: Some(HashMap::from([("t".into(), 1)])),
         expose_image_base64: Some(true),
+        tool_exposure: None,
     };
     let http = McpServerConfig {
         transport: McpServerTransportConfig::StreamableHttp {
@@ -65,6 +66,7 @@ fn known_mcp_server_fields_cover_serialized_keys() {
         tool_timeout_sec: None,
         tool_timeouts: None,
         expose_image_base64: None,
+        tool_exposure: None,
     };
 
     for config in [stdio, http] {
@@ -311,6 +313,7 @@ fn http_server_with_setup(url: &str, setup: McpSetupConfig) -> McpServerConfig {
         tool_timeout_sec: None,
         tool_timeouts: None,
         expose_image_base64: None,
+        tool_exposure: None,
     }
 }
 

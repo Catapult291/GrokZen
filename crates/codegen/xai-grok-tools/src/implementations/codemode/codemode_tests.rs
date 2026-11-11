@@ -500,6 +500,76 @@ return { found: name, used: used.text, isError: used.isError };
     );
 }
 
+/// Codemode Phase 2: a `codemode_only` tool is reachable from inside a
+/// codemode script — `tools.useTool` (caller "codemode") bypasses the
+/// codemode_only gate that refuses direct model calls.
+#[tokio::test]
+async fn codemode_only_tool_reachable_through_codemode_script() {
+    use std::sync::Mutex;
+    use xai_tool_runtime::{ToolDispatch, ToolStream, TypedToolOutput};
+
+    struct OkDispatch {
+        calls: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolDispatch for OkDispatch {
+        async fn call(
+            &self,
+            tool_id: xai_tool_protocol::ToolId,
+            _args: serde_json::Value,
+            _ctx: xai_tool_runtime::ToolCallContext,
+        ) -> ToolStream<TypedToolOutput> {
+            self.calls.lock().unwrap().push(tool_id.as_str().to_string());
+            let out = serde_json::json!({ "type": "Text", "text": "ok-from-codemode" });
+            xai_tool_runtime::terminal_only(Ok(TypedToolOutput::from_value(tool_id, out)))
+        }
+    }
+
+    let dispatch = Arc::new(OkDispatch {
+        calls: Mutex::new(Vec::new()),
+    });
+    let resources = crate::types::resources::Resources::default().into_shared();
+    resources.lock().await.insert(
+        crate::types::resources::McpToolExposures(std::collections::HashMap::from([(
+            "sentry__find_organizations".to_string(),
+            xai_grok_config::McpToolExposure::CodemodeOnly,
+        )])),
+    );
+    let mut ctx = xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+    ctx.extensions
+        .insert(crate::types::resources::InnerDispatch(dispatch.clone()));
+    ctx.extensions.insert(resources);
+
+    let output = super::Codemode
+        .run(
+            ctx,
+            super::CodemodeInput {
+                code: r#"
+const used = await tools.useTool("sentry__find_organizations", { organization: "acme" });
+return { text: used.text, isError: used.isError };
+"#
+                .into(),
+            },
+        )
+        .await
+        .expect("codemode_only tool must dispatch inside a codemode script");
+
+    assert_eq!(
+        dispatch.calls.lock().unwrap().as_slice(),
+        ["sentry__find_organizations"],
+        "exactly one dispatch for the codemode_only tool"
+    );
+    let ToolOutput::Text(text) = output else {
+        panic!("expected text output");
+    };
+    let envelope: serde_json::Value = serde_json::from_str(&text.text).expect("json envelope");
+    assert_eq!(
+        envelope.pointer("/result/text"),
+        Some(&serde_json::json!("ok-from-codemode"))
+    );
+}
+
 /// §6-2: a killed script leaves the tool usable — the next run succeeds
 /// (per-run runtime, so a timeout cannot poison the session).
 #[tokio::test]

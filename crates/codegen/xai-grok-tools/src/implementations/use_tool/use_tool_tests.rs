@@ -261,6 +261,54 @@ async fn failed_dispatch_does_not_declare() {
     );
 }
 
+/// Codemode Phase 2: a `codemode_only` tool refuses a direct `use_tool` call
+/// with the `codemode_only` error code, and must not be declared.
+#[tokio::test]
+async fn codemode_only_tool_refuses_direct_use_tool() {
+    let resources = crate::types::resources::Resources::default().into_shared();
+    resources.lock().await.insert(
+        crate::types::resources::McpToolExposures(std::collections::HashMap::from([(
+            "linear__save_issue".to_string(),
+            xai_grok_config::McpToolExposure::CodemodeOnly,
+        )])),
+    );
+    let ctx = {
+        let mut ctx = ctx_with_dispatch(MockToolDispatch {
+            expected_tool_name: "linear__save_issue".into(),
+            return_output: ToolOutput::Text("issue created".into()),
+        });
+        ctx.extensions.insert(resources.clone());
+        ctx
+    };
+
+    let error = xai_tool_runtime::Tool::run(
+        &UseTool,
+        ctx,
+        UseToolInput::Inline(InlineMcpInvocation {
+            tool_name: "linear__save_issue".into(),
+            tool_input: serde_json::json!({}),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.details.as_ref().and_then(|d| d.get("code")).and_then(serde_json::Value::as_str),
+        Some("codemode_only"),
+        "direct use_tool on a codemode_only tool must be refused; got {error:?}"
+    );
+
+    let declared = resources
+        .lock()
+        .await
+        .get::<crate::types::resources::DeclaredMcpTools>()
+        .map(|d| d.0.clone())
+        .unwrap_or_default();
+    assert!(
+        !declared.contains("linear__save_issue"),
+        "refused call must not declare; got {declared:?}"
+    );
+}
+
 #[tokio::test]
 async fn propagates_inner_dispatch_error() {
     let tool = UseTool;

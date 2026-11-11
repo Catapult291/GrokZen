@@ -642,6 +642,23 @@ impl DeclaredMcpTools {
         self.0.contains(name)
     }
 }
+/// Codemode Phase 2: resolved exposure per qualified MCP tool name
+/// (`server__tool`), republished by the shell on every MCP snapshot refresh.
+/// `search_tool` reads it to gate declarations; `use_tool` / codemode read it
+/// to enforce the codemode-only routing lane. Tools missing from the map
+/// behave as `Direct` (historical behavior). Session-scoped, not persisted.
+#[derive(Debug, Clone, Default)]
+pub struct McpToolExposures(pub std::collections::HashMap<String, xai_grok_config::McpToolExposure>);
+
+impl McpToolExposures {
+    /// Resolved exposure for `name`; `Direct` when unknown.
+    pub fn exposure(&self, name: &str) -> xai_grok_config::McpToolExposure {
+        self.0
+            .get(name)
+            .copied()
+            .unwrap_or(xai_grok_config::McpToolExposure::Direct)
+    }
+}
 impl EnabledNativeToolNames {
     /// Whether `name` is an enabled native (non-MCP) tool.
     pub fn contains(&self, name: &str) -> bool {

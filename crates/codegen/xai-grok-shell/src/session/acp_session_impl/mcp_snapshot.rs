@@ -126,6 +126,12 @@ pub(super) struct SnapshotRefresher {
     pub(super) mcp_reminder_dirty: Arc<std::sync::atomic::AtomicBool>,
     pub(super) disabled_gateway_tools:
         std::collections::HashMap<String, std::collections::HashSet<String>>,
+    /// Codemode Phase 2: per-server exposure overrides resolved from config
+    /// (`[mcp_servers.<x>] tool_exposure` + `[toolset.codemode] mode`), keyed
+    /// by qualified tool name. `None` (tests, shared pool refreshes) means no
+    /// overrides — per-tool entries from `McpState.tool_exposures` still apply.
+    pub(super) exposure_overrides:
+        Option<std::collections::HashMap<String, xai_grok_config::McpToolExposure>>,
     /// External harness only: `Some` also updates the on-disk `mcps/` descriptor mirror.
     pub(super) mcps_root: Option<std::path::PathBuf>,
 }
@@ -147,6 +153,7 @@ impl SnapshotRefresher {
             tool_metadata_snapshot,
             mcp_reminder_dirty,
             disabled_gateway_tools,
+            exposure_overrides: _,
             mcps_root,
         } = self;
         if self.is_superseded() {
@@ -229,6 +236,33 @@ impl SnapshotRefresher {
                 Some(generation) => generation.clone(),
                 None => mcp_state.lock().await.current_generation(),
             };
+            let tool_exposures: std::collections::HashMap<
+                String,
+                xai_grok_config::McpToolExposure,
+            > = mcp_state.lock().await.tool_exposures.clone();
+            // Codemode Phase 2: server-level exposure overrides resolved once per refresh,
+            // so every tool of an overridden server lands in the published map.
+            let exposure_overrides = self
+                .exposure_overrides
+                .clone()
+                .unwrap_or_default();
+            let exposure_map: xai_grok_tools::types::resources::McpToolExposures =
+                xai_grok_tools::types::resources::McpToolExposures(
+                    tool_exposures
+                        .into_iter()
+                        .map(|(name, exposure)| {
+                            // Per-tool entry already carries the resolved final value.
+                            (name, exposure)
+                        })
+                        .chain(exposure_overrides)
+                        .collect(),
+                );
+            let direct_tools: Vec<String> = exposure_map
+                .0
+                .iter()
+                .filter(|(_, e)| **e == xai_grok_config::McpToolExposure::Direct)
+                .map(|(name, _)| name.clone())
+                .collect();
             let catalog = build_mcp_catalog(
                 tool_bridge,
                 mcp_state,
@@ -257,6 +291,24 @@ impl SnapshotRefresher {
                     resources.insert(xai_grok_tools::types::resources::ManagedGatewayToolCatalog(
                         catalog.gateway_resource_entries.into_iter().collect(),
                     ));
+                    // Codemode Phase 2: publish the routing map and pre-declare `Direct`
+                    // tools so they are advertised from turn one without a search round-trip.
+                    // `Deferred` / `CodemodeOnly` stay undeclared: the former activates on a
+                    // search_tool hit, the latter is only reachable inside a codemode script.
+                    resources.insert(exposure_map);
+                    // Same critical section as the publications above: `search_tool` and
+                    // `use_tool` read under the bridge's resource lock.
+                    let declared = resources
+                        .get_or_default::<xai_grok_tools::types::resources::DeclaredMcpTools>();
+                    let before = declared.0.len();
+                    declared.0.extend(direct_tools.iter().cloned());
+                    if declared.0.len() > before {
+                        tracing::debug!(
+                            predeclared = declared.0.len() - before,
+                            total = declared.0.len(),
+                            "pre-declared direct-exposure MCP tools into the model-visible tool list"
+                        );
+                    }
                     let mut snapshot = tool_metadata_snapshot.lock().unwrap();
                     snapshot.managed_gateway_tools = managed_gateway_tools;
                     snapshot.tools = catalog.tools;
@@ -391,6 +443,7 @@ pub(crate) async fn refresh_mcp_snapshot_for_test(
         tool_metadata_snapshot,
         mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         disabled_gateway_tools,
+        exposure_overrides: None,
         mcps_root: None,
     }
     .refresh()

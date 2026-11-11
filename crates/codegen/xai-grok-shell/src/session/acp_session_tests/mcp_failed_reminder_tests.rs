@@ -721,6 +721,7 @@ async fn superseded_refresh_does_not_publish() {
                 tool_metadata_snapshot: a.tool_metadata_snapshot.clone(),
                 mcp_reminder_dirty: Arc::clone(&a.mcp_reminder_dirty),
                 disabled_gateway_tools: std::collections::HashMap::new(),
+                exposure_overrides: None,
                 mcps_root: None,
             }
             .refresh()

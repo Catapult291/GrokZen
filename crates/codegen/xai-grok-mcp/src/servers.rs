@@ -456,6 +456,10 @@ pub struct McpState {
     pub disabled_tools: HashMap<McpServerName, std::collections::HashSet<ToolName>>,
     /// Stashed registrations for disabled tools so they can be re-enabled without a full MCP re-init (no need to call `list_tools` again).
     pub disabled_tool_registrations: HashMap<String, McpToolRegistration>,
+    /// Codemode Phase 2: resolved exposure per qualified tool name.
+    /// Published to the tool bridge as `McpToolExposures` on every snapshot
+    /// refresh so `search_tool` / `use_tool` can enforce routing.
+    pub tool_exposures: HashMap<String, xai_grok_config::McpToolExposure>,
     /// `Weak` to the live [`InitClaimGuard`]; dead once the owning pass drops it.
     init_owner: std::sync::Weak<()>,
     init_signal: std::sync::Arc<tokio::sync::Notify>,
@@ -491,6 +495,7 @@ impl McpState {
             unreachable_attempt_counter: 0,
             disabled_tools: HashMap::new(),
             disabled_tool_registrations: HashMap::new(),
+            tool_exposures: HashMap::new(),
             init_owner: std::sync::Weak::new(),
             init_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
             generation: Generation::current(),
@@ -1464,7 +1469,11 @@ pub struct McpTool {
 }
 
 /// Data needed to register an MCP tool via `register_erased()`.
-/// **Model-visible** (default, or `["model", "app"]`): registered in `ToolBridge` so the LLM can invoke them during a conversation; **App-visible only** (`["app"]`): not registered in `ToolBridge`, so the LLM never sees them. These are UI-only actions surfaced to the frontend via `x.ai/mcp/tools_changed` notifications. They are callable via `x.ai/mcp/call`.
+/// **Exposure** decides how the model reaches the tool: `Direct` (default, or `["model", "app"]`
+/// meta) is advertised from turn one; `Deferred` is reachable via `search_tool` first; `CodemodeOnly`
+/// is reachable only inside a codemode script; `Hidden` (`["app"]` only) is never registered — a
+/// UI-only action surfaced to the frontend via `x.ai/mcp/tools_changed` notifications, callable
+/// via `x.ai/mcp/call`.
 pub struct McpToolRegistration {
     pub name: String,
     pub description: String,
@@ -1472,7 +1481,7 @@ pub struct McpToolRegistration {
     pub tool: McpErasedTool,
     pub meta: Option<serde_json::Value>,
     pub icons: Vec<McpIcon>,
-    pub model_visible: bool,
+    pub exposure: xai_grok_config::McpToolExposure,
 }
 
 impl McpTool {
@@ -1514,13 +1523,20 @@ impl McpTool {
         let input_schema = self.schema.clone();
         let meta = self.meta.clone();
 
-        let model_visible = meta
+        let exposure = meta
             .as_ref()
             .and_then(|m| m.get("ui"))
             .and_then(|ui| ui.get("visibility"))
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().any(|s| s.as_str() == Some("model")))
-            .unwrap_or(true); // default: visible to model
+            .map(|arr| {
+                if arr.iter().any(|s| s.as_str() == Some("model")) {
+                    xai_grok_config::McpToolExposure::Direct
+                } else {
+                    // App-only meta (`["app"]`): never advertised to the model.
+                    xai_grok_config::McpToolExposure::Hidden
+                }
+            })
+            .unwrap_or(xai_grok_config::McpToolExposure::Direct); // default: visible to model
 
         Ok(McpToolRegistration {
             name: qualified_name,
@@ -1529,7 +1545,7 @@ impl McpTool {
             tool: McpErasedTool { tool: self },
             meta,
             icons: Vec::new(),
-            model_visible,
+            exposure,
         })
     }
 }
