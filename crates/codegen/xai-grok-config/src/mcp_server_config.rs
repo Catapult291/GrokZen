@@ -93,6 +93,7 @@ pub const KNOWN_MCP_SERVER_FIELDS: &[&str] = &[
     "oauth_scopes",
     "setup",
     "startup_timeout_sec",
+    "tool_exposure",
     "tool_timeout_sec",
     "tool_timeouts",
     "type",
@@ -217,6 +218,11 @@ pub struct McpServerConfig {
     pub tool_timeouts: Option<HashMap<String, u64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expose_image_base64: Option<bool>,
+    /// Codemode Phase 2: how this server's tools reach the model
+    /// (`"direct"` | `"deferred"` | `"codemode_only"` | `"hidden"`).
+    /// `None` keeps the global `[toolset.codemode] mode` default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_exposure: Option<crate::mcp_exposure::McpToolExposure>,
 }
 
 impl McpServerConfig {

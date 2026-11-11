@@ -1285,6 +1285,7 @@ ignore = ["~/.grok/skills/noisy/SKILL.md"]
             tool_timeout_sec: None,
             tool_timeouts: None,
             expose_image_base64: None,
+            tool_exposure: None,
         };
 
         let err = save_mcp_server_config_at(&path, "qa-echo", &config)

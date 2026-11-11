@@ -20,6 +20,7 @@ fn meta_for(configured: &str) -> Option<acp::Meta> {
         tool_timeout_sec: None,
         tool_timeouts: None,
         expose_image_base64: None,
+        tool_exposure: None,
     };
     let Some(acp::McpServer::Http(server)) = config.to_acp_mcp_server("x") else {
         panic!("expected an http server");

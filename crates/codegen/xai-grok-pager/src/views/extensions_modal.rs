@@ -2264,6 +2264,7 @@ fn parse_mcp_add_fields(name: &str, url_or_cmd: &str) -> Option<ButtonAction> {
             tool_timeout_sec: None,
             tool_timeouts: None,
             expose_image_base64: None,
+            tool_exposure: None,
         }),
     })
 }

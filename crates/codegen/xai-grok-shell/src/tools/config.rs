@@ -170,6 +170,13 @@ pub struct CodemodeToolConfig {
     pub max_concurrency: Option<usize>,
     /// Return-value budget (KiB); larger values are truncated.
     pub max_return_kb: Option<usize>,
+    /// Codemode Phase 2: MCP tool routing (`adaptive` | `only` | `off`).
+    /// `only` trims every local MCP tool to the codemode lane; `off` keeps the
+    /// historical direct-call behavior and ignores per-server exposure config.
+    pub mode: Option<xai_grok_config::CodemodeMcpMode>,
+    /// `mode = "only"` 的热工具豁免：这些 server 的工具保持 Direct（每轮都用的
+    /// server 不该被藏进 codemode）。`adaptive` / `off` 下忽略。
+    pub direct_servers: Option<Vec<String>>,
 }
 
 impl CodemodeToolConfig {
@@ -191,6 +198,11 @@ impl CodemodeToolConfig {
         }
         if let Some(v) = self.max_return_kb {
             map.insert("max_return_kb".into(), v.into());
+        }
+        if let Some(v) = self.mode {
+            if let Ok(json) = serde_json::to_value(v) {
+                map.insert("mode".into(), json);
+            }
         }
         map
     }

@@ -1722,8 +1722,11 @@ pub(super) async fn run_session(
                                     }
                                 }
                                 if let Some(reg) = mcp_state.disabled_tool_registrations.remove(&qualified)
-                                    && reg.model_visible
+                                    && reg.exposure.is_registerable()
                                 {
+                                    mcp_state
+                                        .tool_exposures
+                                        .insert(qualified.clone(), reg.exposure);
                                     let bridge = session.agent.borrow().tool_bridge().clone();
                                     if let Err(e) = bridge
                                         .register_mcp_tools(reg.name, reg.tool, Some(reg.input_schema))
@@ -1761,6 +1764,7 @@ pub(super) async fn run_session(
                                     }
                                 }
                                 bridge.unregister_tool_by_name(&qualified);
+                                mcp_state.tool_exposures.remove(&qualified);
                                 mcp_state
                                     .disabled_tools
                                     .entry(server_name.clone())

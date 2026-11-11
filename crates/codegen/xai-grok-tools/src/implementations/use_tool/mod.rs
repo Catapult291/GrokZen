@@ -206,6 +206,31 @@ pub async fn dispatch_mcp_tool(
     caller: &str,
 ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
     let tool_input = normalize_mcp_arguments(tool_input);
+    // Codemode Phase 2: `codemode_only` tools are reachable only from inside a
+    // codemode script (`tools.useTool`, caller "codemode"). A direct `use_tool`
+    // call from the model is refused so the tool keeps zero round-trips — it
+    // stays on the one-round codemode lane.
+    if caller != "codemode" && tool_name.contains("__") {
+        use crate::types::resources::McpToolExposures;
+        let exposure = match crate::types::tool_metadata::shared_resources(ctx) {
+            Ok(resources) => {
+                let guard = resources.lock().await;
+                guard.get::<McpToolExposures>().cloned()
+            }
+            Err(_) => None,
+        };
+        if let Some(exposures) = exposure
+            && exposures.exposure(tool_name) == xai_grok_config::McpToolExposure::CodemodeOnly
+        {
+            return Err(xai_tool_runtime::ToolError::custom(
+                "codemode_only",
+                format!(
+                    "Tool '{tool_name}' is configured codemode_only: call it inside a codemode \
+                     script (tools.useTool) instead of calling it directly."
+                ),
+            ));
+        }
+    }
     let (gateway_source, gateway_client) = gateway_lookup(ctx, tool_name).await;
     let dispatch = ctx
         .extensions

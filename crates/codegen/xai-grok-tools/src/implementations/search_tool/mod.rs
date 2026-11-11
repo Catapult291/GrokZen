@@ -273,15 +273,25 @@ impl xai_tool_runtime::Tool for SearchTool {
         // Codemode Phase 1: declare every returned non-gateway tool so the model can call it
         // directly by `server__tool` name on later turns. Gateway-indexed tools are excluded —
         // they dispatch through the managed gateway, which direct model calls cannot reach.
-        let discovered: Vec<String> = snapshot
+        // Codemode Phase 2: `codemode_only` tools stay on the codemode lane — a search hit
+        // must not activate them for direct calls. `hidden` tools never appear in the index
+        // at all (they are not registered), so only `codemode_only` needs filtering here.
+        use crate::types::resources::McpToolExposures;
+        let exposures = resources.lock().await.get::<McpToolExposures>().cloned();
+        let declareable: Vec<String> = snapshot
             .results
             .iter()
             .filter(|r| r.managed_gateway_tool.is_none())
+            .filter(|r| {
+                exposures
+                    .as_ref()
+                    .is_none_or(|m| m.exposure(&r.tool_name).is_declareable())
+            })
             .map(|r| r.tool_name.clone())
             .collect();
-        if !discovered.is_empty() {
+        if !declareable.is_empty() {
             use crate::types::resources::DeclaredMcpTools;
-            DeclaredMcpTools::declare(&resources, discovered.into_iter()).await;
+            DeclaredMcpTools::declare(&resources, declareable.into_iter()).await;
         }
 
         // Event: search_tool.search (telemetry — before grouping)
@@ -529,6 +539,78 @@ mod tests {
         assert!(
             declared.contains("linear__save_issue"),
             "search hit must be declared; got {:?}",
+            declared
+        );
+    }
+
+    /// Codemode Phase 2: a `codemode_only` tool stays on the codemode lane —
+    /// a search hit must not declare it for direct calls. `direct` tools in
+    /// the same result set still declare.
+    #[tokio::test]
+    async fn search_tool_skips_codemode_only_hits_when_declaring() {
+        let resources = crate::types::resources::Resources::default().into_shared();
+        resources
+            .lock()
+            .await
+            .insert(ToolIndex(std::sync::Arc::new(StaticToolIndex {
+                snapshot: SearchSnapshot {
+                    results: vec![
+                        ToolSearchResult {
+                            tool_name: "linear__save_issue".into(),
+                            server_name: "linear".into(),
+                            description: "Create or update a Linear issue".into(),
+                            score: 1.0,
+                            parameters: vec![],
+                            input_schema: serde_json::json!({"type": "object"}),
+                            managed_gateway_tool: None,
+                        },
+                        ToolSearchResult {
+                            tool_name: "grafana__SearchDashboards".into(),
+                            server_name: "grafana".into(),
+                            description: "Search dashboards".into(),
+                            score: 0.9,
+                            parameters: vec![],
+                            input_schema: serde_json::json!({"type": "object"}),
+                            managed_gateway_tool: None,
+                        },
+                    ],
+                    total_hidden_tools: 0,
+                    is_ready: true,
+                },
+            })));
+        resources.lock().await.insert(
+            crate::types::resources::McpToolExposures(std::collections::HashMap::from([(
+                "grafana__SearchDashboards".to_string(),
+                xai_grok_config::McpToolExposure::CodemodeOnly,
+            )])),
+        );
+        let mut ctx =
+            xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+        ctx.extensions.insert(resources.clone());
+
+        let output = SearchTool
+            .run(
+                ctx,
+                SearchToolInput {
+                    query: "issue dashboard".into(),
+                    limit: Some(5),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(output, ToolOutput::SearchTool(_)));
+        let guard = resources.lock().await;
+        let declared = guard
+            .get::<crate::types::resources::DeclaredMcpTools>()
+            .expect("DeclaredMcpTools should exist after a search hit");
+        assert!(
+            declared.contains("linear__save_issue"),
+            "direct tool must be declared; got {:?}",
+            declared
+        );
+        assert!(
+            !declared.contains("grafana__SearchDashboards"),
+            "codemode_only tool must stay off the direct lane; got {:?}",
             declared
         );
     }

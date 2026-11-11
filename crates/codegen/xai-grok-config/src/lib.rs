@@ -35,6 +35,7 @@ mod managed_cache;
 mod managed_policy_trust;
 pub mod managed_text;
 mod mcp_bearer_token_file;
+pub mod mcp_exposure;
 mod mcp_server_config;
 pub mod mcp_servers;
 mod memory_v2;
@@ -103,6 +104,7 @@ pub use managed_cache::{
 };
 pub use managed_policy_trust::ManagedPolicyTrust;
 pub use mcp_bearer_token_file::{BearerTokenPath, BearerTokenPathError};
+pub use mcp_exposure::{CodemodeMcpMode, McpToolExposure};
 pub use mcp_server_config::{
     KNOWN_MCP_SERVER_FIELDS, McpConfig, McpJsonOAuthBlock, McpOAuthConfig, McpOAuthConfigMap,
     McpPreferenceSource, McpPreferencesFile, McpServerConfig, McpServerConfigProblem,
