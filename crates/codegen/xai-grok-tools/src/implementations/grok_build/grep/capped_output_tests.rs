@@ -62,6 +62,9 @@ fn grep_config(
         max_chars_per_line: DEFAULT_MAX_CHARS_PER_LINE,
         max_output_bytes,
         cwd_display: "/ws".to_string(),
+        // Empty root disables the heading-path rewrite; these tests pin raw
+        // `rg` byte projection, not path rendering.
+        search_root: String::new(),
     }
 }
 

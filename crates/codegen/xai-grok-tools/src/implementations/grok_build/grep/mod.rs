@@ -748,6 +748,10 @@ async fn prepare_grep(
             max_chars_per_line,
             max_output_bytes,
             cwd_display,
+            // The exact string `rg` receives as its search root; heading path
+            // lines start with it and are rewritten to the `{root}/{rel}`
+            // display convention by `normalize_path_line`.
+            search_root: workdir.to_string_lossy().into_owned(),
         },
     }))
 }
