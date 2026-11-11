@@ -399,9 +399,9 @@ pub struct DisplayCwd(pub PathBuf);
 /// reached by a recursive walk or a `glob` arg that targets a denied file.
 #[derive(Debug, Clone, Default)]
 pub struct DenyReadGlobs(pub Vec<String>);
-/// Resolve a model-provided path, rewriting absolute paths from conversation history when [`DisplayCwd`] is set. If `display_cwd` is `None`,
-/// falls back to `cwd.join(input)`. If `input` starts with the `display_cwd` prefix, strips it and joins the suffix onto `cwd` (the real
-/// worktree path). If `input` is absolute but doesn't match, returns it as-is.
+/// Resolve a model-provided path, rewriting rooted paths from conversation history when [`DisplayCwd`] is set. If `display_cwd` is `None`,
+/// rooted input (`has_root()`, i.e. Unix-absolute or Windows rooted-without-drive) is returned as-is. If `input` starts with the `display_cwd`
+/// prefix, strips it and joins the suffix onto `cwd` (the real worktree path). If `input` is rooted but doesn't match, returns it as-is.
 pub fn resolve_model_path(
     cwd: &std::path::Path,
     display_cwd: Option<&std::path::Path>,
@@ -410,15 +410,25 @@ pub fn resolve_model_path(
     let input = sanitize_model_path_arg(input);
     let expanded = shellexpand::tilde(input);
     let input_path = std::path::Path::new(expanded.as_ref());
-    if let Some(display) = display_cwd
-        && input_path.is_absolute()
-    {
-        if let Ok(suffix) = input_path.strip_prefix(display) {
-            return cwd.join(suffix);
+    // Rooted input (e.g. `/home/user/project/src/main.rs`): treat as an absolute path for
+    // display-rewrite purposes. `has_root()` instead of `is_absolute()` because on Windows a
+    // rooted path without a drive prefix (`/home/...`) is not `is_absolute()`, yet it is
+    // exactly the Unix-absolute form the model means to match against `display_cwd`.
+    if input_path.has_root() {
+        if let Some(display) = display_cwd {
+            if let Ok(suffix) = input_path.strip_prefix(display) {
+                return cwd.join(suffix);
+            }
         }
+        // Rooted-but-unmatched input: return as-is. Never fall through to the `cwd.join`
+        // fallback below — joining a rooted path would silently discard `cwd` (and on
+        // Windows additionally replace the whole buffer).
         return input_path.to_path_buf();
     }
-    if !input_path.is_absolute() && !expanded.is_empty() {
+    // Relative input that merely lost its leading slash (e.g. the model sent
+    // `home/user/project/x` for `/home/user/project/x`): reconstruct the rooted form and
+    // retry the match against the display cwd (or cwd itself).
+    if !expanded.is_empty() {
         let as_absolute = std::path::PathBuf::from(format!("/{}", expanded.as_ref()));
         let effective_base = display_cwd.unwrap_or(cwd);
         if as_absolute.starts_with(effective_base)
