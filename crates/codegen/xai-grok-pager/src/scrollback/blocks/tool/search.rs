@@ -64,7 +64,10 @@ pub struct SearchInputMeta {
 #[derive(Debug, Clone)]
 pub struct SearchToolCallBlock {
     pub pattern: String,
-    pub match_count: usize,
+    /// Structured match count from the tool output. `None` means the output carried no count
+    /// (e.g. index tools like `search_code` return plain text) — the header omits the summary
+    /// instead of claiming "no matches". `Some(0)` is a real zero-hit result.
+    pub match_count: Option<usize>,
     /// Matches grouped by file (line-level matches).
     pub file_matches: Vec<SearchFileMatch>,
     /// File paths only (for `files_with_matches` output mode).
@@ -86,7 +89,7 @@ impl SearchToolCallBlock {
     pub fn new(pattern: impl Into<String>) -> Self {
         Self {
             pattern: pattern.into(),
-            match_count: 0,
+            match_count: None,
             file_matches: Vec::new(),
             file_paths: Vec::new(),
             error: None,
@@ -103,7 +106,7 @@ impl SearchToolCallBlock {
     }
 
     pub fn with_matches(mut self, match_count: usize, file_matches: Vec<SearchFileMatch>) -> Self {
-        self.match_count = match_count;
+        self.match_count = Some(match_count);
         self.file_matches = file_matches;
         self
     }
@@ -149,79 +152,88 @@ impl SearchToolCallBlock {
     }
 
     pub fn set_file_matches(&mut self, match_count: usize, file_matches: Vec<SearchFileMatch>) {
-        self.match_count = match_count;
+        self.match_count = Some(match_count);
         self.file_matches = file_matches;
     }
 
     /// Build the match summary string, adapted by output mode.
     ///
+    /// `None` when the block carries no structured count (index tools return plain text):
+    /// the header omits the summary rather than implying a zero-hit search.
+    ///
     /// - `Content`:            `(3 matches in 2 files)` / `(1 match)` / `(no matches)`
     /// - `FilesWithMatches`:   `(3 files)` / `(1 file)` / `(no matches)`
     /// - `Count`:              `(42 matches across 5 files)` / `(no matches)`
-    fn match_summary(&self, locale: &crate::locale::LocaleContext) -> String {
+    fn match_summary(&self, locale: &crate::locale::LocaleContext) -> Option<String> {
+        let Some(match_count) = self.match_count else {
+            return None;
+        };
         let zh = locale.locale() == crate::locale::UiLocale::ZhCn;
-        if self.match_count == 0 {
+        if match_count == 0 {
             if zh {
-                return match self.meta.output_mode {
+                return Some(match self.meta.output_mode {
                     SearchOutputMode::FilesWithMatches => "（无文件）".to_string(),
                     _ => "（无匹配）".to_string(),
-                };
+                });
             }
-            return match self.meta.output_mode {
+            return Some(match self.meta.output_mode {
                 SearchOutputMode::FilesWithMatches => "(no files)".to_string(),
                 _ => "(no matches)".to_string(),
-            };
+            });
         }
         match self.meta.output_mode {
             SearchOutputMode::Content => {
                 let file_count = self.file_matches.len();
                 if zh {
-                    return if file_count > 1 {
+                    return Some(if file_count > 1 {
                         format!(
                             "（{} 个匹配，位于 {} 个文件）",
-                            self.match_count, file_count
+                            match_count, file_count
                         )
                     } else {
-                        format!("（{} 个匹配）", self.match_count)
-                    };
+                        format!("（{} 个匹配）", match_count)
+                    });
                 }
                 if file_count > 1 {
-                    format!("({} matches in {} files)", self.match_count, file_count)
-                } else if self.match_count == 1 {
-                    "(1 match)".to_string()
+                    Some(format!("({} matches in {} files)", match_count, file_count))
+                } else if match_count == 1 {
+                    Some("(1 match)".to_string())
                 } else {
-                    format!("({} matches)", self.match_count)
+                    Some(format!("({} matches)", match_count))
                 }
             }
             SearchOutputMode::FilesWithMatches => {
-                let n = self.match_count; // match_count = # of files in this mode
+                let n = match_count; // match_count = # of files in this mode
                 if zh {
-                    return format!("（{n} 个文件）");
+                    return Some(format!("（{n} 个文件）"));
                 }
                 if n == 1 {
-                    "(1 file)".to_string()
+                    Some("(1 file)".to_string())
                 } else {
-                    format!("({n} files)")
+                    Some(format!("({n} files)"))
                 }
             }
             SearchOutputMode::Count => {
                 let file_count = self.file_paths.len().max(self.file_matches.len());
                 if zh {
-                    return if file_count > 1 {
+                    return Some(if file_count > 1 {
                         format!(
                             "（{} 个匹配，遍及 {} 个文件）",
-                            self.match_count, file_count
+                            match_count, file_count
                         )
                     } else {
-                        format!("（{} 个匹配）", self.match_count)
-                    };
+                        format!("（{} 个匹配）", match_count)
+                    });
                 }
                 if file_count > 1 {
-                    format!("({} matches across {} files)", self.match_count, file_count)
-                } else if self.match_count == 1 {
-                    "(1 match)".to_string()
+                    Some(format!(
+                        "({} matches across {} files)",
+                        match_count, file_count
+                    ))
+                } else if match_count == 1 {
+                    Some("(1 match)".to_string())
                 } else {
-                    format!("({} matches)", self.match_count)
+                    Some(format!("({} matches)", match_count))
                 }
             }
         }
@@ -291,6 +303,9 @@ impl SearchToolCallBlock {
 
         // Path scope (always after glob if both present).
         // When width is constrained, shorten the path the way the fish shell does
+        let summary = self
+            .match_summary(locale)
+            .map(|s| format!(" {s}"));
         if let Some(ref path) = self.meta.path {
             spans.push(Span::styled(in_label, text_style));
             if let Some(w) = width {
@@ -298,10 +313,12 @@ impl SearchToolCallBlock {
                     .iter()
                     .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
                     .sum();
-                let summary = format!(" {}", self.match_summary(locale));
                 // Reserve space for summary; if path can't fit even without it, drop summary.
-                let path_budget = w
-                    .saturating_sub(used + unicode_width::UnicodeWidthStr::width(summary.as_str()));
+                let path_budget = w.saturating_sub(
+                    used + summary
+                        .as_ref()
+                        .map_or(0, |s| unicode_width::UnicodeWidthStr::width(s.as_str())),
+                );
                 let shortened = crate::render::tool_paths::shorten_path(path, path_budget);
                 spans.push(Span::styled(shortened, path_style));
             } else {
@@ -309,19 +326,20 @@ impl SearchToolCallBlock {
             }
         }
 
-        // Match summary — always last.
+        // Match summary — always last (absent when the output carried no structured count).
         // When width-constrained, only include if there's room.
-        let summary = format!(" {}", self.match_summary(locale));
-        if let Some(w) = width {
-            let used: usize = spans
-                .iter()
-                .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
-                .sum();
-            if used + unicode_width::UnicodeWidthStr::width(summary.as_str()) <= w {
+        if let Some(summary) = summary {
+            if let Some(w) = width {
+                let used: usize = spans
+                    .iter()
+                    .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum();
+                if used + unicode_width::UnicodeWidthStr::width(summary.as_str()) <= w {
+                    spans.push(Span::styled(summary, detail_style));
+                }
+            } else {
                 spans.push(Span::styled(summary, detail_style));
             }
-        } else {
-            spans.push(Span::styled(summary, detail_style));
         }
 
         let line = Line::from(spans);
@@ -498,7 +516,7 @@ impl BlockContent for SearchToolCallBlock {
                     }
                 } else if has_results {
                     lines.push(Line::from("").into());
-                } else if self.match_count == 0 {
+                } else if self.match_count == Some(0) {
                     // No results: show a hint
                     lines.push(Line::from("").into());
                     let no_results = ctx
