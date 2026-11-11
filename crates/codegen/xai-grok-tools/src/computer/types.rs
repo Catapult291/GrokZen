@@ -184,6 +184,17 @@ pub trait AsyncFileSystem: Send + Sync {
         ))
     }
 
+    /// Whether `path` exists as a directory, without reading anything. The
+    /// default errs with `ErrorKind::Unsupported` — callers must treat `Err`
+    /// as "unknown" and fall back to their normal error path.
+    async fn path_is_directory(&self, path: &Path) -> Result<bool, ComputerError> {
+        let _ = path;
+        Err(ComputerError::io_with_kind(
+            "path_is_directory is not supported by this backend",
+            std::io::ErrorKind::Unsupported,
+        ))
+    }
+
     /// Offer to answer a grep content search instead of `rg`. `None` declines and
     /// must not do any I/O. The grep tool runs the returned job first and runs
     /// `rg` when the job fails. A served result must be exactly what `rg` reports
