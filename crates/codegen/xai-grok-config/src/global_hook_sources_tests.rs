@@ -1,6 +1,16 @@
 use super::*;
 use tempfile::TempDir;
 
+/// Resolve junction/symlink components out of the tempdir path before using it
+/// as a synthetic grok home. Windows reports junctions (`mklink /J`) as
+/// symlinks to `symlink_metadata`, so a TEMP whose path contains a junction
+/// would make `path_has_symlink_component` reject the home with
+/// `SymlinkedGrokHome`. Product semantics stay conservative; this only keeps
+/// these tests independent of a junction-free TEMP (macOS `/tmp` benefits too).
+fn junction_free_tempdir(tmp: &TempDir) -> std::path::PathBuf {
+    dunce::canonicalize(tmp.path()).unwrap_or_else(|_| tmp.path().to_path_buf())
+}
+
 #[test]
 fn absolute_hooks_paths_only_and_fixed_slots() {
     let tmp = TempDir::new().unwrap();
@@ -121,7 +131,7 @@ fn not_found_hooks_paths_is_ok_empty_configured() {
 #[test]
 fn ensure_creates_hooks_dir_and_empty_registry() {
     let tmp = TempDir::new().unwrap();
-    let dir = tmp.path().join("grok");
+    let dir = junction_free_tempdir(&tmp).join("grok");
     std::fs::create_dir_all(&dir).unwrap();
     ensure_grok_hook_slots(&dir).unwrap();
     let hooks = dir.join("hooks");
@@ -152,7 +162,7 @@ fn ensure_creates_hooks_dir_and_empty_registry() {
 #[test]
 fn trust_boundary_sources_are_not_discovery() {
     let tmp = TempDir::new().unwrap();
-    let dir = tmp.path().join("grok");
+    let dir = junction_free_tempdir(&tmp).join("grok");
     std::fs::create_dir_all(&dir).unwrap();
     ensure_grok_trust_boundary_slots(&dir).unwrap();
     let sources = resolve_trust_boundary_sources(&dir).unwrap();
