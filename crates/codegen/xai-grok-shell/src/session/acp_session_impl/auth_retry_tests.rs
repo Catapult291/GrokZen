@@ -363,6 +363,16 @@ async fn pace_wakes_on_token_adopted_without_notify() {
 #[tokio::test(start_paused = true)]
 async fn pace_adopts_token_written_to_auth_json_mid_park() {
     use xai_grok_login::backend::{ActiveAuthBackend, AuthBackend};
+    // Distributions that withhold `AccountLogin` (e.g. the GrokZen fork) make every
+    // auth.json read path fail by design (`read_auth_json_as` rejects before any disk
+    // token can be adopted), so the disk-adoption path this test exercises is
+    // unreachable there; the hot_swap twin
+    // (`pace_wakes_on_token_adopted_without_notify`) covers the adoption machinery.
+    if !xai_grok_config::Distribution::current()
+        .allows(xai_grok_config::Capability::AccountLogin)
+    {
+        return;
+    }
     let (_dir, am) = expired_manager_for_pace();
     let path = am.auth_json_path().to_path_buf();
     let scope = ActiveAuthBackend::default().scope_key(&xai_grok_login::GrokComConfig::default());
