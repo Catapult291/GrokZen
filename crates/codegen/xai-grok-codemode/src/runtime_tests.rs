@@ -430,6 +430,98 @@ async fn oversized_return_is_truncated() {
 }
 
 #[tokio::test]
+async fn oversized_array_return_includes_summarized_digest() {
+    let limits = Limits {
+        max_return_bytes: 512,
+        ..fast_limits()
+    };
+    let out = execute(
+        r#"
+return Array.from({ length: 200 }, (_, i) => ({ id: i, data: "y".repeat(64) }));
+"#,
+        Arc::new(MockHost::new()),
+        &limits,
+    )
+    .await
+    .unwrap();
+    assert!(out.truncated);
+    assert_eq!(out.value.get("truncated"), Some(&json!(true)));
+    let summary = out.value.get("summarized").expect("digest must be present");
+    assert_eq!(summary.get("type"), Some(&json!("array")));
+    assert_eq!(summary.get("length"), Some(&json!(200)));
+    assert_eq!(summary.get("itemsShown"), Some(&json!(5)));
+    let items = summary.get("items").unwrap().as_array().unwrap();
+    assert_eq!(items.len(), 5);
+    // First items are small enough to be kept whole.
+    assert_eq!(items[0].get("id"), Some(&json!(0)));
+    // The raw prefix is still provided for byte-level inspection.
+    assert!(out.value.get("preview").is_some());
+    assert!(out.value.get("original_bytes").is_some());
+}
+
+#[tokio::test]
+async fn oversized_object_return_includes_summarized_keys() {
+    let limits = Limits {
+        max_return_bytes: 256,
+        ..fast_limits()
+    };
+    let out = execute(
+        r#"
+const o = {};
+for (let i = 0; i < 50; i++) o["key" + i] = "z".repeat(200);
+return o;
+"#,
+        Arc::new(MockHost::new()),
+        &limits,
+    )
+    .await
+    .unwrap();
+    assert!(out.truncated);
+    let summary = out.value.get("summarized").expect("digest must be present");
+    assert_eq!(summary.get("type"), Some(&json!("object")));
+    assert_eq!(summary.get("keyCount"), Some(&json!(50)));
+    assert_eq!(summary.get("keysTruncated"), Some(&json!(false)));
+    let keys = summary.get("keys").unwrap().as_array().unwrap();
+    assert_eq!(keys.len(), 50);
+    assert_eq!(keys[0], json!("key0"));
+}
+
+#[tokio::test]
+async fn summarized_digest_budgets_individual_items() {
+    let limits = Limits {
+        max_return_bytes: 256,
+        ..fast_limits()
+    };
+    // Three huge items: each is replaced by a { truncated, preview, original_bytes } record.
+    let out = execute(
+        r#"
+return [1, 2, 3].map(i => ({ id: i, blob: "w".repeat(2000) }));
+"#,
+        Arc::new(MockHost::new()),
+        &limits,
+    )
+    .await
+    .unwrap();
+    assert!(out.truncated);
+    let items = out
+        .value
+        .pointer("/summarized/items")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(items.len(), 3);
+    for item in &items {
+        assert_eq!(item.get("truncated"), Some(&json!(true)));
+        assert!(item.get("preview").is_some());
+        assert!(
+            item.get("original_bytes").unwrap().as_u64().unwrap() > 384,
+            "oversized item must report its original size: {item}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn console_lines_are_capped() {
     let limits = Limits {
         max_console_lines: 5,

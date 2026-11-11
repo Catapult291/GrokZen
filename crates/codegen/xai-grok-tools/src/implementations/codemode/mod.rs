@@ -123,6 +123,10 @@ impl HostTools for CodemodeHost {
             let input = crate::implementations::search_tool::SearchToolInput {
                 query,
                 limit: Some(limit.clamp(1, u8::MAX as usize) as u8),
+                // Scripts consume results harness-side (they never re-enter
+                // model context), so keep full schemas regardless of any
+                // model-side detail preference.
+                detail: Some(crate::implementations::search_tool::SearchDetailLevel::Full),
             };
             let output = crate::implementations::search_tool::SearchTool
                 .run(ctx, input)
@@ -228,6 +232,10 @@ impl crate::types::tool_metadata::ToolMetadata for Codemode {
          An unhandled rejection aborts the whole run — wrap fallible calls in try/catch.\n\
          `console.log` output appears in the execution result: probe with it first, then \
          build the final script from what you saw.\n\n\
+         Oversized returns are replaced by \
+         `{ truncated, summarized, preview, original_bytes }`; `summarized` is a structural \
+         digest (array length + first items / object keys) — extract exactly what you need \
+         in a follow-up script instead of refetching everything.\n\n\
          Sandbox globals:\n\
          - `await host.servers()` — connected MCP servers: `[{ name, description, toolCount }]`\n\
          - `await tools.searchTool({ query, limit })` — discover tools + input schemas \
