@@ -200,26 +200,45 @@ impl crate::types::tool_metadata::ToolMetadata for Codemode {
     fn description_template(&self) -> &str {
         "Run a sandboxed JavaScript program that orchestrates multiple tool calls on the \
          harness side; only the script's final returned JSON comes back into context.\n\n\
-         Use this for multi-step work that would otherwise take many rounds of \
-         `use_tool` calls (discover + N MCP calls + post-process). \
-         Do NOT use codemode for a single simple call — a direct `use_tool` call is cheaper.\n\n\
-         Approving this call authorizes every tool call the script performs; the result returns `toolsCalled` for audit.\n\n\
+         STRONG PREFERENCE: any task involving 2+ MCP tool calls (counting everything \
+         after `searchTool` — the calls themselves, filtering, aggregation) — write a \
+         codemode script. 2+ calls = codemode; a single call to a known tool = call it \
+         directly. Prefer codemode over discovering tools then calling them one by one.\n\n\
+         Cost model: each direct call costs one full round trip (generate -> execute -> \
+         result re-enters context). A codemode script costs one round total, and \
+         intermediate results stay in the sandbox without re-entering context.\n\n\
+         Patterns:\n\
+         ```js\n\
+         // Parallel fan-out over independent calls:\n\
+         const results = await Promise.allSettled([\n\
+           tools.useTool(\"sentry__find_organizations\", {}),\n\
+           tools.useTool(\"sentry__search_issues\", { query: \"error\" }),\n\
+         ]);\n\
+         return results.filter(r => r.status === \"fulfilled\").map(r => r.value);\n\
+         ```\n\
+         ```js\n\
+         // Sequential batch with per-item error recovery:\n\
+         const out = [];\n\
+         for (const id of ids) {\n\
+           try { out.push(await tools.useTool(\"files__read\", { path: id })); }\n\
+           catch (e) { out.push({ id, error: String(e) }); }\n\
+         }\n\
+         return out;\n\
+         ```\n\
+         An unhandled rejection aborts the whole run — wrap fallible calls in try/catch.\n\
+         `console.log` output appears in the execution result: probe with it first, then \
+         build the final script from what you saw.\n\n\
          Sandbox globals:\n\
          - `await host.servers()` — connected MCP servers: `[{ name, description, toolCount }]`\n\
          - `await tools.searchTool({ query, limit })` — discover tools + input schemas \
          (same shape as `search_tool`)\n\
          - `await tools.useTool(name, input)` — call a discovered tool (`{ text, isError }`)\n\
-         Also available: `Promise.all`, `console.log` (debug only), JSON/Math/Array. \
-         No network, no filesystem, 30s timeout, 64 host-call budget. \
-         On timeout the whole run is dropped: any in-flight host tool call is \
+         Also available: `Promise.all`, JSON/Math/Array. \
+         No network, no filesystem, 30s timeout, 64 host-call budget.\n\
+         NOTE: on timeout the whole run is dropped — any in-flight host tool call is \
          cancelled mid-flight and its side effects may already have partially \
          happened — split long chains across multiple codemode calls.\n\n\
-         Example:\n\
-         ```js\n\
-         const found = await tools.searchTool({ query: \"sentry issues\", limit: 5 });\n\
-         const orgs = await tools.useTool(\"sentry__find_organizations\", {});\n\
-         return { found, orgs };\n\
-         ```"
+         Approving this call authorizes every tool call the script performs; the result returns `toolsCalled` for audit."
     }
 }
 
