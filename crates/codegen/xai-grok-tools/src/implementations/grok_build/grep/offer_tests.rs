@@ -583,6 +583,7 @@ async fn failed_job_leaves_rg_the_rest_of_the_deadline() {
         max_chars_per_line: 1000,
         max_output_bytes: 100_000,
         cwd_display: tree.path().display().to_string(),
+        search_root: tree.path().display().to_string(),
     };
 
     let resolved = source.resolve(&config, &tracing::Span::none()).await;

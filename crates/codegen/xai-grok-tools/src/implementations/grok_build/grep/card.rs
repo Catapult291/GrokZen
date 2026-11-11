@@ -27,6 +27,11 @@ pub(crate) struct GrepFormatConfig {
     pub(crate) max_output_bytes: usize,
     /// Stable display path used in the `<workspace_result …>` wrapper / errors.
     pub(crate) cwd_display: String,
+    /// The exact search-root string `rg` received (and the offer backend used as
+    /// `request.root`). Heading path lines start with it; [`normalize_path_line`]
+    /// rewrites them to the model-visible `{root}/{rel}` convention. Empty
+    /// disables the rewrite.
+    pub(crate) search_root: String,
 }
 
 /// Terminal card for a grep that exceeded its wall-clock timeout. Shared by the
@@ -68,6 +73,24 @@ pub(crate) fn grep_partial_timeout_output(
     );
     output.exit_code = -1;
     output
+}
+
+/// One `rg --heading` path line in the model-visible `{root}/{rel}` style: the
+/// search root as resolved, then the relative part with separators normalized to
+/// `/` (the `util::display_path` convention, so rg-run and served cards agree on
+/// every host). Only lines the search root prefixes are rewritten — numbered
+/// match/context lines, `--` and content pass through untouched.
+pub(crate) fn normalize_path_line(line: &str, search_root: &str) -> String {
+    // The resolved cwd can carry a trailing separator; drop it so the rewrite
+    // joins with exactly one `/`.
+    let root = search_root.trim_end_matches(['\\', '/']);
+    if root.is_empty() {
+        return line.to_owned();
+    }
+    match line.strip_prefix(root) {
+        Some("") | None => line.to_owned(),
+        Some(rel) => format!("{root}{}", rel.replace('\\', "/")),
+    }
 }
 
 /// Terminal card when `rg` could not be spawned.
@@ -139,7 +162,10 @@ pub(crate) fn finalize_grep(
     }
 
     let (formatted_output, match_count, file_matches) = {
-        let mut output_lines: Vec<String> = stdout.lines().map(|s| s.to_string()).collect();
+        let mut output_lines: Vec<String> = stdout
+            .lines()
+            .map(|line| normalize_path_line(line, &config.search_root))
+            .collect();
         let mut is_truncated = stdout_truncated;
         if output_lines.len() > config.effective_head_limit {
             is_truncated = true;
