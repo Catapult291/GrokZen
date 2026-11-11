@@ -449,6 +449,17 @@ pub(crate) async fn run_read_file(
             return Ok(ReadFileOutput::FileReadError(error));
         }
     }
+    // Classify a directory before the read: Windows surfaces ERROR_ACCESS_DENIED
+    // when opening a directory for read, so the raw error maps to
+    // PermissionDenied instead of IsADirectory. Legacy contracts keep the
+    // historical single message rendered in the read-error branch below.
+    if !is_legacy && matches!(fs.path_is_directory(&path).await, Ok(true)) {
+        observed.note_directory();
+        return Ok(ReadFileOutput::IsADirectory(format!(
+            "Error: {} is a directory, not a file.",
+            display_path.display()
+        )));
+    }
     let mut file_bytes = match fs.read_file(&path).await {
         Ok(bytes) => {
             observed.note_source_bytes(bytes.len());
