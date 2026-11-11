@@ -368,11 +368,31 @@ mod tests {
     }
 
     // Canonical home: under-home auto-trust canonicalizes the candidate but not `$HOME` (macOS `/var` -> `/private/var`)
-    // The guard restores `$HOME` on drop
-    fn home_tempdir() -> (tempfile::TempDir, PathBuf, EnvVarGuard) {
+    // Guards every env var std's `home_dir()` reads on this platform: Windows reads
+    // `USERPROFILE` only (it ignores `HOME`), Unix reads `HOME`. Without the
+    // `USERPROFILE` override on Windows a tempdir under `%TEMP%` (inside the real
+    // user profile) would be auto-trusted as "under home".
+    struct HomeEnvGuard {
+        /// Only used via `Drop` (restores each var); never read directly.
+        #[allow(dead_code)]
+        guards: Vec<EnvVarGuard>,
+    }
+
+    impl HomeEnvGuard {
+        fn for_home(home: &Path) -> Self {
+            let mut guards = Vec::new();
+            if cfg!(windows) {
+                guards.push(EnvVarGuard::set("USERPROFILE", home));
+            }
+            guards.push(EnvVarGuard::set("HOME", home));
+            Self { guards }
+        }
+    }
+
+    fn home_tempdir() -> (tempfile::TempDir, PathBuf, HomeEnvGuard) {
         let tmp = tempfile::tempdir().unwrap();
         let home = dunce::canonicalize(tmp.path()).unwrap();
-        let guard = EnvVarGuard::set("HOME", &home);
+        let guard = HomeEnvGuard::for_home(&home);
         (tmp, home, guard)
     }
 
