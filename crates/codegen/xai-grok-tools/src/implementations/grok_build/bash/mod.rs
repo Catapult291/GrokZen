@@ -1732,6 +1732,11 @@ impl BashTool {
         let mut schema = input_schema.clone();
         if let Some(obj) = schema.as_object_mut() {
             if let Some(props) = obj.get_mut("properties").and_then(|p| p.as_object_mut()) {
+                // `encoding` and `detach` are parameterization-only knobs on the
+                // internal schema: they belong to no exported contract version,
+                // so they are never advertised to the model.
+                props.remove("encoding");
+                props.remove("detach");
                 if single_knob {
                     // Input still accepts both. Only the two-knob versions advertise them
                     props.remove("is_background");
@@ -2913,7 +2918,12 @@ mod tests {
             )
             .is_err()
         );
-        assert!(serde_json::from_str::<BashToolInput>(r#"{"command":"x"}"#).is_err());
+        // `description` is optional by design (models routinely omit it, see the
+        // `#[serde(default)]` comment on the field): `{"command":"x"}` parses
+        // fine and the field defaults to empty.
+        let without_description: BashToolInput =
+            serde_json::from_str(r#"{"command":"x"}"#).unwrap();
+        assert!(without_description.description.is_empty());
     }
 
     // A foreground command must not block longer than the cap, whatever its
@@ -5637,7 +5647,8 @@ mod tests {
                 .to_string()
         }
 
-        /// The internal schema keeps every knob.
+        /// The internal schema keeps every knob (7 properties; `encoding` and
+        /// `detach` are never exported, see `exported_input_schema`).
         /// The exported `current` schema advertises only `command`, `description`, and `block_until_ms`.
         #[test]
         fn current_schema_exposes_only_the_single_knob() {
@@ -5647,6 +5658,8 @@ mod tests {
                     "block_until_ms",
                     "command",
                     "description",
+                    "detach",
+                    "encoding",
                     "is_background",
                     "timeout"
                 ]
@@ -5663,13 +5676,21 @@ mod tests {
                 property_names(&exported),
                 ["block_until_ms", "command", "description"]
             );
+            // `description` is `#[serde(default)]`, so only `command` is required.
             assert_eq!(
                 exported.get("required"),
-                Some(&serde_json::json!(["command", "description"]))
+                Some(&serde_json::json!(["command"]))
             );
+            // The command field description branches on the host shell.
+            #[cfg(unix)]
             assert_eq!(
                 property_desc(&exported, "command"),
                 "The bash command to run."
+            );
+            #[cfg(not(unix))]
+            assert_eq!(
+                property_desc(&exported, "command"),
+                "The command to run."
             );
             assert_eq!(
                 property_desc(&exported, "description"),
@@ -6133,10 +6154,15 @@ mod tests {
             );
             assert!(
                 out.contains("wait for it with get_command_or_subagent_output")
-                    && out.contains("stop them with kill_command_or_subagent")
-                    && out.contains("kill_command_or_subagent sends SIGTERM"),
+                    && out.contains("stop them with kill_command_or_subagent"),
                 "{out}"
             );
+            // The kill-mechanism sentence branches on the host shell: Windows
+            // kills the child's Job Object, Unix sends SIGTERM to the group.
+            #[cfg(windows)]
+            assert!(out.contains("terminates the child's Job Object"), "{out}");
+            #[cfg(not(windows))]
+            assert!(out.contains("kill_command_or_subagent sends SIGTERM"), "{out}");
             assert!(!out.contains("block_until_ms"), "{out}");
         }
 
