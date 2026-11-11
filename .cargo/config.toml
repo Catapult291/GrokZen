@@ -86,3 +86,12 @@ AARCH64_APPLE_DARWIN_JEMALLOC_SYS_WITH_LG_PAGE = "14"
 AARCH64_UNKNOWN_LINUX_GNU_JEMALLOC_SYS_WITH_LG_PAGE = "16"
 AARCH64_UNKNOWN_LINUX_MUSL_JEMALLOC_SYS_WITH_LG_PAGE = "16"
 AARCH64_UNKNOWN_LINUX_MUSL_JEMALLOC_SYS_WITH_BACKGROUND_THREADS = "0"
+# Test-thread stack floor (see docs/CONFIG-AGENT-SHELL-FAILURES-INVESTIGATION-2026-11-11.md §5, "C5").
+# Windows libtest threads default to 2 MiB, and several async tests (e.g. shell
+# auth_retry_budget_tests, subagent wake family) overflow that in debug builds
+# with 0xC00000FD STATUS_STACK_OVERFLOW, which masks assertion failures.
+# Baked into [env] so every `cargo test` in this workspace spawns test threads
+# with the 16 MiB floor the project standard run already relied on.
+# force=true: keep the floor deterministic even when the caller exports a
+# smaller RUST_MIN_STACK; a larger caller-supplied value only grows stacks.
+RUST_MIN_STACK = { value = "16777216", force = true }
