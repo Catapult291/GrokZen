@@ -412,6 +412,19 @@ async fn park_disabled_recovered_401_still_resubmits() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
+            // A build withholding account login cannot run this scenario end to end:
+            // the minted token cannot persist (`write_auth_json` is capability-gated),
+            // so both recovery attempts fail at persist even though memory holds the
+            // mint — and production never configures a refresher there
+            // (`configure_refresher` gate), so 401 recovery rides the park path instead
+            // (covered by the park-on tests). Skip here; the flag-on sibling
+            // `fail_closed_401_is_uncharged_and_turn_survives` covers the reachable
+            // uncharged-resubmit shape for this build.
+            if !xai_grok_config::Distribution::current()
+                .allows(xai_grok_config::Capability::AccountLogin)
+            {
+                return;
+            }
             let server = MockInferenceServer::start_with_required_auth(
                 vec![MockModelEntry::new("test")],
                 FRESH_TOKEN,
@@ -644,9 +657,14 @@ async fn deferred_recovery_credential_less_401_parks_and_survives() {
             );
             // Exact by design: every preflight belongs to the pre-park iteration; a
             // regression letting parked cycles refresh shows up as extra dispatches.
+            // Count: 1 top-of-loop `refresh_token_if_expired` + 2 inside
+            // `prepare_sampler_for_turn` (its own preflight + `reconstruct_full_config`'s
+            // `am.auth()`). Parked cycles and the final authenticated send dispatch none
+            // (verified by backtrace instrumentation at the refresher: all three calls
+            // originate in the first, pre-park iteration).
             assert_eq!(
                 pre_request_calls.load(Ordering::SeqCst),
-                4,
+                3,
                 "parked cycles must not drive preflight refreshes"
             );
             assert!(
