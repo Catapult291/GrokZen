@@ -5893,6 +5893,10 @@ mod tests {
     // Persistent shell tests
     // ================================================================
 
+    // Persistent shell is `#[cfg(unix)]`-only in production; these tests assume
+    // POSIX semantics (persistent env/functions, `/tmp`) and cannot pass on
+    // Windows where `with_persistent_shell()` degrades to per-command spawn.
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_persistent_shell_cd_persists() {
         let backend = LocalTerminalBackend::with_persistent_shell();
@@ -5909,6 +5913,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_persistent_shell_env_var_persists() {
         let backend = LocalTerminalBackend::with_persistent_shell();
@@ -5949,6 +5954,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_persistent_shell_function_persists() {
         let backend = LocalTerminalBackend::with_persistent_shell();
@@ -5968,6 +5974,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_persistent_shell_variable_capture() {
         let backend = LocalTerminalBackend::with_persistent_shell();
@@ -5987,6 +5994,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_persistent_shell_deleted_cwd_falls_back_to_request_cwd() {
         let backend = LocalTerminalBackend::with_persistent_shell();
@@ -6021,6 +6029,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_persistent_shell_spawn_error_names_missing_cwd() {
         let backend = LocalTerminalBackend::with_persistent_shell();
@@ -6073,6 +6082,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_non_persistent_shell_unaffected_by_deleted_cd_target() {
         let backend = LocalTerminalBackend::new();
