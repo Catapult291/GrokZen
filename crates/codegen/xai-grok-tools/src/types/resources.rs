@@ -372,7 +372,9 @@ pub(crate) fn resolve_plan_file_path(res: &Resources) -> (Option<PathBuf>, Strin
     } else {
         PathBuf::from(PLAN_FILE_RELATIVE_PATH)
     };
-    let display = path.display().to_string();
+    // Model-facing path string: normalize separators so Windows host paths
+    // render with `/` like the POSIX-style expectations (see `display_path`).
+    let display = crate::util::display_path::render(&path);
     let absolute_target = path.is_absolute().then_some(path);
     (absolute_target, display)
 }
