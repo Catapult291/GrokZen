@@ -715,6 +715,16 @@ impl ProcessState {
                 status,
                 since: Instant::now(),
             };
+            // Windows: dropping the group's last strong `Arc` closes the Job
+            // handle (`KILL_ON_JOB_CLOSE`), the same moment the scope's `Weak`
+            // dies — the exit is observable to `get_task` from this call, so
+            // the "reaped child leaves no live group" invariant must hold
+            // here, not a tick later. Unix keeps the Arc until reap; see
+            // `poll_all_processes`.
+            #[cfg(not(unix))]
+            {
+                self.process_group = None;
+            }
         }
     }
 
@@ -1846,6 +1856,11 @@ impl LocalTerminalActor {
                 process.process_group = None;
             }
         }
+        // Windows drops its strong ref in `mark_exited` instead: tokio's
+        // `Child::id()` stays `Some` for the child's whole lifetime (no pid
+        // reaping), so there is no `id() == None` reap signal to sweep on —
+        // and exit only becomes observable when `mark_exited` runs, which
+        // must already leave the scope with no live group for that task.
 
         self.collect_shell_state_dumps(&task_ids).await;
         self.notify_completion_waiters().await;
@@ -2381,18 +2396,21 @@ impl LocalTerminalActor {
         let sandbox_hook = self.sandbox_launch.as_deref();
         for (_, process) in self.processes.iter_mut() {
             if process.bg_status.is_backgrounded() {
+                // Backgrounded spawns are torn down by the session's ProcessScope
+                // at process exit, not killed here — but their sandbox-hook exit
+                // report is owed exactly once, and the actor is leaving now.
+                if process.lifecycle.swept_at().is_none() {
+                    crate::sandbox_launch::exited(
+                        sandbox_hook,
+                        &crate::sandbox_launch::CallId::tool(&process.tool_call_id),
+                    );
+                }
                 continue;
             }
             send_sigkill_to_group(process);
             // The dump reader's spawn_blocking thread must not outlive the actor.
             if let Some(handle) = process.state_dump_handle.take() {
                 handle.abort();
-            }
-            if process.bg_status.is_backgrounded() && process.lifecycle.swept_at().is_none() {
-                crate::sandbox_launch::exited(
-                    sandbox_hook,
-                    &crate::sandbox_launch::CallId::tool(&process.tool_call_id),
-                );
             }
         }
         self.processes.clear();
@@ -4252,6 +4270,8 @@ mod cli_facing_unchanged_tests;
 mod tests {
     use super::*;
     use crate::computer::types::TaskKind;
+    // Only the unix-gated persistent-shell snapshot test constructs `OsString`s.
+    #[cfg(unix)]
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -5232,7 +5252,12 @@ mod tests {
         let output_file = tmp.path().join("output.log");
 
         let request = TerminalRunRequest {
-            command: format!("head -c {output_amount} /dev/zero | tr '\\0' 'x'"),
+            // `yes | head -c` instead of `/dev/zero`: no configured Windows
+            // shell's coreutils can be relied on to expose the device (niu
+            // errors `head: cannot open '/dev/zero'`), while `yes`/`head -c`
+            // behave identically under Git Bash and niu. Output amount is the
+            // same `output_amount` bytes.
+            command: format!("yes x | head -c {output_amount}"),
             working_directory: tmp.path().to_path_buf(),
             env: HashMap::new(),
             timeout: Duration::from_secs(30),
@@ -5268,7 +5293,10 @@ mod tests {
         let output_file = tmp.path().join("output.log");
 
         let request = TerminalRunRequest {
-            command: "head -c 200000 /dev/zero | tr '\\0' 'x'".to_string(),
+            // `yes x | head -c` instead of `/dev/zero`: see
+            // `output_file_capped_by_size_guard` for why the device is not
+            // portable across configured Windows shells. Same ~200 KB payload.
+            command: "yes x | head -c 200000".to_string(),
             working_directory: tmp.path().to_path_buf(),
             env: HashMap::new(),
             timeout: Duration::from_secs(10),
@@ -5476,6 +5504,12 @@ mod tests {
         );
     }
 
+    // `cmd &` must not keep the shell alive after its script ends. POSIX bash
+    // exits and orphans the child; Git Bash on Windows behaves the same, but
+    // other configured Windows shells (e.g. niubash) wait for backgrounded
+    // children, so the run only ends at its request timeout. The assumption is
+    // POSIX shell semantics, gate like the persistent-shell tests below.
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_background_child_with_inherited_pipe_does_not_block() {
         // `sleep 300 &` inherits the pipe — without drain timeout this blocks forever.
@@ -5519,6 +5553,13 @@ mod tests {
         );
     }
 
+    // Relies on the shell exiting once its script ends (`echo done` finishes
+    // long before the 500 ms mark) so the kill is a no-op during the pipe
+    // drain. Shells that wait for backgrounded children (e.g. niubash on
+    // Windows) are still "running" foreground work at that point and are
+    // killed with `signal="cancelled"`. POSIX semantics, gate like the
+    // persistent-shell tests below.
+    #[cfg(unix)]
     #[tokio::test]
     async fn draining_foreground_command_survives_a_kill() {
         let backend = std::sync::Arc::new(LocalTerminalBackend::new_with_tick_interval(
@@ -5700,14 +5741,19 @@ mod tests {
     }
 
     /// A spawn's call id and the variables its shell restored.
+    // Only the unix persistent shell calls `prepare_restoring`; on Windows the
+    // hook below would be dead code.
+    #[cfg(unix)]
     type RestoredSpawn = (String, Vec<(OsString, OsString)>);
 
     /// A hook that leaves every command alone and records what a replaying shell restores.
+    #[cfg(unix)]
     #[derive(Default)]
     struct RestoredRecordingHook {
         restored: std::sync::Mutex<Vec<RestoredSpawn>>,
     }
 
+    #[cfg(unix)]
     impl crate::sandbox_launch::SandboxLaunch for RestoredRecordingHook {
         fn prepare(
             &self,
@@ -5741,6 +5787,10 @@ mod tests {
 
     /// The persistent shell hands the sandbox hook what its snapshot exports: part of the
     /// environment the next command runs under, though that command's `Command` never sets it.
+    // Snapshot exports come from the unix-only persistent shell state dump (see
+    // the A-tier gate above); with `persistent_shell: true` on Windows the
+    // backend degrades to per-command spawn and never calls `prepare_restoring`.
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_persistent_shell_hands_the_sandbox_hook_what_its_snapshot_exports() {
         let hook = Arc::new(RestoredRecordingHook::default());
@@ -5893,6 +5943,10 @@ mod tests {
     // Persistent shell tests
     // ================================================================
 
+    // Persistent shell is `#[cfg(unix)]`-only in production; these tests assume
+    // POSIX semantics (persistent env/functions, `/tmp`) and cannot pass on
+    // Windows where `with_persistent_shell()` degrades to per-command spawn.
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_persistent_shell_cd_persists() {
         let backend = LocalTerminalBackend::with_persistent_shell();
@@ -5909,6 +5963,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_persistent_shell_env_var_persists() {
         let backend = LocalTerminalBackend::with_persistent_shell();
@@ -5949,6 +6004,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_persistent_shell_function_persists() {
         let backend = LocalTerminalBackend::with_persistent_shell();
@@ -5968,6 +6024,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_persistent_shell_variable_capture() {
         let backend = LocalTerminalBackend::with_persistent_shell();
@@ -5987,6 +6044,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_persistent_shell_deleted_cwd_falls_back_to_request_cwd() {
         let backend = LocalTerminalBackend::with_persistent_shell();
@@ -6021,6 +6079,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_persistent_shell_spawn_error_names_missing_cwd() {
         let backend = LocalTerminalBackend::with_persistent_shell();
@@ -6073,6 +6132,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_non_persistent_shell_unaffected_by_deleted_cd_target() {
         let backend = LocalTerminalBackend::new();
