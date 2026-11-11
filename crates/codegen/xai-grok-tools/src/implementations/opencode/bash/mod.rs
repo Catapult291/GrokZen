@@ -456,7 +456,7 @@ impl xai_tool_runtime::Tool for BashTool {
             timed_out: result.timed_out,
             description: Some(input.description),
             current_dir: cwd.to_string_lossy().to_string(),
-            output_file: output_file.to_string_lossy().to_string(),
+            output_file: crate::util::display_path::render(&output_file),
             total_bytes: result.total_bytes,
             output_delta: None,
             was_bare_echo: false,
