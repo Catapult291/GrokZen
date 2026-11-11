@@ -110,6 +110,12 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        // Windows: `which` resolves through PATHEXT, so an extensionless file
+        // never counts as executable; create `gh.exe` alongside it.
+        #[cfg(windows)]
+        {
+            std::fs::write(dir.path().join("gh.exe"), b"").unwrap();
+        }
         assert!(which::which_in("gh", Some(dir.path()), dir.path()).is_ok());
     }
 
