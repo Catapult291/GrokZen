@@ -103,7 +103,11 @@ mod tests {
         let gi = build_gitignore(Path::new("."), &["node_modules/", "*.log"]);
         let abs_path = Path::new("/Users/someone/home/AGENTS.md");
 
-        // Proves the raw crate panics with these inputs.
+        // Proves the raw crate panics with these inputs. The panic itself is a
+        // platform-specific detail of the ignore crate's path parsing; on
+        // Windows the crate does not panic, and this test guards our wrapper,
+        // not the crate.
+        #[cfg(unix)]
         assert!(
             std::panic::catch_unwind(|| {
                 gi.matched_path_or_any_parents(abs_path, false);
