@@ -1256,7 +1256,7 @@ fn test_search_tool_call_flow() {
     let entry = scrollback.get(0).expect("entry exists");
     if let RenderBlock::ToolCall(ToolCallBlock::Search(search)) = &entry.block {
         assert_eq!(search.pattern, "fn main");
-        assert_eq!(search.match_count, 1);
+        assert_eq!(search.match_count, Some(1));
         let [file_match] = search.file_matches.as_slice() else {
             panic!("expected 1 file match: {:?}", search.file_matches);
         };
@@ -1272,6 +1272,93 @@ fn test_search_tool_call_flow() {
             std::mem::discriminant(&entry.block)
         );
     }
+}
+/// Index tools (`search_code` & co) return `ToolOutput::Text` — no structured match count.
+/// The completed Search block must keep `match_count: None` so the header omits the summary
+/// instead of claiming "no matches" (a real zero-hit `GrepSearch` still renders `Some(0)`).
+#[test]
+fn search_block_without_typed_grep_output_has_no_match_count() {
+    use crate::scrollback::block::BlockContent;
+    use xai_grok_tools::types::output::{TextOutput, ToolOutput};
+    let mut tracker = AcpUpdateTracker::new();
+    let mut scrollback = ScrollbackState::new();
+    let tc_id: Arc<str> = Arc::from("toolu_search_code_001");
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(
+                acp::ToolCallId::new(tc_id.clone()),
+                "search_code".to_string(),
+            )
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Pending)
+            .content(vec![])
+            .locations(vec![]),
+        ),
+        &meta(),
+        &mut scrollback,
+    );
+    let in_progress = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(tc_id.clone()),
+        acp::ToolCallUpdateFields::new()
+            .kind(Some(acp::ToolKind::Search))
+            .title(Some("Search code: foo".to_string()))
+            .raw_input(Some(serde_json::json!({ "query": "foo" }))),
+    ));
+    tracker.handle_update(in_progress, &meta(), &mut scrollback);
+    let text_output = ToolOutput::Text(TextOutput {
+        text: "confidence: exact\ntotal=27 shown=27".to_string(),
+        consumed_completion_task_id: None,
+    });
+    let completed = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(tc_id.clone()),
+        acp::ToolCallUpdateFields::new()
+            .status(Some(acp::ToolCallStatus::Completed))
+            .raw_output(serde_json::to_value(text_output).ok()),
+    ));
+    tracker.handle_update(completed, &meta(), &mut scrollback);
+    let entry = scrollback.get(0).expect("entry exists");
+    let RenderBlock::ToolCall(ToolCallBlock::Search(search)) = &entry.block else {
+        panic!(
+            "Expected Search block, got: {:?}",
+            std::mem::discriminant(&entry.block)
+        );
+    };
+    assert_eq!(search.match_count, None);
+    assert!(search.file_matches.is_empty());
+    assert!(search.file_paths.is_empty());
+    // Header must omit the summary entirely (no "（无匹配）" / "(no matches)").
+    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+        locale: crate::locale::UiLocale::ZhCn,
+        source: crate::locale::LocaleSource::Cli,
+    });
+    let ctx = crate::scrollback::types::BlockContext {
+        mode: crate::scrollback::types::DisplayMode::Collapsed,
+        is_running: false,
+        width: 200,
+        raw: false,
+        max_lines: None,
+        appearance: Default::default(),
+        is_selected: false,
+        cwd: None,
+        locale,
+    };
+    let rendered: String = search
+        .output(&ctx)
+        .lines
+        .iter()
+        .map(|bl| {
+            bl.content
+                .spans
+                .iter()
+                .map(|s| s.content.clone())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !rendered.contains("无匹配") && !rendered.contains("no matches"),
+        "rendered block must omit the match summary when no structured count exists: {rendered:?}"
+    );
 }
 /// Scrollback with pager.toml `expanded_by_default` set. Does not touch the flag cache.
 fn edit_config_scrollback(expanded_by_default: bool) -> ScrollbackState {

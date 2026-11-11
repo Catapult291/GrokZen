@@ -2230,15 +2230,20 @@ fn tool_call_to_block_with_locale(
                 .or_else(|| extract_raw_field(tc, "glob_pattern"))
                 .unwrap_or_else(|| tc.title.clone());
             let meta = extract_search_meta(tc);
-            let grep = extract_grep_output(&tc.raw_output).unwrap_or_default();
+            // Only a typed `GrepSearch` output carries a structured count; index tools
+            // (`search_code` & co) return plain text, leaving `match_count` as `None`
+            // so the header omits the summary instead of claiming "no matches".
+            let grep = extract_grep_output(&tc.raw_output);
             let mut block = SearchToolCallBlock::new(pattern);
             if is_memory_v2_activity(tc) {
                 block = block.with_memory_activity();
             }
             block.meta = meta;
-            block.match_count = grep.match_count;
-            block.file_matches = grep.file_matches;
-            block.file_paths = grep.file_paths;
+            if let Some(grep) = grep {
+                block.match_count = Some(grep.match_count);
+                block.file_matches = grep.file_matches;
+                block.file_paths = grep.file_paths;
+            }
             if !success {
                 block.error = Some(failure_reason(
                     tc,
@@ -2857,7 +2862,6 @@ fn extract_bash_output_from_value(raw: &Option<serde_json::Value>) -> Option<Bas
     }
 }
 /// Extracted grep search results.
-#[derive(Default)]
 struct GrepResult {
     match_count: usize,
     file_matches: Vec<SearchFileMatch>,
