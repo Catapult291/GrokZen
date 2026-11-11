@@ -3,6 +3,8 @@
 use super::common::*;
 
 /// SGR double-click (two press/release pairs) at 0-based (row, col).
+// 以下 helper 仅被 cfg(unix) 测试使用。
+#[cfg(unix)]
 fn double_click_at(harness: &mut PtyHarness, row: u16, col: u16) {
     let dbl = format!(
         "{}{}{}{}",
@@ -17,6 +19,7 @@ fn double_click_at(harness: &mut PtyHarness, row: u16, col: u16) {
 }
 
 /// Locate `needle` and double-click its first character cell.
+#[cfg(unix)]
 fn double_click_text(harness: &mut PtyHarness, needle: &str) {
     let screen = harness.screen_contents();
     let (row, col) = locate_screen_text(&screen, needle)

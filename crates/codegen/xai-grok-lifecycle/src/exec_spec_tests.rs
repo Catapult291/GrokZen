@@ -2,6 +2,8 @@ use pretty_assertions::assert_eq;
 
 use super::*;
 
+// wire 仅被下方 cfg(unix) 测试使用。
+#[cfg(unix)]
 fn wire(argv: Vec<String>, timeout_ms: Option<u64>) -> HandlerSpecWire {
     HandlerSpecWire {
         v: 1,

@@ -4,19 +4,26 @@ use super::common::*;
 
 /// Two seeded files sharing the typed prefix (equal length, so ranking ties break on name and `AAA` is deterministically the top row).
 /// Both reach the screen only through the Tab-opened dropdown.
+// 以下 helper 仅被 cfg(unix) 测试使用。
+#[cfg(unix)]
 const FILE_AAA: &str = "SUGGESTAAA.txt";
+#[cfg(unix)]
 const FILE_BBB: &str = "SUGGESTBBB.txt";
 /// A seeded shell-history line sharing the same typed prefix.
 /// Tab fetches are token-only: this row must NEVER appear on a Tab (a mixed set would break the terminal-style Tab completion of the file rows).
+#[cfg(unix)]
 const HISTORY_LINE: &str = "cat SUGGESTHISTROW-42";
+#[cfg(unix)]
 const HISTORY_SENTINEL: &str = "SUGGESTHISTROW";
 /// What the mocked user types: `!` flips into bash mode (consumed by the prompt), then the shared prefix of both files.
 /// That prefix is exactly their LCP, so the first Tab opens the dropdown instead of prefix-filling.
+#[cfg(unix)]
 const TYPED_PREFIX: &str = "!cat SUGGEST";
 
 /// Env: NO suggestion flag; Tab completion in bash mode is always on, and this test is the
 /// acceptance proof. The PTY child inherits the parent env, so a dev shell exporting the flag must
 /// not turn it on here.
+#[cfg(unix)]
 fn suggestions_env(histfile: &Path) -> Vec<(String, String)> {
     vec![
         ("SHELL".into(), "/bin/bash".into()),
@@ -25,6 +32,7 @@ fn suggestions_env(histfile: &Path) -> Vec<(String, String)> {
     ]
 }
 
+#[cfg(unix)]
 fn seed_history(content: &ContentController) -> std::path::PathBuf {
     let histfile = content.home().join(".bash_history");
     std::fs::write(&histfile, format!("{HISTORY_LINE}\n")).expect("seed shell history");

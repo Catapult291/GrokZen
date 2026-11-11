@@ -6,11 +6,17 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::*;
+// 以下符号仅被 cfg(unix) 测试使用。
+#[cfg(unix)]
 use crate::registry::MAX_REGISTERED_HANDLERS;
-use crate::test_support::{BOOT_A, FixedHandler, GateHandler, TestBroker};
+#[cfg(unix)]
+use crate::test_support::{BOOT_A, FixedHandler};
+use crate::test_support::{GateHandler, TestBroker};
+#[cfg(unix)]
 use crate::trigger::MAX_RESPONSE_BYTES;
 
 /// The contract's bound on answering past the trigger deadline.
+#[cfg(unix)]
 const DEADLINE_EPSILON: Duration = Duration::from_millis(250);
 
 async fn send(
@@ -68,6 +74,7 @@ async fn delete(router: &Router, name: &str) -> (StatusCode, Value) {
     (status, parse(&body))
 }
 
+#[cfg(unix)]
 async fn list(router: &Router) -> Value {
     let (status, body) = send(router, Method::GET, "/lifecycle/handlers", Body::empty()).await;
     assert_eq!(StatusCode::OK, status);

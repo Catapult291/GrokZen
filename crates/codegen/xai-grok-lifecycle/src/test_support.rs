@@ -19,6 +19,8 @@ pub(crate) const BOOT_A: &str = "boot-a";
 /// A broker over a private temp dir holding `image/`, `state/`, and `exec.log`, persisting under [`BOOT_A`].
 pub(crate) struct TestBroker {
     pub(crate) broker: LifecycleBroker,
+    // dir 经 restart()/path() 读取，二者仅被 cfg(unix) 测试使用。
+    #[cfg_attr(not(unix), allow(dead_code))]
     dir: tempfile::TempDir,
 }
 
@@ -30,18 +32,22 @@ impl TestBroker {
     }
 
     /// A fresh broker over the same dirs, as after a workspace-server restart under `boot_id`.
+    #[cfg(unix)]
     pub(crate) fn restart(&self, boot_id: &str) -> LifecycleBroker {
         LifecycleBroker::with_boot_id(config(&self.dir), Some(BootId::from(boot_id)))
     }
 
+    #[cfg(unix)]
     pub(crate) fn path(&self, name: &str) -> PathBuf {
         self.dir.path().join(name)
     }
 
+    #[cfg(unix)]
     pub(crate) fn state_dir(&self) -> PathBuf {
         self.path("state")
     }
 
+    #[cfg(unix)]
     pub(crate) fn write_image_manifest(&self, file_name: &str, contents: &str) {
         let image_dir = self.path("image");
         std::fs::create_dir_all(&image_dir).expect("image dir");
@@ -54,6 +60,8 @@ impl TestBroker {
             .expect("register built-in");
     }
 
+    // register 仅被 cfg(unix) 测试使用。
+    #[cfg(unix)]
     pub(crate) async fn register(&self, name: &str, argv: &[&str]) {
         self.broker
             .registry()

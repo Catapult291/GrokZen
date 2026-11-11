@@ -321,6 +321,8 @@ fn host_kind_for(metadata: Option<&serde_json::Value>) -> WorkspaceHostKind {
 /// Whether to set `GROK_TOOLS_RESET_CHILD_OOM` after the always-on protect attempt.
 /// Always-on success must set it so children do not inherit -900.
 /// `--oom-protect` forces the env even when the early write failed (pre-unshare may still have left the score at -900).
+/// 生产调用点仅存在于 unix（L297 cfg(unix)）；真值表测试在 Windows 上仍需运行。
+#[cfg_attr(not(unix), allow(dead_code))]
 fn should_set_reset_child_oom(early_protect_ok: bool, oom_protect_flag: bool) -> bool {
     early_protect_ok || oom_protect_flag
 }

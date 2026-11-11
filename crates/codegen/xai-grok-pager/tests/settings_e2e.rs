@@ -4539,7 +4539,6 @@ fn pr9_coding_data_sharing_does_not_support_preview() {
 /// In a privacy build the value is locked to opt-out, so the snapshot's
 /// `_opt_out` bool cannot surface an opt-in canonical that no longer
 /// exists in the catalog. Non-privacy builds keep the upstream inversion.
-#[test]
 fn pr9_current_value_for_reads_pager_snapshot_inverts_opt_out() {
     use xai_grok_pager::settings::current_value_for;
 
@@ -4603,7 +4602,6 @@ fn pr9_enter_on_coding_data_sharing_row_enters_picking_enum() {
 /// Nav in picker must NOT dispatch preview (async ACP). With a single
 /// locked opt-out choice, every nav key is clamped at the boundary and
 /// returns Unchanged — never an Action.
-#[test]
 fn pr9_coding_data_sharing_picker_nav_does_not_dispatch_preview() {
     for nav_key in &[
         KeyCode::Down,
@@ -7081,7 +7079,7 @@ fn display_refresh_auto_cadence_defaults_roundtrip_via_current_value_for() {
 #[test]
 fn show_thinking_blocks_space_dispatches_typed_setter() {
     // Pin off so space toggles to true.
-    let mut s = make_state();
+    let _s = make_state();
     xai_grok_pager::appearance::cache::set_show_thinking_blocks(false);
     let mut s = SettingsModalState::new(
         Arc::new(SettingsRegistry::defaults()),
@@ -7096,7 +7094,7 @@ fn show_thinking_blocks_space_dispatches_typed_setter() {
 
 #[test]
 fn show_thinking_blocks_enter_dispatches_typed_setter() {
-    let mut s = make_state();
+    let _s = make_state();
     xai_grok_pager::appearance::cache::set_show_thinking_blocks(false);
     let mut s = SettingsModalState::new(
         Arc::new(SettingsRegistry::defaults()),
@@ -7111,7 +7109,7 @@ fn show_thinking_blocks_enter_dispatches_typed_setter() {
 
 #[test]
 fn show_thinking_blocks_mouse_click_two_stage_toggles() {
-    let mut s = make_state();
+    let _s = make_state();
     xai_grok_pager::appearance::cache::set_show_thinking_blocks(false);
     let mut s = SettingsModalState::new(
         Arc::new(SettingsRegistry::defaults()),

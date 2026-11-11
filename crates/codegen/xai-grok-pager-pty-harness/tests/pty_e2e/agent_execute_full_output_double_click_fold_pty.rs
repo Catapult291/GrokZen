@@ -1,9 +1,13 @@
 #[allow(unused_imports)]
 use super::common::*;
 
+// 以下 helper 仅被 cfg(unix) 测试使用。
+#[cfg(unix)]
 const DESCRIPTION: &str = "agent fold output sentinel";
+#[cfg(unix)]
 const MIDDLE_SENTINEL: &str = "AGENTROW06";
 
+#[cfg(unix)]
 fn double_click_text(harness: &mut PtyHarness, needle: &str) {
     let screen = harness.screen_contents();
     let (row, col) = locate_screen_text(&screen, needle)

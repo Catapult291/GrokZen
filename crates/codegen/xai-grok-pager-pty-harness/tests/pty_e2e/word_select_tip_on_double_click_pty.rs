@@ -3,11 +3,15 @@
 use super::common::*;
 
 /// Unique prefix of the word-select settings tip: `Want double-click to select? /settings → Text selection · Ctrl+Y: enable now`.
+// 以下 helper 仅被 cfg(unix) 测试使用。
+#[cfg(unix)]
 pub(crate) const WORD_SELECT_TIP_SENTINEL: &str = "Want double-click to select";
 
 /// Stable body text we double-click in scrollback (also the mock response).
+#[cfg(unix)]
 const BODY_SENTINEL: &str = "WORDSELECTBODY";
 
+#[cfg(unix)]
 fn double_click_at(harness: &mut PtyHarness, row: u16, col: u16) {
     let dbl = format!(
         "{}{}{}{}",
@@ -21,6 +25,7 @@ fn double_click_at(harness: &mut PtyHarness, row: u16, col: u16) {
         .expect("inject SGR double-click");
 }
 
+#[cfg(unix)]
 fn spawn_with_hints(content: &ContentController) -> PtyHarness {
     let binary = pager_binary().expect("resolve pager binary");
     let env_refs = CONTEXTUAL_HINTS_ENV;

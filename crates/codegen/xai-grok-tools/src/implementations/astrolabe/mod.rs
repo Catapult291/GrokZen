@@ -1878,6 +1878,8 @@ mod tests {
         ));
     }
 
+    // 引入时（59541540）漏掉了 #[test]，此测试从未运行过；补上使其生效。
+    #[test]
     fn off_hides_only_the_index_tools() {
         use xai_grok_astrolabe::AstrolabeMode;
         assert!(listing_enabled_for(

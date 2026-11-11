@@ -4,11 +4,14 @@ use super::common::*;
 
 /// Content of the nested file: `cat`ing it through the completed, quoted command must print this into the scrollback.
 /// That proves the inserted quoting parses as a valid command in the real shell.
+// 以下 helper 仅被 cfg(unix) 测试使用。
+#[cfg(unix)]
 const INNER_SENTINEL: &str = "INNER-NOTE-SENTINEL-4173";
 
 /// There is NO env flag for this: Tab completion in bash mode is always on, and this test is the
 /// acceptance proof. The PTY child inherits the parent env, so a dev shell exporting that flag must
 /// not turn suggestions on here.
+#[cfg(unix)]
 fn suggestions_env(content: &ContentController) -> Vec<(String, String)> {
     vec![
         ("SHELL".into(), "/bin/bash".into()),
@@ -26,6 +29,7 @@ fn suggestions_env(content: &ContentController) -> Vec<(String, String)> {
 
 /// Seed the session cwd the file provider lists. `script.sh`: unrelated noise that must never match
 /// either prefix.
+#[cfg(unix)]
 fn seed_cwd(cwd: &Path) {
     std::fs::create_dir_all(cwd.join(".git")).expect("create .git");
     std::fs::write(cwd.join("alpha_one.txt"), "").expect("seed alpha_one");
@@ -39,6 +43,7 @@ fn seed_cwd(cwd: &Path) {
 }
 
 /// The fetch a Tab starts and the refreshes after an accept or a fill are async; give a landed response slack before the next Tab consumes it.
+#[cfg(unix)]
 async fn settle() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
 }

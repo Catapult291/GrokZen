@@ -6,6 +6,9 @@
 //! - Keystrokes typed inside the read window are consumed and dropped; no portable re-injection exists (TIOCSTI is blocked), an accepted loss.
 
 use std::io::Write;
+
+// Duration 仅被下方 cfg(unix) 的 probe 路径使用。
+#[cfg(unix)]
 use std::time::Duration;
 
 /// Bounds the reply buffer against terminals that stream without a terminator.

@@ -3,9 +3,12 @@
 use super::common::*;
 
 /// A single argv containing whitespace routes through `$SHELL -i -c`, the same hop OSC 52 takes.
+// 仅被 cfg(unix) 测试使用。
+#[cfg(unix)]
 const PRINT_APPEARANCE: &str =
     "printf 'grok=%s lc=%s\\n' \"$GROK_APPEARANCE\" \"$LC_GROK_APPEARANCE\"";
 
+#[cfg(unix)]
 fn parse_printed_appearance(raw: &str) -> Option<(String, String)> {
     let line = raw.lines().find(|l| l.starts_with("grok="))?;
     let rest = line.strip_prefix("grok=")?;

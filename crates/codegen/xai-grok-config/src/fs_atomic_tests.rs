@@ -1,5 +1,7 @@
 use super::*;
 
+// 仅被 cfg(unix) 测试使用。
+#[cfg(unix)]
 fn assert_follow_refused(err: &std::io::Error) {
     assert!(
         err.kind() == std::io::ErrorKind::InvalidInput || is_follow_hard_error(err),

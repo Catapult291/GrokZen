@@ -334,10 +334,6 @@ impl UserMessageContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// Test-only lookup: `["k"]` would panic on a missing key, so index through a pointer path.
-    fn jp<'a>(v: &'a serde_json::Value, path: &str) -> &'a serde_json::Value {
-        v.pointer(path).unwrap_or(&serde_json::Value::Null)
-    }
     #[test]
     fn template_override_deserialize_strings() {
         let v: UserMessageTemplate = serde_json::from_str(r#""default""#).unwrap();

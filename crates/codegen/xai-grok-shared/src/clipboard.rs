@@ -1021,6 +1021,8 @@ mod platform {
 #[cfg(not(target_os = "macos"))]
 mod platform {
     use super::{ClipboardImageRead, ClipboardReadPath, ImageData};
+    // Command/Stdio 仅被下方 cfg(target_os = "linux") 的 CLI 回退路径使用。
+    #[cfg(target_os = "linux")]
     use std::process::{Command, Stdio};
 
     /// No subprocess-free pasteboard probe exists off-macOS.
@@ -1797,6 +1799,8 @@ mod platform {
 
     // -- Public API ----------------------------------------------------------
 
+    // `= None` 初始化仅经 linux 独有的 Wayland 空剪贴板落空分支被读到。
+    #[cfg_attr(not(target_os = "linux"), allow(unused_assignments))]
     pub fn get_text() -> anyhow::Result<Option<String>> {
         let mut arboard_error = None;
         match arboard_get_text() {
@@ -1899,6 +1903,8 @@ mod platform {
         outcome
     }
 
+    // 同 get_text：`= None` 初始化仅经 linux 独有分支被读到。
+    #[cfg_attr(not(target_os = "linux"), allow(unused_assignments))]
     pub fn get_image() -> anyhow::Result<ClipboardImageRead> {
         let arboard = |image| ClipboardImageRead {
             image,

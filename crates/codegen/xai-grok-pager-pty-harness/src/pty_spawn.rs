@@ -269,6 +269,8 @@ fn pty_session_pre_exec(tty: &std::ffi::CStr) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    // OsString 仅被下方 cfg(unix) 测试使用。
+    #[cfg(unix)]
     use std::ffi::OsString;
 
     use super::*;

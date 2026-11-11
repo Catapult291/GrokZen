@@ -4157,7 +4157,7 @@ fn spawn_shell_command(
     };
 
     #[cfg(not(unix))]
-    let mut build_cmd = |with_breakaway: bool| -> std::io::Result<tokio::process::Command> {
+    let build_cmd = |with_breakaway: bool| -> std::io::Result<tokio::process::Command> {
         use windows::Win32::System::Threading::{
             CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
         };
