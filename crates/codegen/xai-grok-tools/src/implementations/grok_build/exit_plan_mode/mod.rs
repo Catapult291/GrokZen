@@ -401,7 +401,9 @@ mod tests {
                 ..
             } => {
                 assert!(plan_content.contains("Do X then Y"));
-                assert_eq!(plan_file_path, &plan_file.display().to_string());
+                // Model-facing path strings are separator-normalized (`/`) — see
+                // `util::display_path`. Use the same rendering as the tool output.
+                assert_eq!(plan_file_path, &crate::util::display_path::render(&plan_file));
             }
             other => panic!("Expected PlanReady, got {:?}", other),
         }
