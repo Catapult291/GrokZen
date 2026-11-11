@@ -77,7 +77,16 @@ impl SkillManager {
             let display_path = match display_mapping {
                 Some((real, display)) => skill_path
                     .strip_prefix(real)
-                    .map(|relative| Path::new(display).join(relative))
+                    .map(|relative| {
+                        // Model-visible path: join with a single `/` separator
+                        // convention instead of `Path::join`, which renders
+                        // `\` on Windows and yields mixed separators.
+                        PathBuf::from(format!(
+                            "{}/{}",
+                            display.trim_end_matches('/'),
+                            crate::util::display_path::render(relative)
+                        ))
+                    })
                     .unwrap_or_else(|_| skill_path.to_path_buf()),
                 None => skill_path.to_path_buf(),
             };

@@ -479,8 +479,12 @@ pub(crate) async fn run_read_file(
                     } else {
                         None
                     };
+                    // Echo the path exactly as the model gave it: joining a
+                    // rooted model path onto a Windows display cwd rewrites
+                    // it (drive prefix + mixed separators), so the model
+                    // would see a path it never wrote.
                     let mut msg = crate::util::format_not_found_error(
-                        &display_path,
+                        std::path::Path::new(input.path.as_str()),
                         &path,
                         &cwd,
                         &display_dcwd,
