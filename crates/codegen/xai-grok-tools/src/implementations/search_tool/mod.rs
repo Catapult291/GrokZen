@@ -216,6 +216,8 @@ impl crate::types::tool_metadata::ToolMetadata for SearchTool {
 
     fn description_template(&self) -> &str {
         "Search for MCP tools by keyword and retrieve their input schemas.\n\n\
+         After searching, don't call the hits one by one in separate rounds; to chain \
+         multiple MCP steps into a single round, put them in one `codemode` script.\n\n\
          If status is \"partial\", some servers may still be connecting."
     }
 }
