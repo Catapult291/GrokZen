@@ -186,10 +186,12 @@ fn plugin_inline_stdio_expands_plugin_root() {
     let Some(stdio) = stdio else {
         panic!("expected a stdio server");
     };
-    assert_eq!(
-        vec![root.join("mcp-echo-server.py").display().to_string()],
-        stdio.args
-    );
+    // `${GROK_PLUGIN_ROOT}/mcp-echo-server.py` keeps the template's `/` on
+    // Windows; mixed-separator strings are still the same path, so compare
+    // component-wise via `PathBuf` instead of by raw characters.
+    let expected = root.join("mcp-echo-server.py");
+    let args: Vec<PathBuf> = stdio.args.iter().map(PathBuf::from).collect();
+    assert_eq!(vec![expected], args);
 }
 
 #[test]
