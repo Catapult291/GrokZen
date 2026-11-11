@@ -65,12 +65,84 @@ async fn drain_until_reported(mgr: &tokio::sync::Mutex<LspManager>, needle: &str
     panic!("no summary mentioning {needle:?} within the deadline");
 }
 
+/// A Python invocation able to run a script from stdin: the executable plus
+/// any leading interpreter arguments it needs (e.g. `-3` for the `py` launcher).
+type PythonInterpreter = (String, Vec<String>);
+
+/// Candidates in priority order. `python` first: on Windows `python3` is very
+/// often the Microsoft Store app-execution-alias stub, which silently exits
+/// 9009 whenever its stdio is piped, killing every mock-server handshake.
+const PYTHON_CANDIDATES: &[(&str, &[&str])] =
+    &[("python", &[]), ("py", &["-3"]), ("python3", &[])];
+
+/// Pick the first candidate interpreter that can actually run code with its
+/// stdio piped. The check must go through a pipe, not a console: the Store
+/// stub's `python3 --version` can still print a version banner when a console
+/// is attached, so that would false-positive. Returns the legacy default when
+/// nothing qualifies so the failure message stays recognizable.
+fn select_mock_python() -> PythonInterpreter {
+    static SELECTED: std::sync::OnceLock<Option<PythonInterpreter>> =
+        std::sync::OnceLock::new();
+    SELECTED
+        .get_or_init(|| {
+            PYTHON_CANDIDATES.iter().find_map(|(command, extra_args)| {
+                probe_python(command, extra_args)
+            })
+        })
+        .clone()
+        .unwrap_or_else(|| ("python3".to_string(), Vec::new()))
+}
+
+/// Feed a tiny script over a piped stdin and accept an interpreter only if it
+/// prints the expected output and exits successfully.
+fn probe_python(command: &str, extra_args: &[&str]) -> Option<PythonInterpreter> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(command)
+        .args(extra_args)
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"print('ok')\n")
+        .ok()?;
+    let output = child.wait_with_output().ok()?;
+    (output.status.success()
+        && String::from_utf8_lossy(&output.stdout).contains("ok"))
+    .then(|| {
+        (
+            command.to_string(),
+            extra_args.iter().map(|arg| arg.to_string()).collect(),
+        )
+    })
+}
+
+/// The selected interpreter command, for inline `LspServerConfig` literals.
+fn mock_python_command() -> String {
+    select_mock_python().0
+}
+
+/// Interpreter arguments plus the standard mock-server invocation of a script.
+fn mock_python_args(script_path: impl AsRef<Path>) -> Vec<String> {
+    let (_command, mut args) = select_mock_python();
+    args.push("-u".to_string());
+    args.push(script_path.as_ref().to_string_lossy().into_owned());
+    args
+}
+
 fn mock_server_config(script_path: &Path) -> LspServerConfig {
     let mut ext_map = HashMap::new();
     ext_map.insert(".ts".to_string(), "typescript".to_string());
     LspServerConfig {
-        command: "python3".to_string(),
-        args: vec!["-u".to_string(), script_path.to_string_lossy().into_owned()],
+        command: mock_python_command(),
+        args: mock_python_args(script_path),
         extensions: ext_map,
         startup_timeout: Some(10_000),
         ..Default::default()
@@ -597,8 +669,8 @@ async fn e2e_multi_server_routing() {
     servers.insert(
         "mock-ts".to_string(),
         LspServerConfig {
-            command: "python3".to_string(),
-            args: vec!["-u".to_string(), script_path.to_string_lossy().into_owned()],
+            command: mock_python_command(),
+            args: mock_python_args(&script_path),
             extensions: ts_ext,
             startup_timeout: Some(10_000),
             ..Default::default()
@@ -607,8 +679,8 @@ async fn e2e_multi_server_routing() {
     servers.insert(
         "mock-py".to_string(),
         LspServerConfig {
-            command: "python3".to_string(),
-            args: vec!["-u".to_string(), script_path.to_string_lossy().into_owned()],
+            command: mock_python_command(),
+            args: mock_python_args(script_path),
             extensions: py_ext,
             startup_timeout: Some(10_000),
             ..Default::default()
@@ -1053,8 +1125,8 @@ async fn e2e_finalize_no_longer_blocks_on_slow_lsp_startup() {
     let mut ext_map = HashMap::new();
     ext_map.insert(".ts".to_string(), "typescript".to_string());
     let server_config = LspServerConfig {
-        command: "python3".to_string(),
-        args: vec!["-u".to_string(), script_path.to_string_lossy().into_owned()],
+        command: mock_python_command(),
+        args: mock_python_args(script_path),
         extensions: ext_map,
         startup_timeout: Some(5_000),
         ..Default::default()
@@ -1108,8 +1180,8 @@ async fn e2e_first_dispatch_waits_for_background_startup() {
     let mut ext_map = HashMap::new();
     ext_map.insert(".ts".to_string(), "typescript".to_string());
     let server_config = LspServerConfig {
-        command: "python3".to_string(),
-        args: vec!["-u".to_string(), script_path.to_string_lossy().into_owned()],
+        command: mock_python_command(),
+        args: mock_python_args(script_path),
         extensions: ext_map,
         startup_timeout: Some(5_000),
         ..Default::default()
@@ -1172,8 +1244,8 @@ async fn e2e_restart_monitor_emits_failed_on_restart_init_error() {
                 counter_path.to_string_lossy().into_owned(),
             );
             let server_config = LspServerConfig {
-                command: "python3".to_string(),
-                args: vec!["-u".to_string(), script_path.to_string_lossy().into_owned()],
+                command: mock_python_command(),
+                args: mock_python_args(script_path),
                 env,
                 extensions: ext_map,
                 // Generous startup window: the init-failure server responds to `initialize` (and bumps the on-disk counter) essentially instantly, so a large
@@ -1260,8 +1332,8 @@ async fn e2e_drain_timeout_preserves_pending_diagnostics() {
     let mut ext_map = HashMap::new();
     ext_map.insert(".ts".to_string(), "typescript".to_string());
     let server_config = LspServerConfig {
-        command: "python3".to_string(),
-        args: vec!["-u".to_string(), script_path.to_string_lossy().into_owned()],
+        command: mock_python_command(),
+        args: mock_python_args(script_path),
         extensions: ext_map,
         startup_timeout: Some(10_000),
         ..Default::default()
@@ -1944,8 +2016,8 @@ async fn e2e_restart_replay_requeues_pending_diagnostics() {
     let mut ext_map = HashMap::new();
     ext_map.insert(".ts".to_string(), "typescript".to_string());
     let server_config = LspServerConfig {
-        command: "python3".to_string(),
-        args: vec!["-u".to_string(), script_path.to_string_lossy().into_owned()],
+        command: mock_python_command(),
+        args: mock_python_args(script_path),
         extensions: ext_map,
         startup_timeout: Some(10_000),
         ..Default::default()

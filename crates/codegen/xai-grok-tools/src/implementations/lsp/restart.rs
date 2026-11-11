@@ -41,9 +41,14 @@ pub(super) fn replay_tracked_documents(
     tracked_docs
         .iter()
         .filter_map(|(uri_str, lang_id)| {
-            let path = uri_str
-                .strip_prefix("file://")
-                .map(PathBuf::from)
+            // `PathBuf::from` on the bare `file://` remainder breaks on Windows:
+            // `file:///C:/...` leaves `/C:/Users/...`, which no Windows call can
+            // open, so the document would silently drop out of the replay. Go
+            // through the URL parser instead, which is portable in both
+            // directions.
+            let path = Url::parse(uri_str)
+                .ok()
+                .and_then(|url| url.to_file_path().ok())
                 .unwrap_or_else(|| PathBuf::from(uri_str));
             let content = std::fs::read_to_string(&path).ok()?;
             let uri = file_uri(&path).ok()?;

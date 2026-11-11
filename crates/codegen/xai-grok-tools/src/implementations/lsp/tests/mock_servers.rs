@@ -29,10 +29,12 @@ def read_message():
     return json.loads(body)
 
 def send_message(msg):
+    # Binary stdout: Windows text mode would translate the header's '\n' into
+    # '\r\n', turning the blank-line separator into '\r\r\n' and breaking the
+    # client's LSP frame parser.
     body = json.dumps(msg)
     header = f"Content-Length: {len(body)}\r\n\r\n"
-    sys.stdout.write(header)
-    sys.stdout.write(body)
+    sys.stdout.buffer.write(header.encode() + body.encode())
     sys.stdout.flush()
 
 def send_diagnostics(uri):
@@ -168,8 +170,9 @@ def read_message():
     return json.loads(sys.stdin.read(length))
 
 def send_message(msg):
+    # Binary stdout: see MOCK_LSP_SERVER.send_message.
     body = json.dumps(msg)
-    sys.stdout.write(f"Content-Length: {len(body)}\r\n\r\n{body}")
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n{body}".encode())
     sys.stdout.flush()
 
 while True:
@@ -241,7 +244,7 @@ def read_message():
 
 def send_message(msg):
     body = json.dumps(msg)
-    sys.stdout.write(f"Content-Length: {{len(body)}}\r\n\r\n{{body}}")
+    sys.stdout.buffer.write(f"Content-Length: {{len(body)}}\r\n\r\n{{body}}".encode())
     sys.stdout.flush()
 
 while True:
@@ -317,7 +320,7 @@ def read_message():
 
 def send_message(msg):
     body = json.dumps(msg)
-    sys.stdout.write(f"Content-Length: {{len(body)}}\r\n\r\n{{body}}")
+    sys.stdout.buffer.write(f"Content-Length: {{len(body)}}\r\n\r\n{{body}}".encode())
     sys.stdout.flush()
 
 def increment_attempts():
@@ -390,8 +393,7 @@ def read_message():
 
 def send_message(msg):
     body = json.dumps(msg)
-    sys.stdout.write(f"Content-Length: {len(body)}\r\n\r\n")
-    sys.stdout.write(body)
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n{body}".encode())
     sys.stdout.flush()
 
 def one_diagnostic(message):
@@ -555,6 +557,14 @@ pub(super) fn write_slow_pull_server() -> (tempfile::TempDir, PathBuf) {
         "slow_pull_lsp.py",
         r#"
 import os, time
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
+
+def uri_path(uri):
+    # Reverse of the client's Url::from_file_path, portable across platforms:
+    # on Windows `uri[len("file://"):]` yields `/C:/Users/...`, which open()
+    # rejects.
+    return url2pathname(unquote(urlparse(uri).path))
 
 state["revisions"] = 0
 
@@ -565,7 +575,7 @@ def handle(msg, method):
         state["pulls"] += 1
         asked_about = state["revisions"]
         if state["pulls"] == 1:
-            path = msg["params"]["textDocument"]["uri"][len("file://"):]
+            path = uri_path(msg["params"]["textDocument"]["uri"])
             open(os.path.join(os.path.dirname(path), "first-pull-started"), "w").close()
         time.sleep(0.3)
         reply(msg, {
@@ -598,6 +608,12 @@ pub(super) fn write_stale_clean_pull_server() -> (tempfile::TempDir, PathBuf) {
         "stale_clean_pull_lsp.py",
         r#"
 import os, time
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
+
+def uri_path(uri):
+    # Portable reverse of the client's file URI (see slow_pull_lsp.py).
+    return url2pathname(unquote(urlparse(uri).path))
 
 def handle(msg, method):
     if method == "textDocument/diagnostic":
@@ -607,7 +623,7 @@ def handle(msg, method):
             reply(msg, {"kind": "full", "resultId": "r1",
                         "items": one_diagnostic("the problem")})
         elif state["pulls"] == 2:
-            path = msg["params"]["textDocument"]["uri"][len("file://"):]
+            path = uri_path(msg["params"]["textDocument"]["uri"])
             open(os.path.join(os.path.dirname(path), "second-pull-started"), "w").close()
             time.sleep(0.3)
             reply(msg, {"kind": "full", "resultId": "clean", "items": []})
