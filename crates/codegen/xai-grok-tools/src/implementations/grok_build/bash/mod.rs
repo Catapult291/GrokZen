@@ -5688,10 +5688,7 @@ mod tests {
                 "The bash command to run."
             );
             #[cfg(not(unix))]
-            assert_eq!(
-                property_desc(&exported, "command"),
-                "The command to run."
-            );
+            assert_eq!(property_desc(&exported, "command"), "The command to run.");
             assert_eq!(
                 property_desc(&exported, "description"),
                 "One sentence explanation as to why this command needs to be run and how it contributes to the goal."
@@ -6056,6 +6053,8 @@ mod tests {
             BashTool::rendered_description(None, &renderer(reminders), params, BashVersion::Current)
         }
 
+        // 仅被下方 cfg(unix) 测试使用。
+        #[cfg(unix)]
         const CURRENT_DESCRIPTION_PRODUCT: &str = "Run a bash command and return its output.\n\nUsage notes:\n  - You can specify an optional block_until_ms in milliseconds (up to 36000000ms). A foreground command still running at block_until_ms is moved to the background instead of killed; once backgrounded it runs until it exits (background cap 10h). You will receive a task id; wait for it with get_task_output. `block_until_ms: 0` runs the command in the background immediately.\n  - Background commands run until they exit, until you stop them with kill_task, or until the 10h background cap. kill_task sends SIGTERM to the process group, then SIGKILL after ~1s; processes that did not detach via `setsid` / `nohup` are killed with it.\n  - If the output exceeds {max_output_bytes} characters, the middle is truncated (you keep the beginning and end) and the result includes the path to a log file with the full output, which you can read or search.\n  - Set `block_until_ms` to 0 to run the command in the background (e.g., dev servers, long builds): it returns a task id immediately and keeps running in the background. You are notified when it completes, so you can keep working; only poll it with get_task_output when it needs close monitoring (long-running jobs that can hang or degrade before finishing), and poll later if you end up blocked on the result. You do not need to use '&' at the end of the command when using this parameter.\n  - Content search: shell `grep`/`rg` is removed. Use the content-search tool instead of shell grep/rg.";
 
         /// The `current` description is the two-knob text with `block_until_ms` in place of `timeout` and `is_background`.
@@ -6162,7 +6161,10 @@ mod tests {
             #[cfg(windows)]
             assert!(out.contains("terminates the child's Job Object"), "{out}");
             #[cfg(not(windows))]
-            assert!(out.contains("kill_command_or_subagent sends SIGTERM"), "{out}");
+            assert!(
+                out.contains("kill_command_or_subagent sends SIGTERM"),
+                "{out}"
+            );
             assert!(!out.contains("block_until_ms"), "{out}");
         }
 

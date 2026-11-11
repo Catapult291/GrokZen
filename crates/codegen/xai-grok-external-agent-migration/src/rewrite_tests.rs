@@ -1,10 +1,14 @@
+// apply_import/ImportPlan 仅被 cfg(unix) 的 symlink 测试使用。
+#[cfg(unix)]
+use super::apply_import;
 use super::{
-    apply_import, apply_items_to_config, merge_env_vars, merge_paths, merge_permissions,
-    write_import_marker,
+    apply_items_to_config, merge_env_vars, merge_paths, merge_permissions, write_import_marker,
 };
+#[cfg(unix)]
+use crate::ImportPlan;
 use crate::{
-    ImportPatternMode, ImportPermission, ImportPlan, ImportRuleAction, ImportScope, ImportTool,
-    ImportableItem, PathKind,
+    ImportPatternMode, ImportPermission, ImportRuleAction, ImportScope, ImportTool, ImportableItem,
+    PathKind,
 };
 use toml::Value as TomlValue;
 use toml::map::Map as TomlMap;

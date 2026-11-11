@@ -2074,6 +2074,8 @@ mod tests {
         }
     }
 
+    // 仅被 cfg(unix) 测试使用。
+    #[cfg(unix)]
     fn make_scoped_ctx(scope: xai_grok_tools::util::ProcessScope) -> RunContext<'static> {
         RunContext {
             process_scope: Some(scope),

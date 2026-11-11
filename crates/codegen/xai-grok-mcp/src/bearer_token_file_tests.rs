@@ -1,4 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+// PathBuf 仅被 cfg(unix) 的 fifo 测试使用。
+#[cfg(unix)]
+use std::path::PathBuf;
 
 use super::*;
 

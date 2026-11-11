@@ -144,8 +144,11 @@ fn reap_process_group(_child: &Child) {
 mod tests {
     use super::*;
     use std::process::Stdio;
+    // Instant 与 detached 仅被下方 cfg(unix) 测试使用。
+    #[cfg(unix)]
     use std::time::Instant;
 
+    #[cfg(unix)]
     fn detached(mut cmd: Command) -> Command {
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())

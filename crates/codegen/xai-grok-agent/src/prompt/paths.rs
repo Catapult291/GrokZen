@@ -55,6 +55,8 @@ fn expand_tilde_in(raw: &str, home: Option<&Path>) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    // 下方测试整体 cfg(unix)：PathsConfig/PathBuf 经 super::* 引入。
+    #[cfg(unix)]
     use super::*;
 
     // The fixtures are POSIX-absolute; on Windows they would be relative and dropped

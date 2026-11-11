@@ -1,13 +1,22 @@
+// 仅 unix 测试使用（Windows 上 cargo fix 曾误删）；与测试体同门控。
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::time::Duration;
-
+#[cfg(unix)]
 use tempfile::TempDir;
 
+#[cfg(unix)]
 use super::*;
+#[cfg(unix)]
 use crate::implementations::grok_build::grep::offer::GrepSource;
+#[cfg(unix)]
 use crate::implementations::grok_build::grep::tests::make_grep_input;
+#[cfg(unix)]
 use crate::implementations::grok_build::grep::{GrepStep, prepare_grep};
+#[cfg(unix)]
 use crate::types::resources::{Cwd, Resources};
+#[cfg(unix)]
 use crate::types::tool_metadata::test_ctx;
 
 /// A cancelled tool future drops the `Child` before any wait/kill path

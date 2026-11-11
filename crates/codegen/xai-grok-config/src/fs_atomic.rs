@@ -489,7 +489,8 @@ fn file_id_from_unix_meta(meta: &std::fs::Metadata) -> FileId {
     }
 }
 
-#[cfg(test)]
+// 仅被 cfg(unix) 测试 same_file_identity_detects_replaced_leaf 使用。
+#[cfg(all(test, unix))]
 fn same_file_identity(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
     #[cfg(unix)]
     {

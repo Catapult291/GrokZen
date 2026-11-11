@@ -1063,7 +1063,7 @@ impl ToolRegistryBuilder {
         // A remote/sandboxed file system hides them for the same reason: the
         // index reads local disk, which is not the tree the session edits.
         let local_fs = ctx.fs.is_local();
-        let mut tools: Vec<_> = config
+        let tools: Vec<_> = config
             .tools
             .into_iter()
             .filter(|tool| crate::implementations::astrolabe::listed(&tool.id, local_fs))
@@ -4316,13 +4316,14 @@ mod tests {
             .unwrap();
 
         // Undeclared: hidden (unchanged behavior).
-        assert!(toolset
-            .tool_definitions_builtins_only(None)
-            .iter()
-            .all(|d| !d.function.name.contains("__")));
+        assert!(
+            toolset
+                .tool_definitions_builtins_only(None)
+                .iter()
+                .all(|d| !d.function.name.contains("__"))
+        );
 
-        let declared =
-            std::collections::HashSet::from(["linear__save_issue".to_string()]);
+        let declared = std::collections::HashSet::from(["linear__save_issue".to_string()]);
         let defs = toolset.tool_definitions_builtins_only(Some(&declared));
         assert_eq!(defs.len(), 3);
         assert_eq!(
@@ -4333,7 +4334,8 @@ mod tests {
         );
         let inline = toolset.tool_definitions_builtins_only_inline_mcp(Some(&declared));
         assert_eq!(
-            inline.iter()
+            inline
+                .iter()
                 .filter(|d| d.function.name == "linear__save_issue")
                 .count(),
             1
@@ -4341,10 +4343,12 @@ mod tests {
 
         // A declared name that is not registered stays out of the list.
         let bogus = std::collections::HashSet::from(["other__missing".to_string()]);
-        assert!(toolset
-            .tool_definitions_builtins_only(Some(&bogus))
-            .iter()
-            .all(|d| !d.function.name.contains("__")));
+        assert!(
+            toolset
+                .tool_definitions_builtins_only(Some(&bogus))
+                .iter()
+                .all(|d| !d.function.name.contains("__"))
+        );
     }
     /// §6-4 (codemode acceptance): codemode ships in the model-visible builtin
     /// set while MCP tools stay hidden behind search/use even when codemode

@@ -35,7 +35,7 @@ async fn a_gated_emit_takes_no_snapshot_and_the_second_snapshot_reports_cpu() {
     }
     std::hint::black_box(acc);
 
-    let second = process_metrics::snapshot();
+    let _second = process_metrics::snapshot();
     #[cfg(unix)]
     {
         let window = second
