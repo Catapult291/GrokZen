@@ -906,7 +906,7 @@ mod tests {
         assert_eq!(processed.bytes, expected.len());
         assert!(!processed.content.contains(tail));
         assert!(expected.contains(tail));
-        let artifact = tmp.path().join("web_fetch/1.md");
+        let artifact = tmp.path().join("web_fetch").join("1.md");
         assert!(
             processed
                 .content

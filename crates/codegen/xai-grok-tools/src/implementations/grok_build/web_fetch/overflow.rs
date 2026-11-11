@@ -359,7 +359,7 @@ mod tests {
         );
         assert!(result.content.contains("showing first 100 of"));
         assert!(result.content.contains("ReadAsset"));
-        let dump = tmp.path().join("web_fetch/1.md");
+        let dump = tmp.path().join("web_fetch").join("1.md");
         assert!(result.content.contains(dump.to_string_lossy().as_ref()));
         assert_eq!(tokio::fs::read_to_string(dump).await.unwrap(), full);
     }
