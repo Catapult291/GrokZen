@@ -8,7 +8,7 @@
 //! the streamed deltas stay a prefix of the card body built from the same bytes.
 
 use crate::implementations::grok_build::grep::card::{
-    GrepFormatConfig, exceeds_cum_byte_cap, trim_line,
+    GrepFormatConfig, exceeds_cum_byte_cap, normalize_path_line, trim_line,
 };
 
 /// Hard cap on bytes read from ripgrep's stdout (5 MB).
@@ -250,7 +250,10 @@ impl<'a> BodyStreamer<'a> {
             return None;
         }
         let line_str = String::from_utf8_lossy(line);
-        let trimmed = trim_line(&line_str, self.config.max_chars_per_line);
+        // Same heading-path rewrite `finalize_grep` applies, so the streamed
+        // body stays a prefix of the terminal card.
+        let normalized = normalize_path_line(&line_str, &self.config.search_root);
+        let trimmed = trim_line(&normalized, self.config.max_chars_per_line);
         // Byte-cap; shares `exceeds_cum_byte_cap` with the batch path.
         if exceeds_cum_byte_cap(self.cum_len, trimmed.len(), self.config.max_output_bytes) {
             self.done = true;
