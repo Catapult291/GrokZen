@@ -1,6 +1,7 @@
 pub mod base64_images;
 pub mod binary;
 pub mod command_display;
+pub mod display_path;
 pub mod env;
 pub mod file_reader;
 pub mod fs;
