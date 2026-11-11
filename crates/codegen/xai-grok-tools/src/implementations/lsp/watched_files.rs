@@ -202,10 +202,20 @@ impl WatchedFiles {
                 }
             }
             GlobPattern::Relative(relative) => {
-                let base = base_uri_path(&relative.base_uri)
-                    .unwrap_or_else(|| self.workspace_root.as_path().to_path_buf());
-                let in_workspace = is_under(&self.workspace_root, &base);
-                (Some(base), relative.pattern, in_workspace)
+                // A base URI that cannot be resolved to a filesystem path
+                // (e.g. a drive-less `file:///tmp/...` URL on Windows,
+                // where `Url::to_file_path` needs a drive letter) must be
+                // treated as out-of-workspace: falling back to the
+                // workspace root would let external globs match workspace
+                // files. The workspace-root fallback only applies when the
+                // base URI actually resolves.
+                match base_uri_path(&relative.base_uri) {
+                    Some(base) => {
+                        let in_workspace = is_under(&self.workspace_root, &base);
+                        (Some(base), relative.pattern, in_workspace)
+                    }
+                    None => (None, relative.pattern, false),
+                }
             }
         };
         if !in_workspace {
