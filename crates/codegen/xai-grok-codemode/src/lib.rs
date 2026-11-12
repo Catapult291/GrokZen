@@ -11,5 +11,5 @@ mod host;
 mod runtime;
 
 pub use error::{CodemodeError, CodemodeErrorKind};
-pub use host::{HostCallError, HostFuture, HostTools};
+pub use host::{HostCallError, HostFuture, HostTools, SearchDetail};
 pub use runtime::{ExecOutcome, Limits, execute};

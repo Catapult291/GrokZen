@@ -170,6 +170,9 @@ pub struct CodemodeToolConfig {
     pub max_concurrency: Option<usize>,
     /// Return-value budget (KiB); larger values are truncated.
     pub max_return_kb: Option<usize>,
+    /// codemode 描述的命名空间清单 token 预算（约 4 bytes/token，缺省 3000）。
+    /// 预算装不下的 server 只列一行「server 名 + 工具数 + searchTool 现查」。
+    pub inline_budget: Option<u64>,
     /// Codemode Phase 2: MCP tool routing (`adaptive` | `only` | `off`).
     /// `only` trims every local MCP tool to the codemode lane; `off` keeps the
     /// historical direct-call behavior and ignores per-server exposure config.
@@ -203,6 +206,9 @@ impl CodemodeToolConfig {
         }
         if let Some(v) = self.max_return_kb {
             map.insert("max_return_kb".into(), v.into());
+        }
+        if let Some(v) = self.inline_budget {
+            map.insert("inline_budget".into(), v.into());
         }
         if let Some(v) = self.mode {
             if let Ok(json) = serde_json::to_value(v) {
@@ -481,6 +487,15 @@ impl FileToolset {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codemode_inline_budget_flows_into_params_json() {
+        let mut config = CodemodeToolConfig::default();
+        assert!(config.to_params_json().get("inline_budget").is_none());
+        config.inline_budget = Some(1500);
+        let params = config.to_params_json();
+        assert_eq!(params.get("inline_budget"), Some(&serde_json::json!(1500)));
+    }
 
     #[test]
     fn file_toolset_default_is_standard() {

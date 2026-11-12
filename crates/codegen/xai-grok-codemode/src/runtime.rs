@@ -14,7 +14,7 @@ use rquickjs::function::{Async, Func, Rest};
 use rquickjs::{AsyncContext, AsyncRuntime, Ctx, Object, Promise};
 
 use crate::error::{CodemodeError, CodemodeErrorKind};
-use crate::host::{HostCallError, HostTools};
+use crate::host::{HostCallError, HostTools, SearchDetail};
 
 /// Sandbox resource limits. Defaults follow the codemode design doc
 /// (30s / 64 MiB / 64 host calls / concurrency 4 / 256 KiB return).
@@ -352,7 +352,12 @@ fn bind_globals(
                     .get("limit")
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(5) as usize;
-                let fut = async move { host.search(query, limit).await };
+                let detail = match arg.get("detail").and_then(serde_json::Value::as_str) {
+                    Some("name") => SearchDetail::Name,
+                    Some("brief") => SearchDetail::Brief,
+                    _ => SearchDetail::Full,
+                };
+                let fut = async move { host.search_detail(query, limit, detail).await };
                 gated_host_json(&host_calls, max_host_calls, &semaphore, fut).await
             }
         });

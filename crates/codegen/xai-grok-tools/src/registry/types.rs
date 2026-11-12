@@ -1624,6 +1624,36 @@ impl FinalizedToolset {
             })
             .collect()
     }
+    /// Codemode Phase 2: namespace catalog of the currently registered MCP
+    /// tools, grouped by server name (the `__` prefix heuristic, same as the
+    /// builtin/MCP split above). Feeds the codemode description's inline
+    /// namespace listing; computed fresh on every definition build so
+    /// `xai/mcp/tools_changed` register/unregister cycles are reflected.
+    pub fn mcp_namespace_catalog(&self) -> Vec<crate::implementations::codemode::CatalogServer> {
+        use crate::implementations::codemode::{catalog_tool, CatalogServer};
+        const MCP_TOOL_NAME_DELIMITER: &str = "__";
+        let tools = self.tools.read();
+        let mut servers: std::collections::BTreeMap<String, Vec<_>> = Default::default();
+        for t in tools.iter() {
+            let Some((server, tool)) = t.client_name.split_once(MCP_TOOL_NAME_DELIMITER) else {
+                continue;
+            };
+            if tool.is_empty() {
+                continue;
+            }
+            servers.entry(server.to_string()).or_default().push(
+                catalog_tool(
+                    tool.to_string(),
+                    t.definition.function.description.as_deref(),
+                    &t.definition.function.parameters,
+                ),
+            );
+        }
+        servers
+            .into_iter()
+            .map(|(name, tools)| CatalogServer { name, tools })
+            .collect()
+    }
     /// Get the resolved contract version for a tool by its client-facing name. Returns `None` if
     /// the tool is not found or is not version-managed. Returns an owned `String` because the
     /// internal `RwLock` read guard cannot outlive this call.

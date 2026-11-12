@@ -149,15 +149,55 @@ impl ToolBridge {
     /// see [`DeclaredMcpTools`]).
     pub async fn tool_definitions_builtins_only(&self) -> Vec<ToolDefinition> {
         let declared = self.declared_mcp_tools().await;
-        self.registry.tool_definitions_builtins_only(declared.as_ref())
+        let mut defs = self.registry.tool_definitions_builtins_only(declared.as_ref());
+        self.apply_codemode_namespace_listing(&mut defs).await;
+        defs
     }
 
     /// Built-in tool definitions with `use_tool` advertised inline-only (no MCP file forms),
     /// plus any MCP tools declared into this session's model-visible set.
     pub async fn tool_definitions_builtins_only_inline_mcp(&self) -> Vec<ToolDefinition> {
         let declared = self.declared_mcp_tools().await;
-        self.registry
-            .tool_definitions_builtins_only_inline_mcp(declared.as_ref())
+        let mut defs = self
+            .registry
+            .tool_definitions_builtins_only_inline_mcp(declared.as_ref());
+        self.apply_codemode_namespace_listing(&mut defs).await;
+        defs
+    }
+
+    /// Codemode Phase 2: rewrite the codemode description to append the
+    /// namespace listing of the currently registered MCP tools under the
+    /// configured inline budget (`[toolset.codemode] inline_budget`, tokens;
+    /// compiled-in default 3000). No MCP tools registered → the description
+    /// stays byte-identical to the static template. Computed per definition
+    /// build, so `xai/mcp/tools_changed` cycles are reflected.
+    async fn apply_codemode_namespace_listing(&self, defs: &mut [ToolDefinition]) {
+        use crate::implementations::codemode::{render_namespace_listing, CodemodeParams};
+        let Some(pos) = defs
+            .iter()
+            .position(|d| d.function.name == crate::implementations::codemode::CODEMODE_NAME)
+        else {
+            return;
+        };
+        let budget_bytes = self
+            .registry
+            .resources
+            .lock()
+            .await
+            .get::<crate::types::resources::Params<CodemodeParams>>()
+            .map(|p| p.0.inline_budget_bytes())
+            .unwrap_or_else(|| CodemodeParams::default().inline_budget_bytes());
+        let catalog = self.registry.mcp_namespace_catalog();
+        if catalog.is_empty() {
+            return;
+        }
+        let base = defs[pos]
+            .function
+            .description
+            .clone()
+            .unwrap_or_default();
+        defs[pos].function.description =
+            Some(render_namespace_listing(&base, &catalog, budget_bytes));
     }
 
     /// Clone the session-scoped `DeclaredMcpTools` resource, if present.
@@ -879,6 +919,109 @@ mod tests {
         assert_eq!(bridge.tool_kind("not_a_registered_tool"), None);
         // Exact client-name lookup is case-sensitive.
         assert_eq!(bridge.tool_kind("write"), None);
+    }
+
+    // ── Codemode Phase 2: description namespace listing under inline budget ──
+
+    fn register_codemode(toolset: &FinalizedToolset) {
+        toolset
+            .register_tool(
+                crate::implementations::codemode::CODEMODE_NAME.to_string(),
+                crate::implementations::codemode::Codemode,
+                None,
+            )
+            .unwrap();
+    }
+
+    fn register_mcp_fixture(toolset: &FinalizedToolset, name: &str, schema: serde_json::Value) {
+        toolset
+            .register_tool(
+                name.to_string(),
+                KindFixture {
+                    kind: ToolKind::Other,
+                    id: "fixture_mcp",
+                },
+                Some(schema),
+            )
+            .unwrap();
+    }
+
+    fn codemode_description(defs: &[ToolDefinition]) -> String {
+        defs.iter()
+            .find(|d| d.function.name == crate::implementations::codemode::CODEMODE_NAME)
+            .and_then(|d| d.function.description.clone())
+            .expect("codemode definition with description")
+    }
+
+    #[tokio::test]
+    async fn codemode_description_lists_mcp_namespaces_within_default_budget() {
+        let bridge = ToolBridge::for_test();
+        let toolset = bridge.toolset();
+        register_codemode(&toolset);
+        register_mcp_fixture(
+            &toolset,
+            "tavily__tavily_search",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "query": {}, "max_results": {} },
+                "required": ["query"]
+            }),
+        );
+        register_mcp_fixture(&toolset, "exa__web_search_exa", serde_json::json!({"type": "object"}));
+
+        let defs = bridge.tool_definitions_builtins_only().await;
+        let desc = codemode_description(&defs);
+        assert!(
+            desc.contains("Connected MCP namespaces"),
+            "header must be present: {desc}"
+        );
+        assert!(desc.contains("tavily (1 tools):"));
+        assert!(desc.contains("tavily_search(query, max_results?): kind fixture"));
+        assert!(desc.contains("exa (1 tools):"));
+        // Compiled-in default: 3000 tokens ≈ 12 000 bytes.
+        assert!(
+            desc.len() <= 3000 * crate::implementations::codemode::BYTES_PER_TOKEN,
+            "{} bytes exceeds the default budget",
+            desc.len()
+        );
+        // The inline-MCP variant carries the same rewrite.
+        let inline = bridge.tool_definitions_builtins_only_inline_mcp().await;
+        assert!(codemode_description(&inline).contains("tavily (1 tools):"));
+    }
+
+    #[tokio::test]
+    async fn codemode_description_budget_truncates_listing_to_header_only() {
+        let bridge = ToolBridge::for_test();
+        let toolset = bridge.toolset();
+        register_codemode(&toolset);
+        toolset
+            .update_resource(crate::types::resources::Params(
+                crate::implementations::codemode::CodemodeParams {
+                    inline_budget: Some(1), // 1 token ≈ 4 bytes: nothing fits
+                    ..Default::default()
+                },
+            ))
+            .await;
+        register_mcp_fixture(&toolset, "tavily__tavily_search", serde_json::json!({"type": "object"}));
+
+        let defs = bridge.tool_definitions_builtins_only().await;
+        let desc = codemode_description(&defs);
+        assert!(desc.contains("Connected MCP namespaces"));
+        assert!(
+            !desc.contains("tavily"),
+            "nothing fits a 1-token budget: {desc}"
+        );
+    }
+
+    #[tokio::test]
+    async fn codemode_description_stays_static_without_mcp_tools() {
+        let bridge = ToolBridge::for_test();
+        let toolset = bridge.toolset();
+        register_codemode(&toolset);
+
+        let defs = bridge.tool_definitions_builtins_only().await;
+        let desc = codemode_description(&defs);
+        assert!(!desc.contains("Connected MCP namespaces"));
     }
 
     // ── drain_between_turn_bash_completions owner scoping (the "While you

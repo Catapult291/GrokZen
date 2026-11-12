@@ -6,6 +6,11 @@
 mod input;
 pub use input::CodemodeInput;
 
+mod namespace_listing;
+pub use namespace_listing::{
+    catalog_tool, render_namespace_listing, CatalogServer, CatalogTool, BYTES_PER_TOKEN,
+};
+
 use std::sync::{Arc, Mutex};
 
 use xai_grok_codemode::{HostCallError, HostFuture, HostTools, Limits, execute};
@@ -34,9 +39,23 @@ pub struct CodemodeParams {
     pub max_concurrency: Option<usize>,
     /// Return-value budget (KiB); larger values are truncated. Default 256.
     pub max_return_kb: Option<usize>,
+    /// Namespace-listing budget for the model-visible description, in tokens
+    /// (~4 bytes each). Default 3000. Codemode Phase 2.
+    pub inline_budget: Option<usize>,
 }
 
+/// Compiled-in default for `[toolset.codemode] inline_budget` (tokens).
+pub const DEFAULT_INLINE_BUDGET_TOKENS: usize = 3000;
+
 impl CodemodeParams {
+    /// Byte budget for the codemode description's namespace listing
+    /// (including the static base prose, which is never cut).
+    pub fn inline_budget_bytes(&self) -> usize {
+        self.inline_budget
+            .unwrap_or(DEFAULT_INLINE_BUDGET_TOKENS)
+            .saturating_mul(BYTES_PER_TOKEN)
+    }
+
     /// Overlay configured values onto the engine defaults.
     pub fn to_limits(&self) -> Limits {
         let defaults = Limits::default();
@@ -118,15 +137,35 @@ impl HostTools for CodemodeHost {
         query: String,
         limit: usize,
     ) -> HostFuture<Result<serde_json::Value, HostCallError>> {
+        self.search_detail(query, limit, xai_grok_codemode::SearchDetail::Full)
+    }
+
+    fn search_detail(
+        &self,
+        query: String,
+        limit: usize,
+        detail: xai_grok_codemode::SearchDetail,
+    ) -> HostFuture<Result<serde_json::Value, HostCallError>> {
         let ctx = self.ctx.clone();
         Box::pin(async move {
+            let level = match detail {
+                xai_grok_codemode::SearchDetail::Name => {
+                    crate::implementations::search_tool::SearchDetailLevel::Name
+                }
+                xai_grok_codemode::SearchDetail::Brief => {
+                    crate::implementations::search_tool::SearchDetailLevel::Brief
+                }
+                xai_grok_codemode::SearchDetail::Full => {
+                    crate::implementations::search_tool::SearchDetailLevel::Full
+                }
+            };
             let input = crate::implementations::search_tool::SearchToolInput {
                 query,
                 limit: Some(limit.clamp(1, u8::MAX as usize) as u8),
-                // Scripts consume results harness-side (they never re-enter
-                // model context), so keep full schemas regardless of any
-                // model-side detail preference.
-                detail: Some(crate::implementations::search_tool::SearchDetailLevel::Full),
+                // Scripts choose their own discovery cost: `detail` selects
+                // the per-hit verbosity (default `full` keeps full schemas,
+                // the historical behavior).
+                detail: Some(level),
             };
             let output = crate::implementations::search_tool::SearchTool
                 .run(ctx, input)
@@ -215,8 +254,9 @@ impl crate::types::tool_metadata::ToolMetadata for Codemode {
          in a follow-up script instead of refetching everything.\n\n\
          Sandbox globals:\n\
          - `await host.servers()` — connected MCP servers: `[{ name, description, toolCount }]`\n\
-         - `await tools.searchTool({ query, limit })` — discover tools + input schemas \
-         (same shape as `search_tool`)\n\
+         - `await tools.searchTool({ query, limit, detail })` — discover tools + input schemas \
+         (same shape as `search_tool`; `detail` selects verbosity: `name` / `brief` / `full`, \
+         default `full`)\n\
          - `await tools.useTool(name, input)` — call a discovered tool (`{ text, isError }`)\n\
          Also available: `Promise.all`, JSON/Math/Array. \
          No network, no filesystem, 30s timeout, 64 host-call budget.\n\
