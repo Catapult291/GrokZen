@@ -33,8 +33,11 @@ pub enum McpToolExposure {
 
 impl McpToolExposure {
     /// Whether a `search_tool` hit may declare this tool for direct calls.
+    /// `Direct` tools are already model-visible; `Deferred` tools are the
+    /// activation target: a search hit declares them (session-scoped
+    /// `DeclaredMcpTools`). `CodemodeOnly` stays on the codemode lane.
     pub fn is_declareable(self) -> bool {
-        matches!(self, Self::Direct)
+        matches!(self, Self::Direct | Self::Deferred)
     }
 
     /// Whether the tool must be registered on the tool bridge at all.
@@ -101,9 +104,9 @@ mod tests {
     }
 
     #[test]
-    fn hidden_is_not_registerable_and_only_direct_is_declareable() {
+    fn hidden_and_codemode_only_are_not_declareable() {
         assert!(McpToolExposure::Direct.is_declareable());
-        assert!(!McpToolExposure::Deferred.is_declareable());
+        assert!(McpToolExposure::Deferred.is_declareable());
         assert!(!McpToolExposure::CodemodeOnly.is_declareable());
         assert!(McpToolExposure::Deferred.is_registerable());
         assert!(McpToolExposure::CodemodeOnly.is_registerable());
