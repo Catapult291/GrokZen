@@ -7,8 +7,12 @@
 //!    `"model"` is `Hidden` (app-only), regardless of config.
 //! 2. Per-server config: `[mcp_servers.<x>] tool_exposure = "direct" |
 //!    "deferred" | "codemode_only" | "hidden"` overrides the global mode for
-//!    that server's tools.
-//! 3. Global `[toolset.codemode] mode`:
+//!    that server's tools. Only consults TOML configs; compat-source servers
+//!    (`~/.claude.json`, `~/.cursor/mcp.json`) never resolve here.
+//! 3. Global `[toolset.codemode.exposure]` map: `server name = "deferred"` (or
+//!    any exposure string) applies to a server whatever its config source —
+//!    the route for compat-source servers like `~/.claude.json` imports.
+//! 4. Global `[toolset.codemode] mode`:
 //!    - `adaptive` (default): no global trimming; tools without per-server
 //!      config keep `Direct`, except `direct_servers` whitelisting in `only`
 //!      mode.
@@ -18,25 +22,32 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 
 use xai_grok_config::{CodemodeMcpMode, McpToolExposure};
 use xai_grok_mcp::servers::McpState;
 
-/// `[toolset.codemode]` routing section: `mode` plus the `direct_servers` hot-tools
-/// whitelist (server names that stay Direct even under `mode = "only"`).
-struct CodemodeMcpSection {
+/// `[toolset.codemode]` routing section: `mode`, the `direct_servers` hot-tools
+/// whitelist (server names that stay Direct even under `mode = "only"`), and
+/// the `exposure` global map (`server name → McpToolExposure`, applied to any
+/// server regardless of its config source — TOML, `~/.claude.json` compat, …).
+pub(crate) struct CodemodeMcpSection {
     mode: CodemodeMcpMode,
     direct_servers: Vec<String>,
+    exposure: std::collections::HashMap<String, McpToolExposure>,
 }
 
 /// Resolve the `[toolset.codemode]` routing section for the given working
 /// directory. Falls back to `Adaptive` with an empty whitelist when no config
 /// is loadable (same tolerance as the other free-function config readers).
-fn resolve_codemode_mcp_section(cwd: &Path) -> CodemodeMcpSection {
+pub(crate) fn resolve_codemode_mcp_section(cwd: &Path) -> CodemodeMcpSection {
+    let empty = CodemodeMcpSection {
+        mode: CodemodeMcpMode::default(),
+        direct_servers: Vec::new(),
+        exposure: std::collections::HashMap::new(),
+    };
     let root = match xai_grok_config::effective_config::load_effective_config() {
         Ok(root) => root,
-        Err(_) => return CodemodeMcpSection { mode: CodemodeMcpMode::default(), direct_servers: Vec::new() },
+        Err(_) => return empty,
     };
     let section = root.get("toolset").and_then(|t| t.get("codemode"));
     let mode = section
@@ -51,35 +62,51 @@ fn resolve_codemode_mcp_section(cwd: &Path) -> CodemodeMcpSection {
         .flatten()
         .filter_map(|v| v.as_str().map(str::to_owned))
         .collect();
-    CodemodeMcpSection { mode, direct_servers }
+    // Global exposure map: server name → exposure string. Applies to servers
+    // whose per-server `[mcp_servers.<x>]` config is unavailable (e.g. compat
+    // sources like `~/.claude.json`, which `get_mcp_server_config_with_project`
+    // never consults).
+    let exposure = parse_exposure_map(section);
+    CodemodeMcpSection {
+        mode,
+        direct_servers,
+        exposure,
+    }
 }
 
-/// Resolve the per-qualified-tool exposure map for this session's MCP state.
-///
-/// Sync on purpose: called while building a [`SnapshotRefresher`] under a short
-/// `agent` borrow; config reads go through the process-cached effective config.
-/// Returns `(qualified_name, exposure)` pairs already flattened per tool —
-/// server-level overrides expand onto the server's registered tool names.
-pub(crate) fn resolve_exposure_overrides(
-    _tool_bridge: &crate::tools::bridge::ToolBridge,
+/// Parse the `[toolset.codemode.exposure]` table: server name → exposure
+/// string. Unknown exposure strings are skipped (the server keeps its default
+/// routing) so a typo never hides a whole server.
+fn parse_exposure_map(codemode_section: Option<&toml::Value>) -> HashMap<String, McpToolExposure> {
+    codemode_section
+        .and_then(|c| c.get("exposure"))
+        .and_then(|v| v.as_table())
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, value)| {
+            let exposure: Option<McpToolExposure> = value
+                .as_str()
+                .and_then(|s| serde_json::from_value::<McpToolExposure>(serde_json::json!(s)).ok());
+            exposure.map(|e| (name.clone(), e))
+        })
+        .collect()
+}
+
+/// Expand a resolved `[toolset.codemode]` section onto a locked [`McpState`]'s
+/// registered tools. Split out so callers can expand at refresh time — the
+/// refresher is built before the init pass registers tools, so a
+/// construction-time expansion would always be empty.
+pub(crate) fn expand_exposure_overrides(
+    section: &CodemodeMcpSection,
+    state: &McpState,
     cwd: &Path,
-    mcp_state: Arc<tokio::sync::Mutex<McpState>>,
 ) -> HashMap<String, McpToolExposure> {
     use crate::util::config::get_mcp_server_config_with_project;
 
-    let section = resolve_codemode_mcp_section(cwd);
     if section.mode == CodemodeMcpMode::Off {
         return HashMap::new();
     }
     let mode = section.mode;
-
-    let state = match mcp_state.try_lock() {
-        Ok(state) => state,
-        // A concurrent holder means an init pass is mutating the map; keep the
-        // per-tool entries already recorded on the state and skip expansion.
-        Err(_) => return HashMap::new(),
-    };
-
     let mut overrides: HashMap<String, McpToolExposure> = HashMap::new();
     for (server, config) in state
         .configs
@@ -100,6 +127,21 @@ pub(crate) fn resolve_exposure_overrides(
         for name in state.tool_exposures.keys() {
             if name.starts_with(&prefix) {
                 overrides.insert(name.clone(), per_server);
+            }
+        }
+    }
+
+    // Global `[toolset.codemode.exposure]` map: applies by server name to any
+    // registered tool, including servers whose per-server config is
+    // unavailable (compat sources like `~/.claude.json`). Per-server config
+    // (step 2) takes precedence, so these entries only fill the gaps.
+    if !section.exposure.is_empty() {
+        for name in state.tool_exposures.keys() {
+            let server = name
+                .split_once(xai_grok_mcp::servers::MCP_TOOL_NAME_DELIMITER)
+                .map(|(server, _)| server);
+            if let Some(exposure) = server.and_then(|server| section.exposure.get(server)) {
+                overrides.entry(name.clone()).or_insert(*exposure);
             }
         }
     }
@@ -132,6 +174,7 @@ mod tests {
     use super::*;
     use agent_client_protocol as acp;
     use crate::util::config::get_mcp_server_config_with_project;
+    use std::sync::Arc;
 
     fn mcp_state_with(
         configs: Vec<acp::McpServer>,
@@ -149,8 +192,10 @@ mod tests {
     }
 
     fn resolve(state: Arc<tokio::sync::Mutex<McpState>>) -> HashMap<String, McpToolExposure> {
-        let bridge = crate::tools::bridge::ToolBridge::for_test();
-        resolve_exposure_overrides(&bridge, Path::new("."), state)
+        // Mirrors the production path: resolve the section from config, then
+        // expand against the (already populated) registration state.
+        let section = resolve_codemode_mcp_section(Path::new("."));
+        expand_exposure_overrides(&section, &state.try_lock().expect("state lock"), Path::new("."))
     }
 
     #[test]
@@ -209,5 +254,82 @@ tool_exposure = "codemode_only"
             Some(true)
         );
         let _ = get_mcp_server_config_with_project; // used by resolve_exposure_overrides
+    }
+
+    fn test_section(exposure: &[(&str, McpToolExposure)]) -> CodemodeMcpSection {
+        CodemodeMcpSection {
+            mode: CodemodeMcpMode::Adaptive,
+            direct_servers: Vec::new(),
+            exposure: exposure
+                .iter()
+                .map(|(name, e)| ((*name).to_string(), *e))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn global_exposure_map_applies_to_compat_source_servers() {
+        // `ida-multi-mcp` has no `[mcp_servers.<x>]` TOML config (its definition
+        // lives in `~/.claude.json`), so step 2 cannot reach it; the global
+        // `[toolset.codemode.exposure]` map fills the gap.
+        let state = mcp_state_with(
+            vec![stdio_server("ida-multi-mcp")],
+            &[("ida-multi-mcp__status", McpToolExposure::Direct)],
+        );
+        let section = test_section(&[("ida-multi-mcp", McpToolExposure::Deferred)]);
+        let resolved = expand_exposure_overrides(&section, &state.try_lock().unwrap(), Path::new("."));
+        assert_eq!(
+            resolved.get("ida-multi-mcp__status"),
+            Some(&McpToolExposure::Deferred)
+        );
+    }
+
+    #[test]
+    fn global_exposure_map_applies_when_per_server_toml_config_absent() {
+        let mut state = McpState::new(vec![stdio_server("jadx-headless-mcp")]);
+        state
+            .tool_exposures
+            .insert("jadx-headless-mcp__status".to_string(), McpToolExposure::Direct);
+        let section = test_section(&[("jadx-headless-mcp", McpToolExposure::CodemodeOnly)]);
+        // No `[mcp_servers.jadx-headless-mcp]` in TOML here, so the global map
+        // (step 3) is what routes the server.
+        let resolved = expand_exposure_overrides(&section, &state, Path::new("."));
+        assert_eq!(
+            resolved.get("jadx-headless-mcp__status"),
+            Some(&McpToolExposure::CodemodeOnly)
+        );
+    }
+
+    #[test]
+    fn global_exposure_map_ignores_unknown_servers_and_invalid_values() {
+        let state = mcp_state_with(
+            vec![stdio_server("linear")],
+            &[("linear__save_issue", McpToolExposure::Direct)],
+        );
+        let section = test_section(&[("grafana", McpToolExposure::Deferred)]);
+        let resolved = expand_exposure_overrides(&section, &state.try_lock().unwrap(), Path::new("."));
+        assert!(
+            resolved.is_empty(),
+            "unrelated server entries must not leak: {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn exposure_section_parses_from_toml_table() {
+        let root: toml::Value = toml::from_str(
+            r#"
+[toolset.codemode.exposure]
+ida-multi-mcp = "deferred"
+tavily = "bogus"
+"#,
+        )
+        .unwrap();
+        let codemode_section = root.get("toolset").and_then(|t| t.get("codemode"));
+        let exposure = parse_exposure_map(codemode_section);
+        assert_eq!(
+            exposure.get("ida-multi-mcp"),
+            Some(&McpToolExposure::Deferred)
+        );
+        assert!(!exposure.contains_key("tavily"), "unknown value must be skipped");
     }
 }

@@ -204,32 +204,9 @@ impl crate::types::tool_metadata::ToolMetadata for Codemode {
     fn description_template(&self) -> &str {
         "Run a sandboxed JavaScript program that orchestrates multiple tool calls on the \
          harness side; only the script's final returned JSON comes back into context.\n\n\
-         STRONG PREFERENCE: any task involving 2+ MCP tool calls (counting everything \
-         after `searchTool` — the calls themselves, filtering, aggregation) — write a \
-         codemode script. 2+ calls = codemode; a single call to a known tool = call it \
-         directly. Prefer codemode over discovering tools then calling them one by one.\n\n\
-         Cost model: each direct call costs one full round trip (generate -> execute -> \
-         result re-enters context). A codemode script costs one round total, and \
-         intermediate results stay in the sandbox without re-entering context.\n\n\
-         Patterns:\n\
-         ```js\n\
-         // Parallel fan-out over independent calls:\n\
-         const results = await Promise.allSettled([\n\
-           tools.useTool(\"sentry__find_organizations\", {}),\n\
-           tools.useTool(\"sentry__search_issues\", { query: \"error\" }),\n\
-         ]);\n\
-         return results.filter(r => r.status === \"fulfilled\").map(r => r.value);\n\
-         ```\n\
-         ```js\n\
-         // Sequential batch with per-item error recovery:\n\
-         const out = [];\n\
-         for (const id of ids) {\n\
-           try { out.push(await tools.useTool(\"files__read\", { path: id })); }\n\
-           catch (e) { out.push({ id, error: String(e) }); }\n\
-         }\n\
-         return out;\n\
-         ```\n\
-         An unhandled rejection aborts the whole run — wrap fallible calls in try/catch.\n\
+         Typical shapes: fan out independent calls with `Promise.allSettled`, or loop with \
+         per-item try/catch and return only what the caller needs. An unhandled rejection \
+         aborts the whole run — wrap fallible calls in try/catch.\n\
          `console.log` output appears in the execution result: probe with it first, then \
          build the final script from what you saw.\n\n\
          Oversized returns are replaced by \

@@ -177,6 +177,11 @@ pub struct CodemodeToolConfig {
     /// `mode = "only"` 的热工具豁免：这些 server 的工具保持 Direct（每轮都用的
     /// server 不该被藏进 codemode）。`adaptive` / `off` 下忽略。
     pub direct_servers: Option<Vec<String>>,
+    /// 全局暴露映射：server 名 → `"direct" | "deferred" | "codemode_only" | "hidden"`。
+    /// 作用于任何配置来源的 server——尤其是 `~/.claude.json` 等兼容来源（它们
+    /// 没有 `[mcp_servers.<x>]` 条目，per-server `tool_exposure` 查不到）。
+    /// per-server 配置优先；`[toolset.codemode] mode = "off"` 时整体忽略。
+    pub exposure: Option<std::collections::HashMap<String, xai_grok_config::McpToolExposure>>,
 }
 
 impl CodemodeToolConfig {

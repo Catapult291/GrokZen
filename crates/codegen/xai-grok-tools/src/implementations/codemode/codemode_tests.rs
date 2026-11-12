@@ -733,8 +733,8 @@ fn description_template_renders_without_search_use_tool() {
     assert!(rendered.contains("searchTool"));
     assert!(rendered.contains("useTool"));
     assert!(
-        rendered.contains("STRONG PREFERENCE"),
-        "description must keep the positive routing trigger: {rendered}"
+        !rendered.contains("STRONG PREFERENCE"),
+        "routing preachiness must stay deleted: {rendered}"
     );
 }
 
