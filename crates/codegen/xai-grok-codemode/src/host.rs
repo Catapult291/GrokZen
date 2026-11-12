@@ -24,6 +24,18 @@ impl HostCallError {
     }
 }
 
+/// Per-hit verbosity a script may request from `tools.searchTool` — mirrors
+/// `search_tool`'s `detail` levels (`name` / `brief` / `full`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchDetail {
+    /// Tool names only — cheapest sweep.
+    Name,
+    /// Name + short description + parameter names.
+    Brief,
+    /// Name + description + full input schema (historical behavior).
+    Full,
+}
+
 /// Harness-side services exposed to sandbox scripts as the `host` and `tools`
 /// globals. Implementations own their audit state (e.g. `toolsCalled`).
 ///
@@ -36,11 +48,25 @@ pub trait HostTools: Send + Sync + 'static {
 
     /// Discovery, same shape as `search_tool`'s model-visible output:
     /// `{ results: [{ server, tools }], total_hidden_tools, status, note }`.
+    /// Full per-hit verbosity (historical behavior).
     fn search(
         &self,
         query: String,
         limit: usize,
     ) -> HostFuture<Result<serde_json::Value, HostCallError>>;
+
+    /// Discovery with a script-chosen per-hit verbosity. Default ignores
+    /// `detail` and delegates to [`HostTools::search`] so legacy
+    /// implementations keep compiling; full-featured hosts override it.
+    fn search_detail(
+        &self,
+        query: String,
+        limit: usize,
+        detail: SearchDetail,
+    ) -> HostFuture<Result<serde_json::Value, HostCallError>> {
+        let _ = detail;
+        self.search(query, limit)
+    }
 
     /// Dispatch any discovered tool (local MCP or managed gateway), same
     /// distribution semantics as `use_tool` (single post-processing pass;

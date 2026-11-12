@@ -6,11 +6,13 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 use super::*;
-use crate::host::{HostCallError, HostFuture, HostTools};
+use crate::host::{HostCallError, HostFuture, HostTools, SearchDetail};
 
 struct MockHost {
     /// Every (tool_name, input) dispatched through use_tool.
     calls: Mutex<Vec<(String, serde_json::Value)>>,
+    /// Every detail level requested via `tools.searchTool`.
+    search_details: Mutex<Vec<SearchDetail>>,
     /// When set, every use_tool call fails with this error.
     fail: Option<HostCallError>,
     /// Artificial latency per use_tool call.
@@ -21,6 +23,7 @@ impl MockHost {
     fn new() -> Self {
         Self {
             calls: Mutex::new(Vec::new()),
+            search_details: Mutex::new(Vec::new()),
             fail: None,
             latency: Duration::ZERO,
         }
@@ -71,6 +74,16 @@ impl HostTools for MockHost {
                 "note": null
             }))
         })
+    }
+
+    fn search_detail(
+        &self,
+        query: String,
+        limit: usize,
+        detail: SearchDetail,
+    ) -> HostFuture<Result<serde_json::Value, HostCallError>> {
+        self.search_details.lock().unwrap().push(detail);
+        self.search(query, limit)
     }
 
     fn use_tool(
@@ -569,5 +582,29 @@ async fn search_tool_round_trip() {
     assert_eq!(
         out.value.pointer("/results/0/tools/0/tool_name"),
         Some(&json!("mock__echo"))
+    );
+}
+
+/// Codemode Phase 2: scripts pick the discovery cost — `detail` reaches the
+/// host verbatim; an absent `detail` keeps the historical `full` behavior.
+#[tokio::test]
+async fn search_tool_detail_passthrough() {
+    let host = Arc::new(MockHost::new());
+    execute(
+        r#"
+await tools.searchTool({ query: "a", detail: "name" });
+await tools.searchTool({ query: "b", detail: "brief" });
+await tools.searchTool({ query: "c" });
+return null;
+"#,
+        host.clone(),
+        &fast_limits(),
+    )
+    .await
+    .unwrap();
+    let details = host.search_details.lock().unwrap().clone();
+    assert_eq!(
+        details,
+        vec![SearchDetail::Name, SearchDetail::Brief, SearchDetail::Full]
     );
 }
