@@ -126,12 +126,16 @@ pub(super) struct SnapshotRefresher {
     pub(super) mcp_reminder_dirty: Arc<std::sync::atomic::AtomicBool>,
     pub(super) disabled_gateway_tools:
         std::collections::HashMap<String, std::collections::HashSet<String>>,
-    /// Codemode Phase 2: per-server exposure overrides resolved from config
-    /// (`[mcp_servers.<x>] tool_exposure` + `[toolset.codemode] mode`), keyed
-    /// by qualified tool name. `None` (tests, shared pool refreshes) means no
-    /// overrides — per-tool entries from `McpState.tool_exposures` still apply.
-    pub(super) exposure_overrides:
-        Option<std::collections::HashMap<String, xai_grok_config::McpToolExposure>>,
+    /// Codemode Phase 2: the resolved `[toolset.codemode]` routing section
+    /// (`mode` + `direct_servers` + `exposure` map). Expanded against the live
+    /// registration state on every refresh. `None` (tests, shared pool
+    /// refreshes) means no overrides — per-tool entries from
+    /// `McpState.tool_exposures` still apply.
+    pub(super) exposure_section:
+        Option<crate::session::mcp_exposure_policy::CodemodeMcpSection>,
+    /// Session working directory, used by the exposure expansion for the
+    /// per-server `[mcp_servers.<x>] tool_exposure` lookup.
+    pub(super) cwd: std::path::PathBuf,
     /// External harness only: `Some` also updates the on-disk `mcps/` descriptor mirror.
     pub(super) mcps_root: Option<std::path::PathBuf>,
 }
@@ -153,7 +157,8 @@ impl SnapshotRefresher {
             tool_metadata_snapshot,
             mcp_reminder_dirty,
             disabled_gateway_tools,
-            exposure_overrides: _,
+            exposure_section: _,
+            cwd: _,
             mcps_root,
         } = self;
         if self.is_superseded() {
@@ -236,16 +241,24 @@ impl SnapshotRefresher {
                 Some(generation) => generation.clone(),
                 None => mcp_state.lock().await.current_generation(),
             };
-            let tool_exposures: std::collections::HashMap<
-                String,
-                xai_grok_config::McpToolExposure,
-            > = mcp_state.lock().await.tool_exposures.clone();
-            // Codemode Phase 2: server-level exposure overrides resolved once per refresh,
-            // so every tool of an overridden server lands in the published map.
-            let exposure_overrides = self
-                .exposure_overrides
-                .clone()
-                .unwrap_or_default();
+            // Codemode Phase 2: exposure overrides expand against the live
+            // registration state on every refresh — the refresher is built
+            // before the init pass registers tools, so a construction-time
+            // expansion would always be empty.
+            let (tool_exposures, exposure_overrides): (
+                std::collections::HashMap<String, xai_grok_config::McpToolExposure>,
+                std::collections::HashMap<String, xai_grok_config::McpToolExposure>,
+            ) = {
+                let state = mcp_state.lock().await;
+                let tool_exposures = state.tool_exposures.clone();
+                let overrides = match &self.exposure_section {
+                    Some(section) => crate::session::mcp_exposure_policy::expand_exposure_overrides(
+                        section, &state, &self.cwd,
+                    ),
+                    None => Default::default(),
+                };
+                (tool_exposures, overrides)
+            };
             let exposure_map: xai_grok_tools::types::resources::McpToolExposures =
                 xai_grok_tools::types::resources::McpToolExposures(
                     tool_exposures
@@ -443,7 +456,8 @@ pub(crate) async fn refresh_mcp_snapshot_for_test(
         tool_metadata_snapshot,
         mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         disabled_gateway_tools,
-        exposure_overrides: None,
+        exposure_section: None,
+        cwd: std::path::PathBuf::new(),
         mcps_root: None,
     }
     .refresh()

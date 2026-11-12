@@ -226,8 +226,6 @@ impl crate::types::tool_metadata::ToolMetadata for SearchTool {
 
     fn description_template(&self) -> &str {
         "Search for MCP tools by keyword and retrieve their input schemas.\n\n\
-         After searching, don't call the hits one by one in separate rounds; to chain \
-         multiple MCP steps into a single round, put them in one `codemode` script.\n\n\
          Optional `detail` controls per-hit verbosity: \"full\" (default) includes the \
          input schema; \"brief\" gives description + parameter names without the schema; \
          \"name\" gives names only. Sweep a large catalog cheaply with \"brief\" or \
