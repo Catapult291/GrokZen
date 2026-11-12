@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 /// Resolution precedence (see `resolve_tool_exposure` in the shell):
 /// protocol meta (`_meta.ui.visibility` without `"model"`) wins as `Hidden`,
 /// then the per-server `tool_exposure` config, then the global
+/// `[toolset.codemode.exposure]` map, then the `[toolset.codemode]
+/// default_exposure` fallback (`direct` | `deferred`), then the global
 /// `[toolset.codemode] mode` (`only` demotes everything to codemode-only,
 /// `off` ignores all trimming).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
