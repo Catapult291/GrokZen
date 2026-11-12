@@ -647,6 +647,64 @@ mod tests {
         );
     }
 
+    /// Codemode Phase 2 regression: a `deferred` tool is not model-visible from
+    /// turn one, but a search hit must declare it for direct calls (that is the
+    /// whole point of the `deferred` exposure). Before this test existed,
+    /// `is_declareable` only matched `Direct`, so deferred hits never activated.
+    #[tokio::test]
+    async fn search_tool_declares_deferred_hit_for_direct_calls() {
+        let resources = crate::types::resources::Resources::default().into_shared();
+        resources
+            .lock()
+            .await
+            .insert(ToolIndex(std::sync::Arc::new(StaticToolIndex {
+                snapshot: SearchSnapshot {
+                    results: vec![ToolSearchResult {
+                        tool_name: "jadx__status".into(),
+                        server_name: "jadx".into(),
+                        description: "Report APK load status".into(),
+                        score: 1.0,
+                        parameters: vec![],
+                        input_schema: serde_json::json!({"type": "object"}),
+                        managed_gateway_tool: None,
+                    }],
+                    total_hidden_tools: 0,
+                    is_ready: true,
+                },
+            })));
+        resources.lock().await.insert(
+            crate::types::resources::McpToolExposures(std::collections::HashMap::from([(
+                "jadx__status".to_string(),
+                xai_grok_config::McpToolExposure::Deferred,
+            )])),
+        );
+        let mut ctx =
+            xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+        ctx.extensions.insert(resources.clone());
+
+        let output = SearchTool
+            .run(
+                ctx,
+                SearchToolInput {
+                    query: "jadx status".into(),
+                    limit: Some(5),
+                    detail: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(output, ToolOutput::SearchTool(_)));
+        let guard = resources.lock().await;
+        let declared = guard
+            .get::<crate::types::resources::DeclaredMcpTools>()
+            .expect("DeclaredMcpTools should exist after a search hit");
+        assert!(
+            declared.contains("jadx__status"),
+            "deferred search hit must be declared for direct calls; got {:?}",
+            declared
+        );
+    }
+
     #[tokio::test]
     async fn search_tool_ready_empty_catalog_includes_guidance_note() {
         let resources = crate::types::resources::Resources::default().into_shared();
