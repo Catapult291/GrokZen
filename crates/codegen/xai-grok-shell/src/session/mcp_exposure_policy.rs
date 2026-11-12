@@ -19,6 +19,13 @@
 //!    - `only`: every local MCP tool becomes `CodemodeOnly` — the model's only
 //!      path to MCP tools is a codemode script.
 //!    - `off`: historical behavior; per-server exposure config is ignored.
+//! 5. Global `[toolset.codemode] default_exposure`: the fallback routing for
+//!    registered tools no explicit entry above covers — `"deferred"` keeps
+//!    every unconfigured server off the model-visible table until a
+//!    `search_tool` hit declares it (`"direct"`, the default, keeps the
+//!    historical behavior). The `direct_servers` whitelist stays `Direct`
+//!    under a `deferred` default, so hot tools keep their turn-one
+//!    declaration.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,23 +34,29 @@ use xai_grok_config::{CodemodeMcpMode, McpToolExposure};
 use xai_grok_mcp::servers::McpState;
 
 /// `[toolset.codemode]` routing section: `mode`, the `direct_servers` hot-tools
-/// whitelist (server names that stay Direct even under `mode = "only"`), and
-/// the `exposure` global map (`server name → McpToolExposure`, applied to any
-/// server regardless of its config source — TOML, `~/.claude.json` compat, …).
+/// whitelist (server names that stay Direct even under `mode = "only"` and
+/// under `default_exposure = "deferred"`), the `exposure` global map
+/// (`server name → McpToolExposure`, applied to any server regardless of its
+/// config source — TOML, `~/.claude.json` compat, …), and `default_exposure`
+/// (the fallback routing for tools no explicit entry covers; `Direct` — the
+/// compiled-in default — is a no-op).
 pub(crate) struct CodemodeMcpSection {
     mode: CodemodeMcpMode,
     direct_servers: Vec<String>,
     exposure: std::collections::HashMap<String, McpToolExposure>,
+    default_exposure: McpToolExposure,
 }
 
 /// Resolve the `[toolset.codemode]` routing section for the given working
-/// directory. Falls back to `Adaptive` with an empty whitelist when no config
-/// is loadable (same tolerance as the other free-function config readers).
+/// directory. Falls back to `Adaptive` with an empty whitelist and a `Direct`
+/// default exposure when no config is loadable (same tolerance as the other
+/// free-function config readers).
 pub(crate) fn resolve_codemode_mcp_section(cwd: &Path) -> CodemodeMcpSection {
     let empty = CodemodeMcpSection {
         mode: CodemodeMcpMode::default(),
         direct_servers: Vec::new(),
         exposure: std::collections::HashMap::new(),
+        default_exposure: McpToolExposure::Direct,
     };
     let root = match xai_grok_config::effective_config::load_effective_config() {
         Ok(root) => root,
@@ -67,10 +80,12 @@ pub(crate) fn resolve_codemode_mcp_section(cwd: &Path) -> CodemodeMcpSection {
     // sources like `~/.claude.json`, which `get_mcp_server_config_with_project`
     // never consults).
     let exposure = parse_exposure_map(section);
+    let default_exposure = parse_default_exposure(section);
     CodemodeMcpSection {
         mode,
         direct_servers,
         exposure,
+        default_exposure,
     }
 }
 
@@ -90,6 +105,22 @@ fn parse_exposure_map(codemode_section: Option<&toml::Value>) -> HashMap<String,
             exposure.map(|e| (name.clone(), e))
         })
         .collect()
+}
+
+/// Parse the `[toolset.codemode] default_exposure` fallback routing for tools
+/// no per-server / global-map entry covers. Only `direct` and `deferred` are
+/// accepted; any other value (or absence) falls back to `direct` — the
+/// historical behavior — so a typo never hides a whole fleet.
+fn parse_default_exposure(codemode_section: Option<&toml::Value>) -> McpToolExposure {
+    codemode_section
+        .and_then(|c| c.get("default_exposure"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| match s {
+            "direct" => Some(McpToolExposure::Direct),
+            "deferred" => Some(McpToolExposure::Deferred),
+            _ => None,
+        })
+        .unwrap_or(McpToolExposure::Direct)
 }
 
 /// Expand a resolved `[toolset.codemode]` section onto a locked [`McpState`]'s
@@ -163,6 +194,32 @@ pub(crate) fn expand_exposure_overrides(
                 McpToolExposure::CodemodeOnly
             };
             overrides.entry(name.clone()).or_insert(exposure);
+        }
+    }
+
+    // Default exposure fill: the routing for registered tools no explicit
+    // entry above covers (per-server `tool_exposure` > global exposure map >
+    // `default_exposure` > the registered base). `Direct` — the compiled-in
+    // default — emits nothing, so unconfigured behavior is byte-identical to
+    // the pre-Phase-1 state. `direct_servers` keeps hot tools `Direct` under a
+    // `deferred` default. `mode = "off"` already returned above: no trimming.
+    if section.default_exposure != McpToolExposure::Direct {
+        for name in state.tool_exposures.keys() {
+            if overrides.contains_key(name) {
+                continue;
+            }
+            let whitelisted = name
+                .split_once(xai_grok_mcp::servers::MCP_TOOL_NAME_DELIMITER)
+                .map(|(server, _)| server)
+                .is_some_and(|server| section.direct_servers.iter().any(|s| s == server));
+            overrides.insert(
+                name.clone(),
+                if whitelisted {
+                    McpToolExposure::Direct
+                } else {
+                    section.default_exposure
+                },
+            );
         }
     }
 
@@ -264,6 +321,7 @@ tool_exposure = "codemode_only"
                 .iter()
                 .map(|(name, e)| ((*name).to_string(), *e))
                 .collect(),
+            default_exposure: McpToolExposure::Direct,
         }
     }
 
@@ -331,5 +389,164 @@ tavily = "bogus"
             Some(&McpToolExposure::Deferred)
         );
         assert!(!exposure.contains_key("tavily"), "unknown value must be skipped");
+    }
+
+    // ---- Phase 1: `[toolset.codemode] default_exposure` ----
+
+    #[test]
+    fn default_exposure_parses_direct_deferred_and_rejects_other_values() {
+        let root: toml::Value = toml::from_str(
+            r#"
+[toolset.codemode]
+default_exposure = "deferred"
+"#,
+        )
+        .unwrap();
+        let codemode_section = root.get("toolset").and_then(|t| t.get("codemode"));
+        assert_eq!(parse_default_exposure(codemode_section), McpToolExposure::Deferred);
+
+        // `codemode_only` / `hidden` are not legal fallbacks — a typo must
+        // never hide a whole fleet, so anything but direct|deferred → direct.
+        let bogus: toml::Value = toml::from_str(
+            r#"
+[toolset.codemode]
+default_exposure = "codemode_only"
+"#,
+        )
+        .unwrap();
+        let codemode_section = bogus.get("toolset").and_then(|t| t.get("codemode"));
+        assert_eq!(parse_default_exposure(codemode_section), McpToolExposure::Direct);
+
+        // Absent key → direct (historical behavior).
+        assert_eq!(parse_default_exposure(None), McpToolExposure::Direct);
+    }
+
+    #[test]
+    fn compiled_in_direct_default_emits_no_overrides() {
+        // Zero-regression guard: without the key, the expansion is byte-for-byte
+        // the pre-Phase-1 behavior — no overrides, registered base wins.
+        let state = mcp_state_with(
+            vec![stdio_server("linear")],
+            &[("linear__save_issue", McpToolExposure::Direct)],
+        );
+        let section = test_section(&[]);
+        let resolved =
+            expand_exposure_overrides(&section, &state.try_lock().unwrap(), Path::new("."));
+        assert!(
+            resolved.is_empty(),
+            "`direct` default must be a no-op; got {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn default_exposure_deferred_fills_uncovered_registered_tools() {
+        let state = mcp_state_with(
+            vec![stdio_server("ida-multi-mcp"), stdio_server("tavily")],
+            &[
+                ("ida-multi-mcp__status", McpToolExposure::Direct),
+                ("tavily__search", McpToolExposure::Direct),
+            ],
+        );
+        let mut section = test_section(&[]);
+        section.default_exposure = McpToolExposure::Deferred;
+        let resolved =
+            expand_exposure_overrides(&section, &state.try_lock().unwrap(), Path::new("."));
+        assert_eq!(
+            resolved.get("ida-multi-mcp__status"),
+            Some(&McpToolExposure::Deferred)
+        );
+        assert_eq!(
+            resolved.get("tavily__search"),
+            Some(&McpToolExposure::Deferred)
+        );
+    }
+
+    #[test]
+    fn direct_servers_whitelist_stays_direct_under_default_deferred() {
+        // Same lesson as the Phase 2 adaptive deviation: hot tools whitelisted
+        // in `direct_servers` keep their turn-one declaration when the default
+        // flips to `deferred`.
+        let state = mcp_state_with(
+            vec![stdio_server("tavily"), stdio_server("ida-multi-mcp")],
+            &[
+                ("tavily__search", McpToolExposure::Direct),
+                ("ida-multi-mcp__status", McpToolExposure::Direct),
+            ],
+        );
+        let mut section = test_section(&[]);
+        section.default_exposure = McpToolExposure::Deferred;
+        section.direct_servers = vec!["tavily".to_string()];
+        let resolved =
+            expand_exposure_overrides(&section, &state.try_lock().unwrap(), Path::new("."));
+        assert_eq!(
+            resolved.get("tavily__search"),
+            Some(&McpToolExposure::Direct),
+            "whitelisted hot server must stay direct"
+        );
+        assert_eq!(
+            resolved.get("ida-multi-mcp__status"),
+            Some(&McpToolExposure::Deferred)
+        );
+    }
+
+    #[test]
+    fn global_exposure_map_beats_default_exposure() {
+        let state = mcp_state_with(
+            vec![stdio_server("linear")],
+            &[("linear__save_issue", McpToolExposure::Direct)],
+        );
+        let mut section = test_section(&[("linear", McpToolExposure::CodemodeOnly)]);
+        section.default_exposure = McpToolExposure::Deferred;
+        let resolved =
+            expand_exposure_overrides(&section, &state.try_lock().unwrap(), Path::new("."));
+        assert_eq!(
+            resolved.get("linear__save_issue"),
+            Some(&McpToolExposure::CodemodeOnly),
+            "explicit global-map entry outranks the default fill"
+        );
+    }
+
+    #[test]
+    fn per_server_tool_exposure_beats_default_exposure() {
+        // Per-server `[mcp_servers.<x>] tool_exposure` is the top of the
+        // priority chain: it outranks `[toolset.codemode] default_exposure`.
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".grok")).unwrap();
+        std::fs::write(
+            project.path().join(".grok/config.toml"),
+            "[mcp_servers.linear]\ncommand = \"echo\"\ntool_exposure = \"codemode_only\"\n",
+        )
+        .unwrap();
+        let state = mcp_state_with(
+            vec![stdio_server("linear")],
+            &[("linear__save_issue", McpToolExposure::Direct)],
+        );
+        let mut section = test_section(&[]);
+        section.default_exposure = McpToolExposure::Deferred;
+        let resolved =
+            expand_exposure_overrides(&section, &state.try_lock().unwrap(), project.path());
+        assert_eq!(
+            resolved.get("linear__save_issue"),
+            Some(&McpToolExposure::CodemodeOnly),
+            "per-server tool_exposure outranks the default fill"
+        );
+    }
+
+    #[test]
+    fn default_exposure_ignored_under_off_mode() {
+        // `mode = "off"` disables all trimming, including the default fill.
+        let state = mcp_state_with(
+            vec![stdio_server("linear")],
+            &[("linear__save_issue", McpToolExposure::Direct)],
+        );
+        let mut section = test_section(&[]);
+        section.mode = CodemodeMcpMode::Off;
+        section.default_exposure = McpToolExposure::Deferred;
+        let resolved =
+            expand_exposure_overrides(&section, &state.try_lock().unwrap(), Path::new("."));
+        assert!(
+            resolved.is_empty(),
+            "`off` must ignore default_exposure too; got {resolved:?}"
+        );
     }
 }
