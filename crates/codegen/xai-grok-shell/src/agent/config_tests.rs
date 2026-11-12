@@ -8858,6 +8858,36 @@ fn remote_settings_disarm_requires_prod_proxy_when_keys_embedded() {
     );
 }
 #[test]
+fn codemode_default_exposure_is_a_recognized_config_key() {
+    // `default_exposure` is read from the raw effective config by
+    // `mcp_exposure_policy`; without a declaration on `CodemodeToolConfig` the
+    // schema validator reports it as an unknown key in `grok inspect`.
+    let raw_config: toml::Value = toml::from_str(
+        r#"
+            [toolset.codemode]
+            default_exposure = "deferred"
+            direct_servers = ["exa", "tavily"]
+            inline_budget = 3000
+            "#,
+    )
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+    assert!(
+        !cfg.config_warnings.iter().any(|w| {
+            matches!(&w.target,
+                super::super::config_model_override_parse::WarningTarget::ConfigKey { path }
+                    if path.starts_with("toolset.codemode"))
+        }),
+        "declared [toolset.codemode] keys must not warn as unrecognized: {:?}",
+        cfg.config_warnings
+    );
+    assert_eq!(
+        cfg.toolset.codemode.default_exposure.as_deref(),
+        Some("deferred")
+    );
+}
+
+#[test]
 fn a_status_line_the_parser_could_not_read_in_full_reaches_grok_inspect() {
     use super::super::config_model_override_parse::{ConfigWarningKind, WarningTarget};
     let raw_config: toml::Value = toml::from_str(
