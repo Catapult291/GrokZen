@@ -520,7 +520,10 @@ async fn codemode_only_tool_reachable_through_codemode_script() {
             _args: serde_json::Value,
             _ctx: xai_tool_runtime::ToolCallContext,
         ) -> ToolStream<TypedToolOutput> {
-            self.calls.lock().unwrap().push(tool_id.as_str().to_string());
+            self.calls
+                .lock()
+                .unwrap()
+                .push(tool_id.as_str().to_string());
             let out = serde_json::json!({ "type": "Text", "text": "ok-from-codemode" });
             xai_tool_runtime::terminal_only(Ok(TypedToolOutput::from_value(tool_id, out)))
         }
@@ -530,12 +533,15 @@ async fn codemode_only_tool_reachable_through_codemode_script() {
         calls: Mutex::new(Vec::new()),
     });
     let resources = crate::types::resources::Resources::default().into_shared();
-    resources.lock().await.insert(
-        crate::types::resources::McpToolExposures(std::collections::HashMap::from([(
-            "sentry__find_organizations".to_string(),
-            xai_grok_config::McpToolExposure::CodemodeOnly,
-        )])),
-    );
+    resources
+        .lock()
+        .await
+        .insert(crate::types::resources::McpToolExposures(
+            std::collections::HashMap::from([(
+                "sentry__find_organizations".to_string(),
+                xai_grok_config::McpToolExposure::CodemodeOnly,
+            )]),
+        ));
     let mut ctx = xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
     ctx.extensions
         .insert(crate::types::resources::InnerDispatch(dispatch.clone()));

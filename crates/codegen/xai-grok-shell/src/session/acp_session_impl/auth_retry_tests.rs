@@ -368,9 +368,7 @@ async fn pace_adopts_token_written_to_auth_json_mid_park() {
     // token can be adopted), so the disk-adoption path this test exercises is
     // unreachable there; the hot_swap twin
     // (`pace_wakes_on_token_adopted_without_notify`) covers the adoption machinery.
-    if !xai_grok_config::Distribution::current()
-        .allows(xai_grok_config::Capability::AccountLogin)
-    {
+    if !xai_grok_config::Distribution::current().allows(xai_grok_config::Capability::AccountLogin) {
         return;
     }
     let (_dir, am) = expired_manager_for_pace();

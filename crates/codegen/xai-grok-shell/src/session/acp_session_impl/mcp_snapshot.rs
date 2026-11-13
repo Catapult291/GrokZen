@@ -131,8 +131,7 @@ pub(super) struct SnapshotRefresher {
     /// registration state on every refresh. `None` (tests, shared pool
     /// refreshes) means no overrides — per-tool entries from
     /// `McpState.tool_exposures` still apply.
-    pub(super) exposure_section:
-        Option<crate::session::mcp_exposure_policy::CodemodeMcpSection>,
+    pub(super) exposure_section: Option<crate::session::mcp_exposure_policy::CodemodeMcpSection>,
     /// Session working directory, used by the exposure expansion for the
     /// per-server `[mcp_servers.<x>] tool_exposure` lookup.
     pub(super) cwd: std::path::PathBuf,
@@ -252,9 +251,11 @@ impl SnapshotRefresher {
                 let state = mcp_state.lock().await;
                 let tool_exposures = state.tool_exposures.clone();
                 let overrides = match &self.exposure_section {
-                    Some(section) => crate::session::mcp_exposure_policy::expand_exposure_overrides(
-                        section, &state, &self.cwd,
-                    ),
+                    Some(section) => {
+                        crate::session::mcp_exposure_policy::expand_exposure_overrides(
+                            section, &state, &self.cwd,
+                        )
+                    }
                     None => Default::default(),
                 };
                 (tool_exposures, overrides)

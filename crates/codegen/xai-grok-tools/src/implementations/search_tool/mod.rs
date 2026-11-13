@@ -609,12 +609,15 @@ mod tests {
                     is_ready: true,
                 },
             })));
-        resources.lock().await.insert(
-            crate::types::resources::McpToolExposures(std::collections::HashMap::from([(
-                "grafana__SearchDashboards".to_string(),
-                xai_grok_config::McpToolExposure::CodemodeOnly,
-            )])),
-        );
+        resources
+            .lock()
+            .await
+            .insert(crate::types::resources::McpToolExposures(
+                std::collections::HashMap::from([(
+                    "grafana__SearchDashboards".to_string(),
+                    xai_grok_config::McpToolExposure::CodemodeOnly,
+                )]),
+            ));
         let mut ctx =
             xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
         ctx.extensions.insert(resources.clone());
@@ -672,12 +675,15 @@ mod tests {
                     is_ready: true,
                 },
             })));
-        resources.lock().await.insert(
-            crate::types::resources::McpToolExposures(std::collections::HashMap::from([(
-                "jadx__status".to_string(),
-                xai_grok_config::McpToolExposure::Deferred,
-            )])),
-        );
+        resources
+            .lock()
+            .await
+            .insert(crate::types::resources::McpToolExposures(
+                std::collections::HashMap::from([(
+                    "jadx__status".to_string(),
+                    xai_grok_config::McpToolExposure::Deferred,
+                )]),
+            ));
         let mut ctx =
             xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
         ctx.extensions.insert(resources.clone());

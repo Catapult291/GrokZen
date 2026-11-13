@@ -641,9 +641,11 @@ impl SessionActor {
             tool_metadata_snapshot: self.tool_metadata_snapshot.clone(),
             mcp_reminder_dirty: Arc::clone(&self.mcp_reminder_dirty),
             disabled_gateway_tools,
-            exposure_section: Some(crate::session::mcp_exposure_policy::resolve_codemode_mcp_section(
-                std::path::Path::new(&self.session_info.cwd),
-            )),
+            exposure_section: Some(
+                crate::session::mcp_exposure_policy::resolve_codemode_mcp_section(
+                    std::path::Path::new(&self.session_info.cwd),
+                ),
+            ),
             cwd: std::path::PathBuf::from(&self.session_info.cwd),
             mcps_root: self.cursor_mcps_root(),
         }
@@ -1248,7 +1250,8 @@ impl SessionActor {
             has_servers_to_spawn: !mcp_state.configs.is_empty() || mcp_state.has_acp_servers(),
             guard,
         }
-    }    async fn run_mcp_init(&self, reroot_active: bool) {
+    }
+    async fn run_mcp_init(&self, reroot_active: bool) {
         let Some(claim) = self.claim_init().await else {
             tracing::debug!(
                 session_id = %self.session_info.id.0,

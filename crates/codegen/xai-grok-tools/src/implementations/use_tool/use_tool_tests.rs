@@ -266,12 +266,15 @@ async fn failed_dispatch_does_not_declare() {
 #[tokio::test]
 async fn codemode_only_tool_refuses_direct_use_tool() {
     let resources = crate::types::resources::Resources::default().into_shared();
-    resources.lock().await.insert(
-        crate::types::resources::McpToolExposures(std::collections::HashMap::from([(
-            "linear__save_issue".to_string(),
-            xai_grok_config::McpToolExposure::CodemodeOnly,
-        )])),
-    );
+    resources
+        .lock()
+        .await
+        .insert(crate::types::resources::McpToolExposures(
+            std::collections::HashMap::from([(
+                "linear__save_issue".to_string(),
+                xai_grok_config::McpToolExposure::CodemodeOnly,
+            )]),
+        ));
     let ctx = {
         let mut ctx = ctx_with_dispatch(MockToolDispatch {
             expected_tool_name: "linear__save_issue".into(),
@@ -292,7 +295,11 @@ async fn codemode_only_tool_refuses_direct_use_tool() {
     .await
     .unwrap_err();
     assert_eq!(
-        error.details.as_ref().and_then(|d| d.get("code")).and_then(serde_json::Value::as_str),
+        error
+            .details
+            .as_ref()
+            .and_then(|d| d.get("code"))
+            .and_then(serde_json::Value::as_str),
         Some("codemode_only"),
         "direct use_tool on a codemode_only tool must be refused; got {error:?}"
     );

@@ -140,7 +140,10 @@ fn parse_default_exposure(codemode_section: Option<&toml::Value>) -> McpToolExpo
 }
 
 fn default_direct_servers() -> Vec<String> {
-    DEFAULT_DIRECT_SERVERS.iter().map(|s| s.to_string()).collect()
+    DEFAULT_DIRECT_SERVERS
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// Expand a resolved `[toolset.codemode]` section onto a locked [`McpState`]'s
@@ -159,14 +162,10 @@ pub(crate) fn expand_exposure_overrides(
     }
     let mode = section.mode;
     let mut overrides: HashMap<String, McpToolExposure> = HashMap::new();
-    for (server, config) in state
-        .configs
-        .iter()
-        .filter_map(|c| {
-            let name = xai_grok_mcp::servers::mcp_server_name(c).to_string();
-            get_mcp_server_config_with_project(&name, cwd).map(|cfg| (name, cfg))
-        })
-    {
+    for (server, config) in state.configs.iter().filter_map(|c| {
+        let name = xai_grok_mcp::servers::mcp_server_name(c).to_string();
+        get_mcp_server_config_with_project(&name, cwd).map(|cfg| (name, cfg))
+    }) {
         let Some(per_server) = config.tool_exposure else {
             continue;
         };
@@ -202,7 +201,8 @@ pub(crate) fn expand_exposure_overrides(
         // codemode unless the per-server config, protocol meta, or the
         // `direct_servers` hot-tools whitelist said otherwise.
         let server_of = |qualified: &str| {
-            qualified.split_once(xai_grok_mcp::servers::MCP_TOOL_NAME_DELIMITER)
+            qualified
+                .split_once(xai_grok_mcp::servers::MCP_TOOL_NAME_DELIMITER)
                 .map(|(server, _)| server.to_string())
         };
         for name in state.tool_exposures.keys() {
@@ -251,8 +251,8 @@ pub(crate) fn expand_exposure_overrides(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol as acp;
     use crate::util::config::get_mcp_server_config_with_project;
+    use agent_client_protocol as acp;
     use std::sync::Arc;
 
     fn mcp_state_with(
@@ -274,7 +274,11 @@ mod tests {
         // Mirrors the production path: resolve the section from config, then
         // expand against the (already populated) registration state.
         let section = resolve_codemode_mcp_section(Path::new("."));
-        expand_exposure_overrides(&section, &state.try_lock().expect("state lock"), Path::new("."))
+        expand_exposure_overrides(
+            &section,
+            &state.try_lock().expect("state lock"),
+            Path::new("."),
+        )
     }
 
     #[test]
@@ -308,8 +312,14 @@ mod tests {
         // No config written for these servers: the compiled-in default
         // (`deferred` + preset `exa`/`tavily` whitelist, which neither server
         // belongs to) defers them all.
-        assert_eq!(resolved.get("linear__save_issue"), Some(&McpToolExposure::Deferred));
-        assert_eq!(resolved.get("linear__list_issues"), Some(&McpToolExposure::Deferred));
+        assert_eq!(
+            resolved.get("linear__save_issue"),
+            Some(&McpToolExposure::Deferred)
+        );
+        assert_eq!(
+            resolved.get("linear__list_issues"),
+            Some(&McpToolExposure::Deferred)
+        );
         assert_eq!(
             resolved.get("grafana__SearchDashboards"),
             Some(&McpToolExposure::Deferred)
@@ -358,7 +368,8 @@ tool_exposure = "codemode_only"
             &[("ida-multi-mcp__status", McpToolExposure::Direct)],
         );
         let section = test_section(&[("ida-multi-mcp", McpToolExposure::Deferred)]);
-        let resolved = expand_exposure_overrides(&section, &state.try_lock().unwrap(), Path::new("."));
+        let resolved =
+            expand_exposure_overrides(&section, &state.try_lock().unwrap(), Path::new("."));
         assert_eq!(
             resolved.get("ida-multi-mcp__status"),
             Some(&McpToolExposure::Deferred)
@@ -368,9 +379,10 @@ tool_exposure = "codemode_only"
     #[test]
     fn global_exposure_map_applies_when_per_server_toml_config_absent() {
         let mut state = McpState::new(vec![stdio_server("jadx-headless-mcp")]);
-        state
-            .tool_exposures
-            .insert("jadx-headless-mcp__status".to_string(), McpToolExposure::Direct);
+        state.tool_exposures.insert(
+            "jadx-headless-mcp__status".to_string(),
+            McpToolExposure::Direct,
+        );
         let section = test_section(&[("jadx-headless-mcp", McpToolExposure::CodemodeOnly)]);
         // No `[mcp_servers.jadx-headless-mcp]` in TOML here, so the global map
         // (step 3) is what routes the server.
@@ -388,7 +400,8 @@ tool_exposure = "codemode_only"
             &[("linear__save_issue", McpToolExposure::Direct)],
         );
         let section = test_section(&[("grafana", McpToolExposure::Deferred)]);
-        let resolved = expand_exposure_overrides(&section, &state.try_lock().unwrap(), Path::new("."));
+        let resolved =
+            expand_exposure_overrides(&section, &state.try_lock().unwrap(), Path::new("."));
         assert!(
             resolved.is_empty(),
             "unrelated server entries must not leak: {resolved:?}"
@@ -411,7 +424,10 @@ tavily = "bogus"
             exposure.get("ida-multi-mcp"),
             Some(&McpToolExposure::Deferred)
         );
-        assert!(!exposure.contains_key("tavily"), "unknown value must be skipped");
+        assert!(
+            !exposure.contains_key("tavily"),
+            "unknown value must be skipped"
+        );
     }
 
     // ---- Phase 1: `[toolset.codemode] default_exposure` ----
@@ -426,7 +442,10 @@ default_exposure = "deferred"
         )
         .unwrap();
         let codemode_section = root.get("toolset").and_then(|t| t.get("codemode"));
-        assert_eq!(parse_default_exposure(codemode_section), McpToolExposure::Deferred);
+        assert_eq!(
+            parse_default_exposure(codemode_section),
+            McpToolExposure::Deferred
+        );
 
         // `codemode_only` / `hidden` are not legal fallbacks — a typo must
         // never hide a whole fleet, so anything but direct|deferred falls
@@ -440,7 +459,10 @@ default_exposure = "codemode_only"
         )
         .unwrap();
         let codemode_section = bogus.get("toolset").and_then(|t| t.get("codemode"));
-        assert_eq!(parse_default_exposure(codemode_section), McpToolExposure::Deferred);
+        assert_eq!(
+            parse_default_exposure(codemode_section),
+            McpToolExposure::Deferred
+        );
 
         // Absent key → compiled-in default (`deferred`, pi-style).
         assert_eq!(parse_default_exposure(None), McpToolExposure::Deferred);
@@ -452,7 +474,11 @@ default_exposure = "codemode_only"
         // and the compiled-in `direct_servers` whitelist presets the built-in
         // light search servers so web search keeps its zero-tax direct lane.
         let state = mcp_state_with(
-            vec![stdio_server("tavily"), stdio_server("exa"), stdio_server("ida-multi-mcp")],
+            vec![
+                stdio_server("tavily"),
+                stdio_server("exa"),
+                stdio_server("ida-multi-mcp"),
+            ],
             &[
                 ("tavily__search", McpToolExposure::Direct),
                 ("exa__web_search_exa", McpToolExposure::Direct),
