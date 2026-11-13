@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "tag": "release-v1.0.28",
+  "prerelease": false,
+  "previous_tag": "release-v1.0.27",
+  "community": [
+    {
+      "text": "codemode 接管 MCP 工具调用：沙箱内 `search_tool` 首次发现即可声明直调，多步 MCP 任务自动优先走 codemode。",
+      "commits": [
+        "2b2cffc08318761ef71c6c3ce35e879a3d3fc074",
+        "ac3ba00689ee98b6320038011eb89b79bd48e761",
+        "8001b7969501b8625f9409d66b8cc114b4893cec",
+        "efba8c319f16f5303a7c9e5f62e68f56b9ff5c7c"
+      ]
+    },
+    {
+      "text": "新增 `[toolset.codemode] default_exposure` 配置，MCP 工具支持 direct / deferred / codemode_only / hidden 四档暴露；内置默认档位改为 deferred，仅 exa/tavily 预设白名单直通。",
+      "commits": [
+        "b6678c98126a29f43d3ce4b08a6cb04384b51b9a",
+        "ca23afaa2754d8fccbaa6cea3374043092ada0c7",
+        "b535e0b6c719a9bee7d9c9d64395cd64fd69fe75"
+      ]
+    },
+    {
+      "text": "codemode 补齐描述命名空间清单、inline 调用预算与 `search_tool` detail 参数，超长返回自动换摘要。",
+      "commits": [
+        "ddb2316f8277d062acf212168c3dba36dca48ecc",
+        "b760f93079d6bc22cb0cb8f500492d9f1f15f649"
+      ]
+    },
+    {
+      "text": "一批工具链路修复：Windows 下 mock LSP、web_fetch、grep 卡片路径与各工具回显路径统一归一化，目录读取错误分类，bash 导出 schema 裁剪编码/detach 字段。",
+      "commits": [
+        "a46a7b09e594cce264e62f906da3b93fde15e24e",
+        "efca2005ff71f239476633653e687cc87de8a312",
+        "3615d94efa24ef1689071a9f7f0498984bab9320",
+        "138dcee1a67e22d4b6d29d00ecc57cf26342c8d9",
+        "f691660b68883567275b25dbfc249f4d1dc7726d",
+        "5fba3e9a0703ca7f3baded4d91cb9281537301c1",
+        "066de920751f4ea0493f5a33bee1bac0f7ac9075",
+        "46423e960d503a4d80c6ccccc62ce614213d2330",
+        "ac17615202ffb4393393bafd0889095fba15304c",
+        "b60e1a072d60f594110546f515fa2972ceb39001",
+        "91989a58c21cbeae1e1dfd1a73d1a525ce6d1288"
+      ]
+    },
+    {
+      "text": "pager 搜索块 pattern 提取补 query 字段回落，与 search_code 行为对齐。",
+      "commits": [
+        "58340ddc23a93839b19a3c0d8b56daff2b630193"
+      ]
+    },
+    {
+      "text": "全仓 `cargo check` 警告清零，并修复多组 Windows/POSIX 测试基线。",
+      "commits": [
+        "e820e511f93b7a8be223e7bdd7df38bc5f3c7272",
+        "467f846a20e36f998f59bd0dab872db6b141c534",
+        "b1898809d553edc769092baa861beea58d633935",
+        "eeee8f6b362fd33317eb6e9884434d7773d6f165",
+        "9a94a5e4180cfb62612154d00b0dff319f7f15f1",
+        "adae77ac36570c4a19a33d2209b4f35c7d1165ab",
+        "0e1597dd3acbed647b713ae911113090d9b25e58"
+      ]
+    }
+  ],
+  "upstream": [],
+  "notices": [
+    "内置 MCP 工具默认档位改为 deferred：工具先经 search_tool 发现后再声明直调；如需恢复直通，设置 [toolset.codemode] default_exposure = \"direct\"。"
+  ]
+}
