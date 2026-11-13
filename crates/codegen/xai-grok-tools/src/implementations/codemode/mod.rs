@@ -8,7 +8,7 @@ pub use input::CodemodeInput;
 
 mod namespace_listing;
 pub use namespace_listing::{
-    catalog_tool, render_namespace_listing, CatalogServer, CatalogTool, BYTES_PER_TOKEN,
+    BYTES_PER_TOKEN, CatalogServer, CatalogTool, catalog_tool, render_namespace_listing,
 };
 
 use std::sync::{Arc, Mutex};

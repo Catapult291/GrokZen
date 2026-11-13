@@ -1630,7 +1630,7 @@ impl FinalizedToolset {
     /// namespace listing; computed fresh on every definition build so
     /// `xai/mcp/tools_changed` register/unregister cycles are reflected.
     pub fn mcp_namespace_catalog(&self) -> Vec<crate::implementations::codemode::CatalogServer> {
-        use crate::implementations::codemode::{catalog_tool, CatalogServer};
+        use crate::implementations::codemode::{CatalogServer, catalog_tool};
         const MCP_TOOL_NAME_DELIMITER: &str = "__";
         let tools = self.tools.read();
         let mut servers: std::collections::BTreeMap<String, Vec<_>> = Default::default();
@@ -1641,13 +1641,14 @@ impl FinalizedToolset {
             if tool.is_empty() {
                 continue;
             }
-            servers.entry(server.to_string()).or_default().push(
-                catalog_tool(
+            servers
+                .entry(server.to_string())
+                .or_default()
+                .push(catalog_tool(
                     tool.to_string(),
                     t.definition.function.description.as_deref(),
                     &t.definition.function.parameters,
-                ),
-            );
+                ));
         }
         servers
             .into_iter()

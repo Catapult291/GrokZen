@@ -72,8 +72,7 @@ type PythonInterpreter = (String, Vec<String>);
 /// Candidates in priority order. `python` first: on Windows `python3` is very
 /// often the Microsoft Store app-execution-alias stub, which silently exits
 /// 9009 whenever its stdio is piped, killing every mock-server handshake.
-const PYTHON_CANDIDATES: &[(&str, &[&str])] =
-    &[("python", &[]), ("py", &["-3"]), ("python3", &[])];
+const PYTHON_CANDIDATES: &[(&str, &[&str])] = &[("python", &[]), ("py", &["-3"]), ("python3", &[])];
 
 /// Pick the first candidate interpreter that can actually run code with its
 /// stdio piped. The check must go through a pipe, not a console: the Store
@@ -81,13 +80,12 @@ const PYTHON_CANDIDATES: &[(&str, &[&str])] =
 /// is attached, so that would false-positive. Returns the legacy default when
 /// nothing qualifies so the failure message stays recognizable.
 fn select_mock_python() -> PythonInterpreter {
-    static SELECTED: std::sync::OnceLock<Option<PythonInterpreter>> =
-        std::sync::OnceLock::new();
+    static SELECTED: std::sync::OnceLock<Option<PythonInterpreter>> = std::sync::OnceLock::new();
     SELECTED
         .get_or_init(|| {
-            PYTHON_CANDIDATES.iter().find_map(|(command, extra_args)| {
-                probe_python(command, extra_args)
-            })
+            PYTHON_CANDIDATES
+                .iter()
+                .find_map(|(command, extra_args)| probe_python(command, extra_args))
         })
         .clone()
         .unwrap_or_else(|| ("python3".to_string(), Vec::new()))
@@ -114,9 +112,7 @@ fn probe_python(command: &str, extra_args: &[&str]) -> Option<PythonInterpreter>
         .write_all(b"print('ok')\n")
         .ok()?;
     let output = child.wait_with_output().ok()?;
-    (output.status.success()
-        && String::from_utf8_lossy(&output.stdout).contains("ok"))
-    .then(|| {
+    (output.status.success() && String::from_utf8_lossy(&output.stdout).contains("ok")).then(|| {
         (
             command.to_string(),
             extra_args.iter().map(|arg| arg.to_string()).collect(),

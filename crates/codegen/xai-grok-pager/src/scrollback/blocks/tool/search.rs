@@ -186,10 +186,7 @@ impl SearchToolCallBlock {
                 let file_count = self.file_matches.len();
                 if zh {
                     return Some(if file_count > 1 {
-                        format!(
-                            "（{} 个匹配，位于 {} 个文件）",
-                            match_count, file_count
-                        )
+                        format!("（{} 个匹配，位于 {} 个文件）", match_count, file_count)
                     } else {
                         format!("（{} 个匹配）", match_count)
                     });
@@ -217,10 +214,7 @@ impl SearchToolCallBlock {
                 let file_count = self.file_paths.len().max(self.file_matches.len());
                 if zh {
                     return Some(if file_count > 1 {
-                        format!(
-                            "（{} 个匹配，遍及 {} 个文件）",
-                            match_count, file_count
-                        )
+                        format!("（{} 个匹配，遍及 {} 个文件）", match_count, file_count)
                     } else {
                         format!("（{} 个匹配）", match_count)
                     });
@@ -303,9 +297,7 @@ impl SearchToolCallBlock {
 
         // Path scope (always after glob if both present).
         // When width is constrained, shorten the path the way the fish shell does
-        let summary = self
-            .match_summary(locale)
-            .map(|s| format!(" {s}"));
+        let summary = self.match_summary(locale).map(|s| format!(" {s}"));
         if let Some(ref path) = self.meta.path {
             spans.push(Span::styled(in_label, text_style));
             if let Some(w) = width {

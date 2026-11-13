@@ -660,7 +660,9 @@ impl DeclaredMcpTools {
 /// to enforce the codemode-only routing lane. Tools missing from the map
 /// behave as `Direct` (historical behavior). Session-scoped, not persisted.
 #[derive(Debug, Clone, Default)]
-pub struct McpToolExposures(pub std::collections::HashMap<String, xai_grok_config::McpToolExposure>);
+pub struct McpToolExposures(
+    pub std::collections::HashMap<String, xai_grok_config::McpToolExposure>,
+);
 
 impl McpToolExposures {
     /// Resolved exposure for `name`; `Direct` when unknown.

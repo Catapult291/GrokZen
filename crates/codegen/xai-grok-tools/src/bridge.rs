@@ -149,7 +149,9 @@ impl ToolBridge {
     /// see [`DeclaredMcpTools`]).
     pub async fn tool_definitions_builtins_only(&self) -> Vec<ToolDefinition> {
         let declared = self.declared_mcp_tools().await;
-        let mut defs = self.registry.tool_definitions_builtins_only(declared.as_ref());
+        let mut defs = self
+            .registry
+            .tool_definitions_builtins_only(declared.as_ref());
         self.apply_codemode_namespace_listing(&mut defs).await;
         defs
     }
@@ -172,7 +174,7 @@ impl ToolBridge {
     /// stays byte-identical to the static template. Computed per definition
     /// build, so `xai/mcp/tools_changed` cycles are reflected.
     async fn apply_codemode_namespace_listing(&self, defs: &mut [ToolDefinition]) {
-        use crate::implementations::codemode::{render_namespace_listing, CodemodeParams};
+        use crate::implementations::codemode::{CodemodeParams, render_namespace_listing};
         let Some(pos) = defs
             .iter()
             .position(|d| d.function.name == crate::implementations::codemode::CODEMODE_NAME)
@@ -191,11 +193,7 @@ impl ToolBridge {
         if catalog.is_empty() {
             return;
         }
-        let base = defs[pos]
-            .function
-            .description
-            .clone()
-            .unwrap_or_default();
+        let base = defs[pos].function.description.clone().unwrap_or_default();
         defs[pos].function.description =
             Some(render_namespace_listing(&base, &catalog, budget_bytes));
     }
@@ -967,7 +965,11 @@ mod tests {
                 "required": ["query"]
             }),
         );
-        register_mcp_fixture(&toolset, "exa__web_search_exa", serde_json::json!({"type": "object"}));
+        register_mcp_fixture(
+            &toolset,
+            "exa__web_search_exa",
+            serde_json::json!({"type": "object"}),
+        );
 
         let defs = bridge.tool_definitions_builtins_only().await;
         let desc = codemode_description(&defs);
@@ -1002,7 +1004,11 @@ mod tests {
                 },
             ))
             .await;
-        register_mcp_fixture(&toolset, "tavily__tavily_search", serde_json::json!({"type": "object"}));
+        register_mcp_fixture(
+            &toolset,
+            "tavily__tavily_search",
+            serde_json::json!({"type": "object"}),
+        );
 
         let defs = bridge.tool_definitions_builtins_only().await;
         let desc = codemode_description(&defs);

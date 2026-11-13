@@ -1799,10 +1799,7 @@ mod tests {
             ("grok-build-plan", grok_build_plan_toolset()),
             ("general-purpose", general_purpose_toolset()),
             ("workspace grok-build", workspace_grok_build_toolset()),
-            (
-                "codex",
-                toolset_for_preset("codex").expect("known preset"),
-            ),
+            ("codex", toolset_for_preset("codex").expect("known preset")),
         ] {
             for id in &index_tools {
                 assert!(

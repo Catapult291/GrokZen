@@ -96,7 +96,8 @@ pub fn tool_summary_line(tool: &CatalogTool) -> String {
     } else {
         format!("  - {}", tool.summary)
     }
-}/// Compact one-line entry for a server whose full listing did not fit.
+}
+/// Compact one-line entry for a server whose full listing did not fit.
 fn overflow_line(server: &CatalogServer) -> String {
     format!(
         "  - {} ({} tools) — discover in-script: await tools.searchTool({{ query: \"{}\" }})",
@@ -262,11 +263,17 @@ mod tests {
 
     #[test]
     fn oversized_server_is_demoted_to_compact_line() {
-        let servers = vec![big_server("ida", 200), server("exa", &[("web_search_exa", "Search")])];
+        let servers = vec![
+            big_server("ida", 200),
+            server("exa", &[("web_search_exa", "Search")]),
+        ];
         // Budget too small for ida's 200 tool lines but roomy for the rest.
         let budget = BASE.len() + HEADER.len() + 512;
         let out = render_namespace_listing(BASE, &servers, budget);
-        assert!(!out.contains("tool_0"), "big server must not be listed in full");
+        assert!(
+            !out.contains("tool_0"),
+            "big server must not be listed in full"
+        );
         assert!(out.contains("ida (200 tools) — discover in-script"));
         assert!(out.contains("exa (1 tools):"));
         assert!(out.len() <= budget, "{} > {budget}", out.len());
@@ -291,7 +298,10 @@ mod tests {
         // those, and the rest aggregate into the tail line.
         let budget = BASE.len() + HEADER.len() + 900;
         let out = render_namespace_listing(BASE, &servers, budget);
-        assert!(out.contains("more servers"), "aggregate tail expected: {out}");
+        assert!(
+            out.contains("more servers"),
+            "aggregate tail expected: {out}"
+        );
         assert!(out.len() <= budget, "{} > {budget}", out.len());
     }
 
@@ -332,7 +342,10 @@ mod tests {
             Some("Search the web for anything.\n\nLong tail."),
             &schema,
         );
-        assert_eq!(tool.summary, "search(query, limit?): Search the web for anything.");
+        assert_eq!(
+            tool.summary,
+            "search(query, limit?): Search the web for anything."
+        );
     }
 
     #[test]
@@ -342,12 +355,19 @@ mod tests {
             Some("List all registered IDA Pro instances."),
             &serde_json::json!({"type": "object"}),
         );
-        assert_eq!(tool.summary, "list_instances(): List all registered IDA Pro instances.");
+        assert_eq!(
+            tool.summary,
+            "list_instances(): List all registered IDA Pro instances."
+        );
     }
 
     #[test]
     fn catalog_tool_with_empty_inputs_has_empty_summary() {
-        let tool = catalog_tool("noop".to_string(), None, &serde_json::json!({"type": "object"}));
+        let tool = catalog_tool(
+            "noop".to_string(),
+            None,
+            &serde_json::json!({"type": "object"}),
+        );
         assert!(tool.summary.is_empty());
     }
 }
