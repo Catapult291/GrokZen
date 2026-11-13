@@ -19,7 +19,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpToolExposure {
-    /// Advertised to the model from turn one (default; historical behavior).
+    /// Advertised to the model from turn one. The compiled-in
+    /// `default_exposure` fallback is `Deferred`; `direct` reverts to this
+    /// legacy turn-one full pre-declaration.
     #[default]
     Direct,
     /// Not advertised; a `search_tool` hit activates it for direct calls
@@ -53,8 +55,9 @@ impl McpToolExposure {
 /// Global `[toolset.codemode] mode` switch for MCP tool routing.
 ///
 /// - `adaptive` (default): conservative — per-server `tool_exposure` config
-///   applies, whitelisted `direct_servers` stay direct, everything else keeps
-///   the historical direct default. No global trimming.
+///   applies, whitelisted `direct_servers` stay direct, everything else falls
+///   to the `[toolset.codemode] default_exposure` fallback (compiled-in:
+///   `deferred`). No global trimming.
 /// - `only`: every local MCP tool routes through codemode (whitelist exempts);
 ///   the model's only path to MCP tools is a codemode script.
 /// - `off`: historical behavior — all trimming disabled, per-server exposure

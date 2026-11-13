@@ -177,13 +177,16 @@ pub struct CodemodeToolConfig {
     /// `only` trims every local MCP tool to the codemode lane; `off` keeps the
     /// historical direct-call behavior and ignores per-server exposure config.
     pub mode: Option<xai_grok_config::CodemodeMcpMode>,
-    /// `mode = "only"` 的热工具豁免：这些 server 的工具保持 Direct（每轮都用的
-    /// server 不该被藏进 codemode）。`adaptive` / `off` 下忽略。
+    /// 热工具白名单：这些 server 的工具保持 Direct——`mode = "only"` 下豁免 codemode
+    /// 降级；`default_exposure = "deferred"`（含编译内缺省）下豁免延迟声明。
+    /// 编译内缺省预置 `["exa", "tavily"]`（内置轻量搜索通道）；显式声明本键
+    /// （含 `[]`）整体替换预置。
     pub direct_servers: Option<Vec<String>>,
-    /// 无显式覆盖的已注册 MCP 工具的兜底路由（`direct` | `deferred`，缺省 direct）。
+    /// 无显式覆盖的已注册 MCP 工具的兜底路由（`direct` | `deferred`，编译内缺省
+    /// deferred——pi 式结构性默认；配 `direct` 回落到旧的全量预声明）。
     /// 路由解析在 `mcp_exposure_policy` 里从原始配置读取并做值域校验——这里声明
     /// 字段只为让 `[toolset.codemode]` 的 schema 认识它（否则 `inspect` 报 unknown
-    /// key）；`String` 而非枚举，保持「未知值回落 direct」的容错。
+    /// key）；`String` 而非枚举，保持「未知值回落编译内缺省」的容错。
     pub default_exposure: Option<String>,
     /// 全局暴露映射：server 名 → `"direct" | "deferred" | "codemode_only" | "hidden"`。
     /// 作用于任何配置来源的 server——尤其是 `~/.claude.json` 等兼容来源（它们
