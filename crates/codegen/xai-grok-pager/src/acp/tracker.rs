@@ -2228,6 +2228,8 @@ fn tool_call_to_block_with_locale(
         acp::ToolKind::Search => {
             let pattern = extract_raw_field(tc, "pattern")
                 .or_else(|| extract_raw_field(tc, "glob_pattern"))
+                // Index tools (`search_code` & co) take `query` instead of `pattern`.
+                .or_else(|| extract_raw_field(tc, "query"))
                 .unwrap_or_else(|| tc.title.clone());
             let meta = extract_search_meta(tc);
             // Only a typed `GrepSearch` output carries a structured count; index tools

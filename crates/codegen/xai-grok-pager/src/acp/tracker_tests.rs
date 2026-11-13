@@ -1360,6 +1360,50 @@ fn search_block_without_typed_grep_output_has_no_match_count() {
         "rendered block must omit the match summary when no structured count exists: {rendered:?}"
     );
 }
+/// Index tools (`search_code` & co) take `query`/`path` input fields instead of the legacy
+/// grep `pattern`. The Search block header must show the query as its pattern — falling
+/// back to the title would duplicate the "Search code:" label. Legacy grep still wins via
+/// its `pattern` field (asserted in `test_search_tool_call_flow`).
+#[test]
+fn search_block_pattern_uses_index_tool_query_field() {
+    let mut tracker = AcpUpdateTracker::new();
+    let mut scrollback = ScrollbackState::new();
+    let tc_id: Arc<str> = Arc::from("toolu_search_code_002");
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(
+                acp::ToolCallId::new(tc_id.clone()),
+                "search_code".to_string(),
+            )
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Pending),
+        ),
+        &meta(),
+        &mut scrollback,
+    );
+    let in_progress = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(tc_id.clone()),
+        acp::ToolCallUpdateFields::new()
+            .kind(Some(acp::ToolKind::Search))
+            .title(Some("Search code: foo bar".to_string()))
+            .raw_input(Some(serde_json::json!({
+                "query": "foo bar",
+                "path": "src/",
+                "glob": "*.rs",
+            }))),
+    ));
+    tracker.handle_update(in_progress, &meta(), &mut scrollback);
+    let entry = scrollback.get(0).expect("entry exists");
+    let RenderBlock::ToolCall(ToolCallBlock::Search(search)) = &entry.block else {
+        panic!(
+            "Expected Search block, got: {:?}",
+            std::mem::discriminant(&entry.block)
+        );
+    };
+    assert_eq!(search.pattern, "foo bar");
+    assert_eq!(search.meta.path.as_deref(), Some("src/"));
+    assert_eq!(search.meta.glob.as_deref(), Some("*.rs"));
+}
 /// Scrollback with pager.toml `expanded_by_default` set. Does not touch the flag cache.
 fn edit_config_scrollback(expanded_by_default: bool) -> ScrollbackState {
     use crate::appearance::AppearanceConfig;
