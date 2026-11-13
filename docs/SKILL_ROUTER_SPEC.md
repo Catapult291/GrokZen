@@ -337,9 +337,6 @@ metadata:
 
 ## 12. 合规样例（对照 `re` 的草稿）
 
-**文件（Phase 2 可直接采用或微调）：**  
-`GrokZen/docs/skill-router-sample-re.md`
-
 要点相对旧 `re`：
 
 - frontmatter 压到 listing 友好长度（旧版合计 723B；Phase 6 预算 900B 前按 ≤400B 压缩）。

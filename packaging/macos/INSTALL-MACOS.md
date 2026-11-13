@@ -66,7 +66,6 @@ shasum -a 256 -c SHA256SUMS.txt
 
 每个平台保持一个安装包。独立 `.sha256` 在约两个月兼容期内保留，之后的新 Release
 只公开三个平台归档；旧客户端先升级到永久保留的最后一个六资产过渡版，再升级后续版本。
-维护约定见 [单包更新协议](https://github.com/Catapult291/GrokZen/blob/zh-dev/docs/COMMUNITY-UPDATE-PROTOCOL.md)。
 
 Actions Artifact 只用于预览测试，不是正式更新源。正式自动更新只消费本仓库统一发布
 工作流生成的 Immutable GitHub Release。
