@@ -278,9 +278,6 @@ fn open_prompt_blocked_card(
         return;
     }
 
-    agent.displace_feedback_modal(
-        crate::views::feedback_modal::FeedbackModalDisplacement::HookBlockedPrompt,
-    );
 
     let row_id = blocked.row_id;
     let was_combined = blocked.was_combined;

@@ -98,23 +98,6 @@ pub(super) fn unregister_all_active_sessions(app: &AppView) -> Vec<Effect> {
         })
         .collect()
 }
-fn displaced_draft_feedback_notice(
-    outcome: xai_grok_shell::session::FeedbackOutcome,
-) -> &'static str {
-    match outcome {
-        xai_grok_shell::session::FeedbackOutcome::Submitted => super::notes::FEEDBACK_THANKS_NOTICE,
-        xai_grok_shell::session::FeedbackOutcome::SubmittedCleanupFailed => {
-            "Feedback was sent, but the stored draft could not be deleted. Delete it manually; do not resend."
-        }
-        xai_grok_shell::session::FeedbackOutcome::LocalOnly => {
-            "Feedback was saved locally but was not sent. The draft was kept."
-        }
-        xai_grok_shell::session::FeedbackOutcome::OutcomeUnknown => {
-            "The remote outcome is unknown. The draft was kept; do not resend it yet."
-        }
-        _ => "The remote outcome is unknown. The draft was kept; do not resend it yet.",
-    }
-}
 pub(super) const X11_PRIMARY_PASTE_HINT: &str = "Try Shift+Insert to paste selected text";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LiveSessionKind {
@@ -269,8 +252,7 @@ fn finish_workspace_result(
 }
 fn show_clipboard_toast(target: &ClipboardPasteTarget, message: &str, app: &mut AppView) {
     match target {
-        ClipboardPasteTarget::AgentPrompt { agent_id, .. }
-        | ClipboardPasteTarget::FeedbackModal { agent_id, .. } => {
+        ClipboardPasteTarget::AgentPrompt { agent_id, .. } => {
             if let Some(agent) = app.agents.get_mut(agent_id) {
                 agent.show_toast(message);
             }
@@ -343,12 +325,6 @@ fn apply_clipboard_paste_result(
             };
             agent.complete_clipboard_attachment_paste(ctx, image, file_urls)
         }
-        ClipboardPasteTarget::FeedbackModal { agent_id, .. } => app
-            .agents
-            .get_mut(&agent_id)
-            .map_or(ClipboardPasteCompletion::Dropped, |agent| {
-                agent.complete_feedback_modal_attachment_paste(ctx, image)
-            }),
         ClipboardPasteTarget::DashboardDispatch | ClipboardPasteTarget::DashboardPeek { .. } => app
             .dashboard
             .as_mut()
@@ -359,7 +335,6 @@ fn apply_clipboard_paste_result(
 }
 fn drain_clipboard_target(
     target: &ClipboardPasteTarget,
-    hold_feedback_submit: bool,
     app: &mut AppView,
 ) -> Vec<Effect> {
     match target {
@@ -375,43 +350,6 @@ fn drain_clipboard_target(
             let mut effects = std::mem::take(&mut agent.pending_effects);
             if let Some(action) = action {
                 effects.extend(dispatch(action, app));
-            }
-            effects
-        }
-        ClipboardPasteTarget::FeedbackModal {
-            agent_id,
-            modal_id,
-            composition_id,
-        } => {
-            let is_active = app.active_view == ActiveView::Agent(*agent_id);
-            let Some(agent) = app.agents.get_mut(agent_id) else {
-                return vec![];
-            };
-            let resume = !hold_feedback_submit
-                && is_active
-                && agent
-                    .feedback_modal
-                    .as_mut()
-                    .filter(|modal| {
-                        modal.matches_id(*modal_id) && modal.matches_composition(*composition_id)
-                    })
-                    .is_some_and(|modal| modal.take_deferred_submit());
-            if hold_feedback_submit
-                && let Some(modal) = agent
-                    .feedback_modal
-                    .as_mut()
-                    .filter(|modal| modal.matches_id(*modal_id))
-            {
-                modal.cancel_deferred_submit();
-            }
-            let mut effects = std::mem::take(&mut agent.pending_effects);
-            if resume {
-                effects.extend(dispatch(
-                    Action::SubmitFeedbackModal {
-                        modal_id: *modal_id,
-                    },
-                    app,
-                ));
             }
             effects
         }
@@ -1081,7 +1019,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     wrap_text.as_deref(),
                     None,
                 );
-            let effects = drain_clipboard_target(&target, wrap_request_emitted, app);
+            let effects = drain_clipboard_target(&target, app);
             maybe_show_x11_primary_paste_hint(
                 primary_hint_eligible && !wrap_request_emitted,
                 completion,
@@ -1094,28 +1032,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 show_clipboard_failure(&target, failure, app);
             }
             effects
-        }
-        TaskResult::FeedbackImageRehydrated {
-            agent_id,
-            modal_id,
-            image_identity,
-            result,
-        } => {
-            let is_active = app.active_view == ActiveView::Agent(agent_id);
-            let resume = app
-                .agents
-                .get_mut(&agent_id)
-                .and_then(|agent| agent.feedback_modal.as_mut())
-                .filter(|modal| modal.matches_id(modal_id))
-                .is_some_and(|modal| {
-                    modal.apply_rehydrated_image(image_identity, result);
-                    is_active && modal.take_deferred_submit()
-                });
-            if resume {
-                dispatch(Action::SubmitFeedbackModal { modal_id }, app)
-            } else {
-                vec![]
-            }
         }
         TaskResult::PromptImagePreviewPrepared => vec![],
         TaskResult::DoctorFixPlanned { target, result } => {
@@ -1816,299 +1732,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 .replace("{error}", &error),
             nonce,
         ),
-        TaskResult::FeedbackComplete {
-            agent_id,
-            origin,
-            outcome,
-            trace_upload_token,
-        } => {
-            if matches!(origin, crate::app::actions::FeedbackSendOrigin::Immediate)
-                && matches!(
-                    outcome,
-                    xai_grok_shell::session::FeedbackOutcome::OutcomeUnknown
-                )
-                && let Some(agent) = app.agents.get_mut(&agent_id)
-            {
-                agent
-                    .scrollback
-                    .push_block(
-                        crate::scrollback::block::RenderBlock::system(
-                            locale.named_text("feedback.outcome_unknown", "Feedback was enqueued, but the response did not arrive in time. The send may still complete; do not resend it yet.").into_owned(),
-                        ),
-                    );
-            }
-            if let crate::app::actions::FeedbackSendOrigin::Modal {
-                submission_id,
-                modal_id,
-                is_draft,
-            } = origin
-                && let Some(agent) = app.agents.get_mut(&agent_id)
-            {
-                let mut unknown_copy = None;
-                let mut unknown_draft_request = None;
-                if is_draft {
-                    let has_matching_modal = agent
-                        .feedback_modal
-                        .as_ref()
-                        .is_some_and(|modal| modal.matches_id(modal_id));
-                    if has_matching_modal {
-                        match outcome {
-                            xai_grok_shell::session::FeedbackOutcome::Submitted => {
-                                agent.feedback_modal = None;
-                                agent.scrollback.push_block(
-                                    crate::scrollback::block::RenderBlock::system(
-                                        locale
-                                            .named_text(
-                                                "feedback.thanks",
-                                                super::notes::FEEDBACK_THANKS_NOTICE,
-                                            )
-                                            .into_owned(),
-                                    ),
-                                );
-                            }
-                            xai_grok_shell::session::FeedbackOutcome::SubmittedCleanupFailed => {
-                                if let Some(modal) = agent.feedback_modal.as_mut() {
-                                    modal.mark_draft_cleanup_failed();
-                                }
-                            }
-                            xai_grok_shell::session::FeedbackOutcome::LocalOnly => {
-                                if let Some(modal) = agent.feedback_modal.as_mut() {
-                                    modal
-                                        .mark_draft_send_error(
-                                            "Feedback was saved locally but was not sent. The draft was kept."
-                                                .to_owned(),
-                                        );
-                                }
-                            }
-                            xai_grok_shell::session::FeedbackOutcome::OutcomeUnknown
-                            | xai_grok_shell::session::FeedbackOutcome::Other => {
-                                if let Some(modal) = agent.feedback_modal.as_mut() {
-                                    unknown_copy = modal.mark_draft_submit_unknown();
-                                    unknown_draft_request = modal.take_pending_request();
-                                }
-                            }
-                            _ => {
-                                if let Some(modal) = agent.feedback_modal.as_mut() {
-                                    unknown_copy = modal.mark_draft_submit_unknown();
-                                    unknown_draft_request = modal.take_pending_request();
-                                }
-                            }
-                        }
-                    } else {
-                        agent
-                            .scrollback
-                            .push_block(crate::scrollback::block::RenderBlock::system(
-                                displaced_draft_feedback_notice(outcome).to_owned(),
-                            ));
-                    }
-                } else if matches!(
-                    outcome,
-                    xai_grok_shell::session::FeedbackOutcome::OutcomeUnknown
-                ) {
-                    agent
-                        .scrollback
-                        .push_block(
-                            crate::scrollback::block::RenderBlock::system(
-                                locale.named_text("feedback.outcome_unknown", "Feedback was enqueued, but the response did not arrive in time. The send may still complete; do not resend it yet.").into_owned(),
-                            ),
-                        );
-                }
-                if let Some(text) = unknown_copy.as_deref() {
-                    agent.copy_to_clipboard(text);
-                }
-                let mut effects = Vec::new();
-                if let Some(request) = unknown_draft_request
-                    && let Some(session_id) = agent.session.session_id.clone()
-                {
-                    effects.push(Effect::FeedbackDraftRequest {
-                        agent_id,
-                        session_id,
-                        request,
-                    });
-                }
-                let posted = matches!(
-                    outcome,
-                    xai_grok_shell::session::FeedbackOutcome::Submitted
-                        | xai_grok_shell::session::FeedbackOutcome::SubmittedCleanupFailed
-                );
-                if posted {
-                    if let Some(trace_upload_token) = trace_upload_token
-                        && let Some(consent) =
-                            agent.take_parked_feedback_trace_consent(submission_id)
-                    {
-                        agent.register_pending_trace_upload(submission_id);
-                        effects.push(Effect::UploadFeedbackTrace {
-                            agent_id,
-                            session_id: agent_client_protocol::SessionId::new(consent.session_id),
-                            submission_id: Some(submission_id),
-                            intent: Some(consent.intent),
-                            trace_upload_token: Some(trace_upload_token),
-                        });
-                    }
-                } else {
-                    let _ = agent.take_parked_feedback_trace_consent(submission_id);
-                }
-                return effects;
-            }
-            vec![]
-        }
-        TaskResult::FeedbackFailed {
-            agent_id,
-            origin,
-            feedback_text,
-            image_count,
-            error,
-        } => {
-            let Some(agent) = app.agents.get_mut(&agent_id) else {
-                return vec![];
-            };
-            let failure = format!("Couldn't send feedback: {error}");
-            if let crate::app::actions::FeedbackSendOrigin::Modal {
-                submission_id,
-                modal_id,
-                is_draft,
-            } = origin
-            {
-                let _ = agent.take_parked_feedback_trace_consent(submission_id);
-                if is_draft {
-                    if let Some(modal) = agent
-                        .feedback_modal
-                        .as_mut()
-                        .filter(|modal| modal.matches_id(modal_id))
-                    {
-                        modal.mark_draft_send_error(format!("{failure}. The draft was kept."));
-                    } else {
-                        agent
-                            .scrollback
-                            .push_block(crate::scrollback::block::RenderBlock::system(failure));
-                    }
-                    return vec![];
-                }
-            }
-            super::notes::keep_unsent_feedback_report(
-                agent,
-                super::notes::UnsentFeedbackReport {
-                    text: &feedback_text,
-                    image_count,
-                    failure: &failure,
-                },
-            );
-            vec![]
-        }
-        TaskResult::FeedbackDraftListComplete {
-            agent_id,
-            modal_id,
-            generation,
-            result,
-        } => {
-            if let Some(modal) = app
-                .agents
-                .get_mut(&agent_id)
-                .and_then(|agent| agent.feedback_modal.as_mut())
-            {
-                match result {
-                    Ok(rows) => modal.apply_draft_list(modal_id, generation, rows),
-                    Err(error) => modal.fail_draft_list(modal_id, generation, error),
-                }
-            }
-            vec![]
-        }
-        TaskResult::FeedbackDraftLoadComplete {
-            agent_id,
-            load,
-            result,
-        } => {
-            let agent = app.agents.get(&agent_id);
-            let session_id = agent.and_then(|agent| agent.session.session_id.clone());
-            let session_dir = agent.and_then(|agent| agent.session.local_session_dir());
-            let request = app
-                .agents
-                .get_mut(&agent_id)
-                .and_then(|agent| agent.feedback_modal.as_mut())
-                .and_then(|modal| {
-                    match result {
-                        Ok(draft) => {
-                            let draft_id = draft.id.clone();
-                            let applied = modal.apply_draft_load(&load, draft);
-                            if applied {
-                                if let Some(session_dir) = session_dir.as_deref() {
-                                    super::inline_feedback::attach_saved_draft_images(
-                                        modal,
-                                        session_dir,
-                                        &draft_id,
-                                    );
-                                }
-                                modal.recapture_write_baseline();
-                            }
-                        }
-                        Err(error) => modal.fail_draft_load(&load, error),
-                    }
-                    modal.take_pending_request()
-                });
-            match (session_id, request) {
-                (Some(session_id), Some(request)) => {
-                    vec![Effect::FeedbackDraftRequest {
-                        agent_id,
-                        session_id,
-                        request,
-                    }]
-                }
-                _ => vec![],
-            }
-        }
-        TaskResult::FeedbackDraftUpdateComplete {
-            agent_id,
-            update,
-            result,
-        } => {
-            if let Some(modal) = app
-                .agents
-                .get_mut(&agent_id)
-                .and_then(|agent| agent.feedback_modal.as_mut())
-            {
-                modal.apply_draft_update_complete(&update, result.err().as_deref());
-            }
-            vec![]
-        }
-        TaskResult::FeedbackDraftDeleteComplete {
-            agent_id,
-            delete,
-            result,
-        } => {
-            if let Some(modal) = app
-                .agents
-                .get_mut(&agent_id)
-                .and_then(|agent| agent.feedback_modal.as_mut())
-            {
-                match result {
-                    Ok(()) => modal.apply_draft_delete(&delete),
-                    Err(error) => modal.fail_draft_delete(&delete, error),
-                }
-            }
-            vec![]
-        }
-        TaskResult::FeedbackTraceUploaded {
-            agent_id,
-            submission_id,
-            error,
-        } => {
-            let Some(agent) = app.agents.get_mut(&agent_id) else {
-                return vec![];
-            };
-            if let Some(submission_id) = submission_id
-                && !agent.take_pending_trace_upload(submission_id)
-            {
-                return vec![];
-            }
-            if let Some(error) = error {
-                agent
-                    .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Couldn't upload a session trace; your feedback was still sent. {error}"
-                    )));
-            }
-            vec![]
-        }
         TaskResult::MemoryNoteSaved { agent_id, result } => {
             handle_memory_note_saved(app, agent_id, result)
         }

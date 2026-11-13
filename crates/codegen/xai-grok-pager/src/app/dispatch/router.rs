@@ -35,9 +35,8 @@ use super::modes::{
     set_permission_mode, set_plan_mode, set_yolo_mode,
 };
 use super::notes::{
-    dispatch_enter_remember_mode, dispatch_open_feedback_modal,
-    dispatch_save_remember_note_from_modal, dispatch_send_btw, dispatch_send_feedback,
-    dispatch_send_recap, dispatch_send_remember_note, dispatch_submit_feedback_modal,
+    dispatch_enter_remember_mode, dispatch_save_remember_note_from_modal, dispatch_send_btw,
+    dispatch_send_recap, dispatch_send_remember_note,
 };
 use super::permissions::{
     dispatch_permission_cancel, dispatch_permission_followup, dispatch_permission_select,
@@ -1115,30 +1114,6 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowPlan => dispatch_show_plan(app),
         Action::EnterPlanMode { description } => dispatch_enter_plan_mode(app, description),
         Action::SetPlanMode(kind) => set_plan_mode(app, kind),
-        Action::OpenFeedbackModal(open) => dispatch_open_feedback_modal(app, open),
-        Action::SubmitFeedbackModal { modal_id } => dispatch_submit_feedback_modal(app, modal_id),
-        Action::RequestFeedbackDraft { request } => {
-            let ActiveView::Agent(agent_id) = app.active_view else {
-                return vec![];
-            };
-            let Some(session_id) = app
-                .agents
-                .get(&agent_id)
-                .and_then(|agent| agent.session.session_id.clone())
-            else {
-                return vec![];
-            };
-            vec![Effect::FeedbackDraftRequest {
-                agent_id,
-                session_id,
-                request,
-            }]
-        }
-        Action::SendFeedback {
-            text,
-            images,
-            trace,
-        } => dispatch_send_feedback(app, text, images, trace),
         Action::EnterRememberMode => dispatch_enter_remember_mode(app),
         Action::SendRememberNote(text) => dispatch_send_remember_note(app, text),
         Action::SaveRememberNoteFromModal => dispatch_save_remember_note_from_modal(app),

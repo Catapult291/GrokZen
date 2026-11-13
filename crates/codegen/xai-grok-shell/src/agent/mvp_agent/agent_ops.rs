@@ -2442,7 +2442,6 @@ impl MvpAgent {
             trace_upload_live: Arc::new(
                 std::sync::atomic::AtomicBool::new(cfg.is_trace_upload_enabled()),
             ),
-            feedback_trace_upload_grants: RefCell::new(VecDeque::new()),
             memory_config: RefCell::new(None),
             config_watcher_path_tx: None,
             relay_sync_enabled,
@@ -3604,35 +3603,6 @@ impl MvpAgent {
         self.auth_manager
             .current_or_expired()
             .is_some_and(|auth| auth.team_name.is_some())
-    }
-    pub(crate) fn issue_feedback_trace_upload_grant(
-        &self,
-        session_id: acp::SessionId,
-    ) -> String {
-        const MAX_PENDING_GRANTS: usize = 8;
-        let token = uuid::Uuid::new_v4().to_string();
-        let mut grants = self.feedback_trace_upload_grants.borrow_mut();
-        if grants.len() == MAX_PENDING_GRANTS {
-            let _ = grants.pop_front();
-        }
-        grants.push_back((token.clone(), session_id));
-        token
-    }
-    pub(crate) fn consume_feedback_trace_upload_grant(
-        &self,
-        token: &str,
-        session_id: &acp::SessionId,
-    ) -> bool {
-        let mut grants = self.feedback_trace_upload_grants.borrow_mut();
-        let Some(position) = grants
-            .iter()
-            .position(|(grant, granted_session)| {
-                grant == token && granted_session == session_id
-            }) else {
-            return false;
-        };
-        let _ = grants.remove(position);
-        true
     }
     /// Whether `/feedback` may offer to turn trace upload on.
     /// An individual coding-data opt-out still asks: the card is how opted-out users switch sharing back on.

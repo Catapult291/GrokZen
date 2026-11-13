@@ -424,7 +424,6 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::Write,
                 ToolKind::Delete,
                 ToolKind::Move,
-                ToolKind::Feedback,
                 ToolKind::Execute,
                 ToolKind::Plan,
                 ToolKind::MemorySearch,

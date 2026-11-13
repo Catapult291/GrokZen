@@ -127,33 +127,6 @@ impl AgentView {
                 change_count,
             });
     }
-    /// The feedback-modal probe route: count the probe on the modal (not the main composer) and key
-    /// the target to the open generation, so a completion after close/reopen is dropped by
-    /// [`Self::complete_feedback_modal_attachment_paste`] instead of landing in a later modal.
-    pub(super) fn enqueue_feedback_modal_attachment_probe(
-        &mut self,
-        source: crate::app::actions::ClipboardPasteSource,
-        change_count: Option<u64>,
-    ) {
-        let Some(modal) = self.feedback_modal.as_mut() else {
-            return;
-        };
-        modal.note_paste_probe_started();
-        let modal_id = modal.id();
-        let composition_id = modal.composition_id();
-        self.pending_effects
-            .push(crate::app::actions::Effect::ProbeClipboardAttachment {
-                ctx: crate::app::actions::ClipboardPasteContext {
-                    target: crate::app::actions::ClipboardPasteTarget::FeedbackModal {
-                        agent_id: self.session.id,
-                        modal_id,
-                        composition_id,
-                    },
-                    source,
-                },
-                change_count,
-            });
-    }
     /// Ctrl/Cmd+V paste. A file path in the text resolves synchronously and wins.
     /// Otherwise the clipboard raster/file-url probe defers off the event loop.
     /// The image wins over the caption; the caption is inserted on completion only if no image is found.
@@ -199,7 +172,6 @@ impl AgentView {
         };
         match owner {
             ClipboardPasteOwner::Composer => self.composer_still_owns_prompt(),
-            ClipboardPasteOwner::FeedbackPane => false,
             ClipboardPasteOwner::QuestionCard {
                 tool_call_id,
                 question_idx,
@@ -310,79 +282,6 @@ impl AgentView {
             crate::clipboard::log_paste_key_empty_host_clipboard(ctx.target.surface_str());
         }
         completion
-    }
-    /// Attach a deferred clipboard probe's result to the feedback modal that started it.
-    /// A completion whose modal id no longer matches (closed or reopened since enqueue) is cleaned up and dropped, so a late screenshot can never land in a later modal or the main composer.
-    /// Intentional MVP cut: unlike the composer completion, probed `file://` URLs are not routed here, so a Finder file paste stays the raw text the bracketed insert already placed.
-    pub(crate) fn complete_feedback_modal_attachment_paste(
-        &mut self,
-        ctx: crate::app::actions::ClipboardPasteContext,
-        image: crate::app::actions::ProbedAttachment,
-    ) -> crate::app::actions::ClipboardPasteCompletion {
-        use crate::app::actions::{
-            ClipboardPasteCompletion, ClipboardPasteFailure, ClipboardPasteTarget, ProbedAttachment,
-        };
-        let ClipboardPasteTarget::FeedbackModal {
-            modal_id,
-            composition_id,
-            ..
-        } = ctx.target
-        else {
-            return ClipboardPasteCompletion::Dropped;
-        };
-        let matching = self.feedback_modal.as_mut().filter(|modal| {
-            modal.matches_id(modal_id) && modal.matches_composition(composition_id)
-        });
-        let Some(modal) = matching else {
-            if let ProbedAttachment::Image(pasted) = &image {
-                crate::prompt_images::cleanup_image(
-                    crate::prompt_images::SessionPathPolicy::Preserve,
-                    pasted,
-                );
-            }
-            return ClipboardPasteCompletion::Dropped;
-        };
-        if modal.in_trace_step() {
-            modal.note_paste_probe_finished();
-            if let ProbedAttachment::Image(pasted) = &image {
-                crate::prompt_images::cleanup_image(
-                    crate::prompt_images::SessionPathPolicy::Preserve,
-                    pasted,
-                );
-            }
-            return ClipboardPasteCompletion::Dropped;
-        }
-        modal.note_paste_probe_finished();
-        let inserted_caption = match ctx.source.text_to_insert_on_miss(&image) {
-            Some(text) => {
-                modal.handle_paste(text);
-                true
-            }
-            None => false,
-        };
-        match image {
-            ProbedAttachment::Image(pasted) => match modal.insert_image(pasted) {
-                Ok(()) => ClipboardPasteCompletion::Handled,
-                Err(msg) => {
-                    modal.set_error(msg);
-                    ClipboardPasteCompletion::Failed(ClipboardPasteFailure::AlreadyReported)
-                }
-            },
-            ProbedAttachment::PersistFailed(_) => {
-                modal.set_error("Couldn't save pasted image".to_string());
-                ClipboardPasteCompletion::Failed(ClipboardPasteFailure::AlreadyReported)
-            }
-            ProbedAttachment::NoRaster
-                if inserted_caption || ctx.source.synchronous_insertion().is_some() =>
-            {
-                ClipboardPasteCompletion::Handled
-            }
-            ProbedAttachment::NoRaster => ClipboardPasteCompletion::FullMiss,
-            ProbedAttachment::ProbeDropped => ClipboardPasteCompletion::Dropped,
-            ProbedAttachment::ProbeFailed => {
-                ClipboardPasteCompletion::Failed(ClipboardPasteFailure::AttachmentRead)
-            }
-        }
     }
     /// Take the kind of any action held back while the paste probes were in flight.
     /// The caller resumes it (via [`Self::resume_deferred_send`]) only when it actually reissues, so a dropped reissue keeps the draft intact.
@@ -2482,42 +2381,6 @@ pub(super) mod paste_key_tests {
         assert!(agent.prompt.images.is_empty());
     }
 
-    /// A probe the feedback pane started must not attach into whatever replaced the pane.
-    /// Esc restores the composer draft from before the slash command, and the completion has to drop the screenshot (and its staged file) instead.
-    #[test]
-    fn feedback_pane_probe_completing_after_dismissal_is_dropped() {
-        let mut agent = make_agent();
-        let ctx = crate::app::actions::ClipboardPasteContext {
-            target: crate::app::actions::ClipboardPasteTarget::AgentPrompt {
-                agent_id: agent.session.id,
-                images_dir: None,
-                owner: crate::app::actions::ClipboardPasteOwner::FeedbackPane,
-            },
-            source: crate::app::actions::ClipboardPasteSource::ClipboardKey {
-                text: crate::app::actions::ClipboardTextRead::Success(None),
-                tip_showing: false,
-            },
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let staged = dir.path().join("staged.png");
-        std::fs::write(&staged, b"staged").unwrap();
-        let mut pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
-        pasted.staged_temp_path = Some(staged.clone());
-        let completion = agent.complete_clipboard_attachment_paste(
-            ctx,
-            crate::app::actions::ProbedAttachment::Image(pasted),
-            None,
-        );
-        assert_eq!(
-            completion,
-            crate::app::actions::ClipboardPasteCompletion::Dropped
-        );
-        assert!(
-            agent.prompt.images.is_empty(),
-            "the screenshot must not become a composer chip"
-        );
-        assert!(!staged.exists(), "the staged temp file must be deleted");
-    }
     /// Drive a real Cmd+V that finds a raster (defers), then complete the probe with a decoded image.
     /// This is the full shipped image-paste path through the deferred entry point.
     fn paste_cmd_v_image(agent: &mut AgentView, clipboard_text: Option<&str>) {

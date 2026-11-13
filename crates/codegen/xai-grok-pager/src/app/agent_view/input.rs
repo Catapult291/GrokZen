@@ -32,7 +32,7 @@ impl AgentView {
             || self.active_subagent.is_some()
             || self.active_modal.is_some()
             || self.extensions_modal.is_some()
-            || self.feedback_modal.is_some()
+
             || self.agents_modal.is_some()
             || self.persona_detail.is_some()
             || self.scrollback_search.is_some()
@@ -72,7 +72,7 @@ impl AgentView {
             && self.video_viewer.is_none()
             && self.gboom.is_none()
             && self.extensions_modal.is_none()
-            && self.feedback_modal.is_none()
+
             && self.agents_modal.is_none()
             && self.persona_detail.is_none()
             && self.btw_state.is_none()
@@ -100,7 +100,7 @@ impl AgentView {
     /// It would never reach `/gboom` (turn/close), video (seek/close), image (close), `/agents`, persona detail, or the block viewer.
     pub(super) fn modal_owns_input(&self) -> bool {
         self.extensions_modal.is_some()
-            || self.feedback_modal.is_some()
+
             || self.active_modal.is_some()
             || self.gboom.is_some()
             || self.video_viewer.is_some()
@@ -409,12 +409,12 @@ impl AgentView {
         {
             return InputOutcome::Changed;
         }
-        if self.feedback_modal.is_some()
-            && let Event::Paste(text) = ev
-            && crate::wrap_clipboard_image::try_decode_wrap_host_image_paste(text).is_some()
-        {
-            return self.handle_feedback_modal_paste(text);
-        }
+
+
+
+
+
+
         if let Event::Paste(text) = ev
             && let Some(outcome) = self.try_handle_wrap_host_image_paste(text)
         {
@@ -663,19 +663,6 @@ impl AgentView {
                         self.handle_line_viewer_mouse(mouse)
                     }
                 }
-                _ => InputOutcome::Changed,
-            };
-        }
-        if self.feedback_modal.is_some() {
-            return match ev {
-                Event::Key(key) if key.kind != KeyEventKind::Release => {
-                    if registry.lookup(key, When::Always).is_some() {
-                        return InputOutcome::Unchanged;
-                    }
-                    self.handle_feedback_modal_key(key)
-                }
-                Event::Mouse(mouse) => self.handle_feedback_modal_mouse(mouse),
-                Event::Paste(text) => self.handle_feedback_modal_paste(text),
                 _ => InputOutcome::Changed,
             };
         }

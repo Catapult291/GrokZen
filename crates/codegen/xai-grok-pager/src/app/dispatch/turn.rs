@@ -178,10 +178,6 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
                 .filter(|s| s.is_running() && s.attempt.workflow_run_id.is_none())
                 .count();
             if running_count > 0 && agent.cancel_turn_view.is_none() {
-                // Mandatory ingress wins: evict an open feedback modal before the cancel prompt takes input.
-                agent.displace_feedback_modal(
-                    crate::views::feedback_modal::FeedbackModalDisplacement::CancelTurn,
-                );
                 agent.cancel_turn_view = Some(crate::views::modal::CancelTurnViewState {
                     active_idx: 0,
                     running_count,
