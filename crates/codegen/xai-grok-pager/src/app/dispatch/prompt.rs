@@ -988,10 +988,7 @@ pub(super) fn dispatch_send_prompt_submission(
         let mut submitted_images = submission
             .map(|submission| submission.into_submission().1)
             .unwrap_or_default();
-        let carries_images = matches!(
-            exec_result,
-            CommandResult::Action(Action::SendBtw { .. })
-        );
+        let carries_images = matches!(exec_result, CommandResult::Action(Action::SendBtw { .. }));
         let queues = matches!(
             exec_result,
             CommandResult::QueueCommand(_)

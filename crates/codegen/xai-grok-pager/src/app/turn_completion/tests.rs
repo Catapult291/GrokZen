@@ -230,27 +230,6 @@ fn zh_locale() -> crate::locale::LocaleContext {
 }
 
 #[test]
-fn hook_denied_finalize_displaces_feedback_before_opening_the_card() {
-    let mut agent = running_viewer("p1");
-    stash_in_flight(&mut agent);
-    agent.feedback_modal = Some(crate::views::feedback_modal::FeedbackModalState::new(
-        crate::views::feedback_modal::OpenFeedbackModal {
-            text: Some("draft feedback".to_string()),
-            ..Default::default()
-        },
-    ));
-
-    let _ = finalize_turn_from_terminal(&mut agent, "s1", hook_denied_signal(None));
-
-    assert!(agent.feedback_modal.is_none());
-    assert!(agent.question_view.is_some());
-    assert!(
-        agent.scrollback.len() > 1,
-        "displacement notice must be visible"
-    );
-}
-
-#[test]
 fn hook_denied_finalize_requeues_blocked_prompt_and_opens_card() {
     use crate::views::question_view::LocalQuestionKind;
 

@@ -671,11 +671,6 @@ pub struct AppView {
     /// Resolved by the shell and advertised on ACP initialize (`sessionRecap`).
     /// When false, the pager must not request recaps (zero `x.ai/recap` traffic).
     pub session_recap_available: bool,
-    /// Shell-advertised eligibility for the `/feedback` trace-upload offer, exactly as received (initialize meta / auth-meta refreshes).
-    /// Read it through [`Self::feedback_trace_offer`], which subtracts the latch.
-    pub shell_feedback_trace_offer: bool,
-    /// A persisted card answer was made this session; keeps auth-meta refreshes from re-offering before the async config write lands.
-    pub feedback_trace_choice_latched: bool,
     /// Stateful prompt widget rendered on the welcome screen (persists input across frames).
     pub welcome_prompt: PromptWidget,
     /// The single slash-command MRU/recency store.
@@ -1176,11 +1171,6 @@ impl AppView {
     pub fn is_access_blocked(&self) -> bool {
         !self.has_access() || self.is_zdr_blocked()
     }
-    /// Whether `/feedback` may offer the trace-consent question: the shell advertised the offer and no card answer latched it off this session.
-    /// Derived so no code path can fabricate an offer the shell never made.
-    pub fn feedback_trace_offer(&self) -> bool {
-        self.shell_feedback_trace_offer && !self.feedback_trace_choice_latched
-    }
     /// A cached team credential from before `canAdministerTeam` reads unknown and nothing refetches `/user` at startup; a personal account (which also carries a `team_id`) reads unknown on every call and is not asked.
     pub fn needs_team_capability_hydration(&self) -> bool {
         self.is_team_principal
@@ -1317,7 +1307,6 @@ impl AppView {
         }
         self.can_administer_team = meta.can_administer_team;
         self.coding_data_retention_opt_out = meta.coding_data_retention_opt_out;
-        self.shell_feedback_trace_offer = meta.feedback_trace_offer;
         self.gate = meta.gate.clone();
         if was_gated && self.gate.is_none() {
             self.paywall_check_started = None;
@@ -1662,8 +1651,6 @@ impl AppView {
             session_picker_grouped: false,
             cancel_rewind_enabled: true,
             session_recap_available: false,
-            shell_feedback_trace_offer: false,
-            feedback_trace_choice_latched: false,
             tutorial: None,
             dashboard: None,
             dashboard_return: None,

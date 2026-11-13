@@ -1334,7 +1334,6 @@ pub(crate) async fn run(
         .unwrap_or(true);
     app.cancel_rewind_enabled = connection.cancel_rewind_enabled;
     apply_session_recap_available(&mut app, connection.session_recap_available);
-    app.shell_feedback_trace_offer = connection.feedback_trace_offer;
     app.auth_methods = connection.auth_methods.clone();
     let force_login = args.force_login && !connection.auth_methods.is_empty();
     let needs_interactive_login = connection.needs_login || force_login;

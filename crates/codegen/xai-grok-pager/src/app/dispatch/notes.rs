@@ -35,7 +35,6 @@ fn next_rewrite_nonce() -> u64 {
     REWRITE_NONCE.fetch_add(1, Ordering::Relaxed)
 }
 
-
 /// Enter remember mode: visual change to prompt bar (remember accent, `#` prefix).
 /// No side effects: the user types a memory note and presses Enter to send.
 pub(super) fn dispatch_enter_remember_mode(app: &mut AppView) -> Vec<Effect> {

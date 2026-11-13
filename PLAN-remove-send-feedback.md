@@ -3,6 +3,7 @@
 > 工作树：`C:\Users\bypassnro\Documents\project\GrokZen-wt-feedback`
 > 分支：`remove-send-feedback`（基于 `origin/zh-dev`，起点 dee45a61）
 > 用途：跨多个会话分步完成。每个会话开始前先读本文档，完成后更新「进度」一节。
+> 提示：后续会话删代码时建议优先用内容锚点（search_replace）而非行号切片。
 
 ## 目标
 
@@ -90,10 +91,11 @@
 | `src/app/effects/tests.rs` | 3 | 引用已删的 `UploadTraceRequest` 等 |
 | `src/app/dispatch/tests/router.rs` | 1 | `send_feedback_clears_active_ephemeral_tip` |
 
-- [ ] 逐文件清理上表错误至 `--all-targets` 清零
-- [ ] `crates/codegen/xai-grok-pager/src/app/app_view.rs`：`feedback_trace_choice_latched` 字段、`feedback_trace_offer()` 方法、`shell_feedback_trace_offer` 字段——trace 卡链路已删，评估删除（检查 acp/mod.rs 仍引用）
-- [ ] `src/acp/mod.rs`：`parse_feedback_trace_offer`、`feedback_trace_offer` 字段——保留（shell 仍广播）或连带删（决定后两端一致）
-- [ ] `src/app/app_view_tests.rs`、`src/app/dispatch/tests/mod.rs`（test_app 里 `feedback_trace_choice_latched` 字段初始化）
+- [x] 逐文件清理上表错误至 `--all-targets` 清零（2026-11-14 会话 2）
+- [x] `crates/codegen/xai-grok-pager/src/app/app_view.rs`：`feedback_trace_choice_latched` 字段、`feedback_trace_offer()` 方法、`shell_feedback_trace_offer` 字段——已删（pager 侧已无任何消费方；`apply_auth_meta` 中的赋值与构造初始化一并删）
+- [x] `src/acp/mod.rs`：`parse_feedback_trace_offer`、`InitializedAgent.feedback_trace_offer`、`AcpConnection.feedback_trace_offer`——已连带删（shell 侧 `feedbackTraceOffer` meta 广播暂留，属遗留项 1，后续会话两端一起删）
+- [x] `src/app/app_view_tests.rs`、`src/app/dispatch/tests/mod.rs`（test_app 里 `feedback_trace_choice_latched` 字段初始化）——已删
+- [x] `event_loop.rs` 的 `app.shell_feedback_trace_offer = connection.feedback_trace_offer` 赋值——已删
 
 ### 步骤 6：pty harness 与杂项
 - [ ] `crates/codegen/xai-grok-pager-pty-harness/tests/pty_e2e/`：删 `feedback_modal_pty.rs`、`feedback_draft_send_pty.rs`、`minimal/minimal_feedback_small_terminal_shows_hint.rs`、`minimal/minimal_feedback_draft_send.rs`、`plan_overlay_slash_runs_command.rs` 中的 /feedback 引用（改用其他命令）；`common.rs` 删 `open_feedback_modal`/`drive_draft_send`
@@ -114,7 +116,8 @@
 ## 进度日志
 
 - 2026-11-14（会话 1）：完成步骤 1-3（tools/agent/shell 全绿）；步骤 4 lib 编译通过；步骤 5 已完成错误盘点（上表）。计划文档落盘 `PLAN-remove-send-feedback.md`。中途踩过的坑：`paste.rs` 曾误删 `take_deferred_send_after_paste`/`resume_deferred_send`/`try_handle_wrap_host_image_paste`/`route_popup_paste`（已从 git HEAD 恢复）；`task_result.rs` 曾误删 `if let Some(mut old_qv)` 行导致括号错配（已修）；`notes.rs` 曾误删 remember 函数群（已从原文件恢复）。
-- 后续会话请从「步骤 5」继续，并把每步完成项勾上、更新进度日志。
+- 2026-11-14（会话 2）：完成步骤 5。`dispatch/tests/notes.rs` 从 2564 行删到 694 行：43 个 feedback/trace/draft 测试按 `#[test]` 起始行 + 括号匹配整函数删除，同时删掉只被它们引用的辅助（`open_feedback_modal`、`confirm_trace_choice`、`expect_single_modal_post`、`park_send_this_session`、`Arrange` 类型与孤儿 doc 注释）；`test_pasted_png`/`test_pasted_image`/`composer_image`/`agent_ref`/`send_minimal_btw`/`esc` 被 remember/btw/recap 用例引用，保留。其余文件按表清理：turn_completion/tests.rs（`hook_denied_finalize_displaces_feedback_*`）、task_result.rs（`doctor_planning_displaces_feedback_*`）、billing.rs（`free_usage_upsell_displaces_feedback_*`）、queue.rs（`edited_queued_bare_feedback_opens_the_modal` + `run_edited_feedback_uses_row_text_*`）、effects/tests.rs（`upload_trace_request_*` 2 个）、router.rs（`send_feedback_clears_active_ephemeral_tip`）、notes.rs 内 `minimal_voice_refusal` 的 `feedback_modal` 断言行。遗留项 4（app_view trace offer）已按上方清单删除，`--all-targets` 清零。
+- 后续会话请从「步骤 6」继续，并把每步完成项勾上、更新进度日志。
 
 ## 已知遗留（供后续会话决策）
 

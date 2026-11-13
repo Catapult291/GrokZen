@@ -304,7 +304,6 @@ pub fn extensions_modal_mut(v: &mut AgentView) -> Option<&mut ExtensionsModalSta
     v.extensions_modal.as_mut()
 }
 
-
 /// `AgentView::question_view`.
 pub fn question_view(v: &AgentView) -> Option<&QuestionViewState> {
     v.question_view.as_ref()
@@ -863,7 +862,6 @@ pub fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf) -> Age
 pub fn set_extensions_modal(v: &mut AgentView, val: Option<ExtensionsModalState>) {
     v.extensions_modal = val;
 }
-
 
 /// Test-only setter for `AgentView::question_view`.
 #[cfg(any(test, feature = "test-support"))]

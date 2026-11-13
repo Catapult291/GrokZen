@@ -58,7 +58,6 @@ pub(crate) fn handle_mcp_elicit(
         cancel_elicitation_request(old_tx);
     }
 
-
     if let Some(mut old) =
         agent.take_unanswered_elicitation(crate::app::agent_view::UnansweredElicitation::Superseded)
     {
@@ -257,7 +256,6 @@ pub(super) fn handle_exit_plan_mode(
         drop(ext.response_tx);
         return false;
     };
-
 
     if let Some(mut old) = agent.unmount_plan_review() {
         tracing::warn!(

@@ -333,10 +333,7 @@ fn apply_clipboard_paste_result(
             }),
     }
 }
-fn drain_clipboard_target(
-    target: &ClipboardPasteTarget,
-    app: &mut AppView,
-) -> Vec<Effect> {
+fn drain_clipboard_target(target: &ClipboardPasteTarget, app: &mut AppView) -> Vec<Effect> {
     match target {
         ClipboardPasteTarget::AgentPrompt { agent_id, .. } => {
             let is_active = app.active_view == ActiveView::Agent(*agent_id);

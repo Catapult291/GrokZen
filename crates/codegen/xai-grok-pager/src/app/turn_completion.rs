@@ -278,7 +278,6 @@ fn open_prompt_blocked_card(
         return;
     }
 
-
     let row_id = blocked.row_id;
     let was_combined = blocked.was_combined;
     let hook_name = blocked.hook_name.as_deref().unwrap_or("a hook");

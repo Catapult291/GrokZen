@@ -81,7 +81,6 @@ fn enqueue_permission(
     perm: xai_acp_lib::AcpArgs<acp::RequestPermissionRequest>,
     agent: &mut AgentView,
 ) -> bool {
-
     let bash_highlights: Option<BashCommandHighlights> = perm
         .request
         .meta
