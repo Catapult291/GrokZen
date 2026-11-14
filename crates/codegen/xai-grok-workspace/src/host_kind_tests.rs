@@ -25,7 +25,12 @@ use xai_tool_protocol::SessionId;
 /// the sandbox catalog to be daemon-diffed.
 const API_BACKED_TOOLS: &[&str] = &["web_search"];
 /// The Imagine tools the build policy removes everywhere; both catalogs must lack them.
-const IMAGINE_TOOLS: &[&str] = &["image_gen", "image_edit", "image_to_video", "reference_to_video"];
+const IMAGINE_TOOLS: &[&str] = &[
+    "image_gen",
+    "image_edit",
+    "image_to_video",
+    "reference_to_video",
+];
 const API_BASE_URL: &str = "https://api.invalid/v1";
 static TRUNCATION_INSTALL_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Tool ids without their namespace, in catalog order.
