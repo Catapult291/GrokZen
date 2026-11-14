@@ -716,7 +716,6 @@ pub(super) fn dispatch_send_prompt_submission(
         return prelude;
     }
     // Match the later slash path: only a line that itself starts with `/` is a command.
-    // Chip-stripped text can look like `/feedback` after a leading image without being one.
     if !literal && text.trim().starts_with('/') {
         let slash_input = submission.as_ref().map_or_else(
             || {
@@ -971,8 +970,6 @@ pub(super) fn dispatch_send_prompt_submission(
         };
 
         // Map CommandResult to pager behavior. (MRU persistence is queued off-thread inside `record_command_use` above.)
-        // The feedback modal owns the composer only once it accepts the open, so it settles before the
-        // shared image disposition below.
         if matches!(
             exec_result,
             CommandResult::QueueCommand(_)
@@ -983,53 +980,6 @@ pub(super) fn dispatch_send_prompt_submission(
             return effects;
         }
         let exec_result = match exec_result {
-            CommandResult::Action(action @ Action::SendFeedback { .. })
-                if !xai_grok_product::FEEDBACK_UPLOADS_ALLOWED =>
-            {
-                // Refuse before stashing the composer; its draft and attachments still belong to the user.
-                effects.extend(dispatch(action, app));
-                return effects;
-            }
-            CommandResult::Action(Action::OpenFeedbackModal(mut open)) => {
-                // Composer chips stay put until this open is accepted. A no-session
-                // or blocker refusal drops `open`, and FeedbackImages Drop would
-                // unlink any drained files. An already-open modal is also a refusal.
-                let prior_modal_id = agent.feedback_modal.as_ref().map(|modal| modal.id());
-                open.images = submission
-                    .map(|submission| submission.into_submission().1)
-                    .unwrap_or_default()
-                    .into();
-                let open_effects = dispatch(Action::OpenFeedbackModal(open), app);
-                let Some(agent) = app.agents.get_mut(&id) else {
-                    effects.extend(open_effects);
-                    return effects;
-                };
-                let accepted = agent
-                    .feedback_modal
-                    .as_ref()
-                    .is_some_and(|modal| Some(modal.id()) != prior_modal_id);
-                let mut rehydrate = Vec::new();
-                if accepted && consume_input {
-                    let drained = agent.prompt.drain_images();
-                    if !drained.is_empty()
-                        && let Some(modal) = agent.feedback_modal.as_mut()
-                    {
-                        let modal_id = modal.id();
-                        for (image_identity, path) in modal.absorb_composer_images(drained) {
-                            rehydrate.push(Effect::RehydrateFeedbackImage {
-                                agent_id: id,
-                                modal_id,
-                                image_identity,
-                                path,
-                            });
-                        }
-                    }
-                    agent.prompt.set_text("");
-                }
-                effects.extend(open_effects);
-                effects.extend(rehydrate);
-                return effects;
-            }
             other => other,
         };
 
@@ -1038,18 +988,14 @@ pub(super) fn dispatch_send_prompt_submission(
         let mut submitted_images = submission
             .map(|submission| submission.into_submission().1)
             .unwrap_or_default();
-        let carries_images = matches!(
-            exec_result,
-            CommandResult::Action(Action::SendFeedback { .. } | Action::SendBtw { .. })
-        );
+        let carries_images = matches!(exec_result, CommandResult::Action(Action::SendBtw { .. }));
         let queues = matches!(
             exec_result,
             CommandResult::QueueCommand(_)
                 | CommandResult::InjectSkill { .. }
                 | CommandResult::PassThrough(_)
         );
-        // The typed text reaches a model as a queued row or as the `/btw` side question; a feedback
-        // report is not a model send.
+        // The typed text reaches a model as a queued row or as the `/btw` side question.
         let sends_typed_text =
             queues || matches!(exec_result, CommandResult::Action(Action::SendBtw { .. }));
         let mut chip_elements = Vec::new();
@@ -1117,10 +1063,7 @@ pub(super) fn dispatch_send_prompt_submission(
             }
             CommandResult::Action(mut action) => {
                 match &mut action {
-                    Action::SendFeedback { images, .. } => {
-                        *images = std::mem::take(&mut submitted_images).into();
-                    }
-                    // Same as feedback: these images are the question, not leftover chips.
+                    // These images are the question, not leftover chips.
                     Action::SendBtw { images, .. } => {
                         *images = std::mem::take(&mut submitted_images);
                     }

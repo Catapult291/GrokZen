@@ -1334,7 +1334,6 @@ pub(crate) async fn run(
         .unwrap_or(true);
     app.cancel_rewind_enabled = connection.cancel_rewind_enabled;
     apply_session_recap_available(&mut app, connection.session_recap_available);
-    app.shell_feedback_trace_offer = connection.feedback_trace_offer;
     app.auth_methods = connection.auth_methods.clone();
     let force_login = args.force_login && !connection.auth_methods.is_empty();
     let needs_interactive_login = connection.needs_login || force_login;
@@ -3471,15 +3470,6 @@ async fn drain_and_process(
             _ => {}
         }
         if let Event::Key(ke) = ev
-            && is_voice_chord(ke)
-            && !app.voice_hold_owned()
-            && !app.voice_listening()
-            && !app.voice_state.is_pending_cold_start()
-            && active_feedback_modal_open(app)
-        {
-            return false;
-        }
-        if let Event::Key(ke) = ev
             && app.voice_mode_enabled
             && xai_grok_voice::AUDIO_SUPPORTED
             && is_voice_chord(ke)
@@ -3695,9 +3685,6 @@ fn is_paste_lf(ev: &Event) -> bool {
         if ke.kind == KeyEventKind::Press
             && ke.code == KeyCode::Char('j')
             && ke.modifiers == KeyModifiers::CONTROL)
-}
-fn active_feedback_modal_open(app: &AppView) -> bool {
-    matches!(app.active_view, ActiveView::Agent(id) if app.agents.get(&id).is_some_and(|agent| agent.feedback_modal.is_some()))
 }
 /// Map a voice-chord key event to its action (pure, so it's unit-testable).
 /// Hold mode is press-to-record / release-to-stop, but only a hold-*owned* session stops on release.
@@ -4816,20 +4803,6 @@ mod tests {
         assert!(!hit(f8, KeyModifiers::SHIFT, Press) && !hit(sp, none, Press));
         assert!(hit(sp, none, Release) && hit(f8, none, Release));
         assert!(!hit(KeyCode::Char('a'), none, Release));
-    }
-    #[test]
-    fn feedback_modal_blocks_voice_chord_targeting() {
-        let mut app = crate::app::app_view::tests::test_app_with_agent();
-        assert!(!active_feedback_modal_open(&app));
-        let ActiveView::Agent(id) = app.active_view else {
-            panic!("test app must start on an agent");
-        };
-        app.agents.get_mut(&id).unwrap().feedback_modal = Some(
-            crate::views::feedback_modal::FeedbackModalState::new(Default::default()),
-        );
-        assert!(active_feedback_modal_open(&app));
-        app.active_view = ActiveView::AgentDashboard;
-        assert!(!active_feedback_modal_open(&app));
     }
     #[test]
     fn voice_chord_action_cases() {

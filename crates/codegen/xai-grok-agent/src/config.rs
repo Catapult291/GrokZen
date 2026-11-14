@@ -258,23 +258,17 @@ pub fn toolset_for_preset(preset: &str) -> Option<ToolServerConfig> {
         .or_else(|| registered_toolset_preset(&normalized))
 }
 fn default_grok_build_toolset() -> ToolServerConfig {
-    grok_build_core_toolset_with(true, true)
+    grok_build_core_toolset_with(true)
 }
 fn default_agent_toolset() -> ToolServerConfig {
-    grok_build_core_toolset(true)
+    grok_build_core_toolset_with(true)
 }
 /// Same as the parent grok-build list, without `workflow`.
 /// The usual `general-purpose` spawn path must not add that tool and then strip it.
 fn general_purpose_toolset() -> ToolServerConfig {
-    grok_build_core_toolset(false)
+    grok_build_core_toolset_with(false)
 }
-fn grok_build_core_toolset(include_workflow: bool) -> ToolServerConfig {
-    grok_build_core_toolset_with(include_workflow, false)
-}
-fn grok_build_core_toolset_with(
-    include_workflow: bool,
-    include_send_feedback: bool,
-) -> ToolServerConfig {
+fn grok_build_core_toolset_with(include_workflow: bool) -> ToolServerConfig {
     let mut tools = vec![
         // Index-layer tools come first. `by_kind.search` is first-come, so
         // `search_code` leads (content-search templates and
@@ -309,9 +303,6 @@ fn grok_build_core_toolset_with(
     ];
     if include_workflow {
         tools.push((&grok_build::WorkflowTool).into());
-    }
-    if include_send_feedback {
-        tools.push((&grok_build::SendFeedbackTool).into());
     }
     ToolServerConfig {
         tools,
@@ -1955,13 +1946,6 @@ mod tests {
         );
     }
 
-    fn feedback_tool_id() -> String {
-        ToolConfig::from(&grok_build::SendFeedbackTool).id
-    }
-    fn contains_feedback(config: &ToolServerConfig) -> bool {
-        let id = feedback_tool_id();
-        config.tools.iter().any(|tool| tool.id == id)
-    }
     fn grok_computer_exclusive_ids() -> Vec<String> {
         #[allow(unused_mut)]
         let mut ids: Vec<String> = vec![
@@ -1969,85 +1953,6 @@ mod tests {
             ToolConfig::from(&grok_build::KillTerminalCommandTool).id,
         ];
         ids
-    }
-    #[test]
-    fn send_feedback_exposure_is_grok_build_only() {
-        use strum::IntoEnumIterator;
-        let presets = all_toolset_presets();
-        for (name, config) in &presets {
-            let expected = name == "grok-build";
-            let count = config
-                .tools
-                .iter()
-                .filter(|tool| tool.id == feedback_tool_id())
-                .count();
-            assert_eq!(
-                count,
-                usize::from(expected),
-                "preset `{name}` has the wrong send_feedback exposure"
-            );
-        }
-        for builtin in BuiltinAgentName::iter() {
-            let expected = match builtin {
-                BuiltinAgentName::GrokBuild => true,
-                BuiltinAgentName::GrokBuildConcise
-                | BuiltinAgentName::GrokBuildPlan
-                | BuiltinAgentName::GrokBuildPlanNoSubagents
-                | BuiltinAgentName::GrokBuildAskUser
-                | BuiltinAgentName::Codex
-                | BuiltinAgentName::Opencode
-                | BuiltinAgentName::GeneralPurpose
-                | BuiltinAgentName::Explore
-                | BuiltinAgentName::Plan
-                | BuiltinAgentName::Implementer
-                | BuiltinAgentName::BrowserUse
-                | BuiltinAgentName::GrokBuildOrchestrator => false,
-            };
-            assert_eq!(
-                contains_feedback(&builtin.definition().tool_config),
-                expected,
-                "builtin `{builtin}` has the wrong send_feedback exposure"
-            );
-        }
-        for (name, config) in [
-            ("core", grok_build_core_toolset(true)),
-            ("general-purpose", general_purpose_toolset()),
-            ("hashline", grok_build_hashline_toolset(vec![])),
-        ] {
-            assert!(
-                !contains_feedback(&config),
-                "toolset `{name}` leaked send_feedback"
-            );
-        }
-        let workspace = workspace_grok_build_toolset();
-        assert_eq!(
-            workspace
-                .tools
-                .iter()
-                .filter(|tool| tool.id == feedback_tool_id())
-                .count(),
-            1
-        );
-    }
-    #[test]
-    fn defaulted_agent_definitions_omit_send_feedback() {
-        let builtins = AgentDefinition::builtin_defaults("external", "External definition");
-        assert!(!contains_feedback(&builtins.tool_config));
-        assert!(!contains_feedback(
-            &AgentDefinition::browser_use().tool_config
-        ));
-        let serde_default: AgentDefinition = serde_json::from_value(serde_json::json!({
-            "name": "external",
-            "description": "External definition"
-        }))
-        .unwrap();
-        assert!(!contains_feedback(&serde_default.tool_config));
-        let acp = AgentDefinition::from_json(&serde_json::json!({
-            "name": "external",
-            "description": "External definition"
-        }))
-        .unwrap();
-        assert!(!contains_feedback(&acp.tool_config));
     }
     #[test]
     fn grok_computer_preset_is_curated_grok_build_subset() {

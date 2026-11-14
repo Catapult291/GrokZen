@@ -310,10 +310,6 @@ impl AgentView {
         let Some((req, tx)) = self.pending_elicitation.take() else {
             return;
         };
-        // Mandatory ingress wins: evict an open feedback modal before the promoted elicitation stashes the composer.
-        self.displace_feedback_modal(
-            crate::views::feedback_modal::FeedbackModalDisplacement::McpElicitation,
-        );
         let stashed = self.stash_prompt_for_elicitation();
         self.elicitation_view = Some(ElicitationViewState::from_request(req, stashed, Some(tx)));
     }

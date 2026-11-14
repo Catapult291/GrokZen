@@ -705,25 +705,6 @@ pub enum Action {
     /// Set plan mode on/off. Per-session, ACP-mediated (not persisted to config.toml).
     /// `/plan <desc>` uses `EnterPlanMode` instead because it also starts a turn.
     SetPlanMode(PlanModeKind),
-    /// Open the feedback modal (every screen mode).
-    /// The payload's images were drained at slash-execution time; the modal composer adopts them as chips.
-    OpenFeedbackModal(crate::views::feedback_modal::OpenFeedbackModal),
-    /// Submit the open feedback modal's report.
-    /// `modal_id` guards a deferred submit (paste probe in flight) against a modal that closed and reopened in between.
-    SubmitFeedbackModal {
-        modal_id: crate::views::feedback_modal::FeedbackModalId,
-    },
-    /// Execute one modal-scoped draft list/get/delete request.
-    RequestFeedbackDraft {
-        request: crate::views::feedback_modal::FeedbackDraftRequest,
-    },
-    /// Submit feedback immediately (inline `/feedback <text>` in any mode).
-    /// `trace` is `None` when no trace consent was collected.
-    SendFeedback {
-        text: String,
-        images: crate::views::prompt_widget::FeedbackImages,
-        trace: Option<FeedbackTraceChoice>,
-    },
     /// Enter remember mode (visual prompt change, not a send).
     EnterRememberMode,
     /// Send a remember note from # mode.
@@ -1121,38 +1102,6 @@ pub enum PromptBlockChoice {
     Resend,
     Discard,
 }
-/// Which surface issued a feedback POST, echoed back on its completion.
-/// Every send thanks at send time; the [`FeedbackSubmissionId`](crate::views::feedback_modal::FeedbackSubmissionId)
-/// only correlates a completion with the consent parked for that exact POST.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FeedbackSendOrigin {
-    /// Inline `/feedback <text>`: fire-and-forget.
-    Immediate,
-    /// A feedback modal submit; the id correlates the completion with that exact POST attempt.
-    Modal {
-        submission_id: crate::views::feedback_modal::FeedbackSubmissionId,
-        modal_id: crate::views::feedback_modal::FeedbackModalId,
-        is_draft: bool,
-    },
-}
-#[derive(Debug, Clone)]
-pub struct DraftFeedbackBody {
-    pub draft_id: xai_grok_feedback::FeedbackDraftId,
-    pub title: String,
-    pub details: String,
-    pub area: Option<String>,
-    pub r#type: xai_grok_feedback::FeedbackType,
-    pub task_category: Option<xai_grok_feedback::FeedbackTaskCategory>,
-    pub failure_mode: Option<xai_grok_feedback::FeedbackFailureMode>,
-    pub images: Vec<xai_grok_shell::session::FeedbackImage>,
-}
-/// What the user chose on the legacy `/feedback` trace-consent card.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FeedbackTraceChoice {
-    AlwaysUpload,
-    NoUpload,
-    NeverAsk,
-}
 /// Canonical on/off state for `plan_mode`.
 /// Binary today (single bit on `agent.plan_mode_active`); typed enum so a future third state can be added without churning dispatcher arms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1218,8 +1167,6 @@ impl CancelTrigger {
 pub enum ClipboardPasteOwner {
     /// The live composer / agent prompt.
     Composer,
-    /// The `/feedback` report pane.
-    FeedbackPane,
     /// An `AskUserQuestion` card's freeform answer, identified by its tool call id and question index.
     QuestionCard {
         tool_call_id: String,
@@ -1246,13 +1193,6 @@ pub enum ClipboardPasteTarget {
     DashboardPeek {
         row: crate::views::dashboard::DashboardRowId,
     },
-    /// Feedback modal composer input. Both ids are captured at enqueue time, so a completion is
-    /// dropped after either the modal or its loaded composition changes.
-    FeedbackModal {
-        agent_id: AgentId,
-        modal_id: crate::views::feedback_modal::FeedbackModalId,
-        composition_id: crate::views::feedback_modal::FeedbackCompositionId,
-    },
 }
 impl ClipboardPasteTarget {
     /// Telemetry surface label for the empty-clipboard paste-key event.
@@ -1261,7 +1201,6 @@ impl ClipboardPasteTarget {
             Self::AgentPrompt { .. } => "agent",
             Self::DashboardDispatch => "dashboard",
             Self::DashboardPeek { .. } => "peek",
-            Self::FeedbackModal { .. } => "feedback_modal",
         }
     }
 }
@@ -2046,37 +1985,6 @@ pub enum Effect {
     },
     /// Fetch current bundle cache status via `x.ai/bundle/status`.
     FetchBundleStatus,
-    /// Send feedback about the current session (fire-and-forget POST).
-    /// `origin` rides through to the completion so a modal send's parked consent can be matched or dropped.
-    SendFeedback {
-        agent_id: AgentId,
-        session_id: acp::SessionId,
-        feedback_text: String,
-        images: Vec<xai_grok_shell::session::FeedbackImage>,
-        metadata: Option<serde_json::Value>,
-        /// Ask the shell to mint a one-shot upload capability after this report succeeds.
-        request_trace_upload_token: bool,
-        draft: Option<DraftFeedbackBody>,
-        origin: FeedbackSendOrigin,
-    },
-    FeedbackDraftRequest {
-        agent_id: AgentId,
-        session_id: acp::SessionId,
-        request: crate::views::feedback_modal::FeedbackDraftRequest,
-    },
-    /// One-shot session archive for a feedback report (after the text POST).
-    /// Emitted only from the matching successful feedback-POST reduction (modal path)
-    /// or the legacy card's persisted-consent path, never as a sibling of the POST.
-    UploadFeedbackTrace {
-        agent_id: AgentId,
-        session_id: acp::SessionId,
-        /// `Some` for a modal one-shot: correlates the completion with the exact POST attempt that earned it.
-        submission_id: Option<crate::views::feedback_modal::FeedbackSubmissionId>,
-        /// Typed intent for a modal one-shot; legacy persisted-consent uploads carry `None`.
-        intent: Option<crate::views::feedback_modal::FeedbackTraceUploadIntent>,
-        /// Capability minted by the successful feedback POST; absent on the legacy persisted-consent path.
-        trace_upload_token: Option<String>,
-    },
     /// Save a remember note to the active mode's global memory storage.
     SaveMemoryNote {
         agent_id: AgentId,
@@ -2318,13 +2226,6 @@ pub enum Effect {
         ctx: ClipboardPasteContext,
         /// Pasteboard `changeCount` at enqueue; the probe drops the attachment if it moved before or during the read. `None` leaves the read unguarded.
         change_count: Option<u64>,
-    },
-    /// Bounded disk read for an adopted feedback image. The original file remains until completion installs the bytes.
-    RehydrateFeedbackImage {
-        agent_id: AgentId,
-        modal_id: crate::views::feedback_modal::FeedbackModalId,
-        image_identity: u64,
-        path: std::path::PathBuf,
     },
     /// Prepare terminal preview bytes off the event-loop thread.
     PreparePromptImagePreview {
@@ -3035,55 +2936,6 @@ pub enum TaskResult {
         error: String,
         nonce: u64,
     },
-    /// Feedback submitted successfully (fire-and-forget).
-    /// A modal-origin completion only takes the consent parked for its exact submission; anything else is stale and a no-op.
-    FeedbackComplete {
-        agent_id: AgentId,
-        origin: FeedbackSendOrigin,
-        outcome: xai_grok_shell::session::FeedbackOutcome,
-        /// Present only when the shell consumed explicit modal consent and minted a one-shot capability.
-        trace_upload_token: Option<String>,
-    },
-    /// Feedback submission failed. A draft send keeps its draft on disk; any other report is
-    /// re-saved as a text-only draft from `feedback_text` so the user can retry from `/feedback`.
-    /// A modal-origin failure additionally drops its parked consent so a failed report never uploads a trace.
-    FeedbackFailed {
-        agent_id: AgentId,
-        origin: FeedbackSendOrigin,
-        feedback_text: String,
-        /// Attachments the POST carried; they are not re-saved with the draft.
-        image_count: usize,
-        error: String,
-    },
-    FeedbackDraftListComplete {
-        agent_id: AgentId,
-        modal_id: crate::views::feedback_modal::FeedbackModalId,
-        generation: u64,
-        result: Result<Vec<xai_grok_feedback::FeedbackDraft>, String>,
-    },
-    FeedbackDraftLoadComplete {
-        agent_id: AgentId,
-        load: crate::views::feedback_modal::FeedbackDraftLoad,
-        result: Result<xai_grok_feedback::FeedbackDraft, String>,
-    },
-    FeedbackDraftDeleteComplete {
-        agent_id: AgentId,
-        delete: crate::views::feedback_modal::FeedbackDraftDelete,
-        result: Result<(), String>,
-    },
-    FeedbackDraftUpdateComplete {
-        agent_id: AgentId,
-        update: crate::views::feedback_modal::FeedbackDraftUpdate,
-        result: Result<(), String>,
-    },
-    /// One-shot feedback trace archive finished (or was skipped).
-    /// `submission_id` echoes the effect's correlation: a modal one-shot completion only ever
-    /// touches its registered pending submission, never a later modal.
-    FeedbackTraceUploaded {
-        agent_id: AgentId,
-        submission_id: Option<crate::views::feedback_modal::FeedbackSubmissionId>,
-        error: Option<String>,
-    },
     /// Memory note save completed.
     MemoryNoteSaved {
         agent_id: AgentId,
@@ -3321,12 +3173,6 @@ pub enum TaskResult {
         image: ProbedAttachment,
         /// File URL(s) the completion resolves via the existing path handling.
         file_urls: Option<String>,
-    },
-    FeedbackImageRehydrated {
-        agent_id: AgentId,
-        modal_id: crate::views::feedback_modal::FeedbackModalId,
-        image_identity: u64,
-        result: Result<Vec<u8>, String>,
     },
     /// Shared prompt-image preview state was resolved off-thread.
     PromptImagePreviewPrepared,

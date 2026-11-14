@@ -212,47 +212,6 @@ impl ClientFeedbackInput {
     }
 }
 
-/// `x.ai/feedback/drafts/update` params, built by the pager and parsed by the shell. The full body
-/// is required so a partial update fails the parse instead of half-updating the draft.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct FeedbackDraftUpdateRequest {
-    pub session_id: String,
-    pub draft_id: xai_grok_feedback::FeedbackDraftId,
-    #[serde(flatten)]
-    pub input: xai_grok_feedback::FeedbackDraftInput,
-}
-
-/// The `draft_id` variant of `x.ai/feedback` params, built by the pager and parsed by the shell.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FeedbackDraftSendRequest {
-    pub session_id: String,
-    pub draft_id: xai_grok_feedback::FeedbackDraftId,
-    #[serde(default)]
-    pub request_trace_upload_token: bool,
-    pub edited_body: FeedbackDraftEditedBody,
-}
-
-/// `edited_body` of [`FeedbackDraftSendRequest`]: the edited draft plus the pager's client context.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FeedbackDraftEditedBody {
-    #[serde(flatten)]
-    pub input: xai_grok_feedback::FeedbackDraftInput,
-    #[serde(default)]
-    pub images: Vec<prod_mc_cli_chat_proxy_types::feedback_types::FeedbackImage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminal_info: Option<prod_mc_cli_chat_proxy_types::feedback_types::FeedbackTerminalInfo>,
-}
-
-/// Pager attestation carried on the one-shot `x.ai/feedback/upload-trace` request. Deliberately no
-/// catch-all variant: an unknown intent fails the request instead of changing its gate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FeedbackTraceUploadIntent {
-    SendThisSession,
-}
-
 // ── Rollout survey ──────────────────────────────────────────────────────
 
 /// Request to submit rollout survey responses about worktree improvements

@@ -122,8 +122,6 @@ pub struct AcpConnection {
     /// Whether the session-recap feature is rolled out for this connection. The client gates its automatic away-recap
     /// poll and the manual `/recap` on this so a disabled feature produces zero `x.ai/recap` traffic.
     pub session_recap_available: bool,
-    /// Shell-side feedback trace-offer eligibility (see `feedbackTraceOffer`).
-    pub feedback_trace_offer: bool,
     /// `AuthManager` for pager-side authenticated channels (voice STT and TTS).
     /// In-process mode shares the agent's instance (single token cache); leader mode builds a dedicated one off the same local `auth.json`.
     /// Either way it resolves a fresh bearer per request via the refresh chain.
@@ -277,7 +275,6 @@ pub(in crate::acp) async fn initialize_connection(
         leader_status_rx,
         cancel_rewind_enabled: agent.cancel_rewind_enabled,
         session_recap_available: agent.session_recap_available,
-        feedback_trace_offer: agent.feedback_trace_offer,
         auth_manager,
     })
 }
@@ -484,7 +481,6 @@ pub(crate) struct InitializedAgent {
     pub(crate) available_commands: Vec<acp::AvailableCommand>,
     pub(crate) cancel_rewind_enabled: bool,
     pub(crate) session_recap_available: bool,
-    pub(crate) feedback_trace_offer: bool,
 }
 /// Send InitializeRequest and parse the response.
 async fn initialize(tx: &AcpAgentTx, flags: &ConnectFlags) -> Result<InitializedAgent> {
@@ -530,7 +526,6 @@ async fn initialize(tx: &AcpAgentTx, flags: &ConnectFlags) -> Result<Initialized
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
     let session_recap_available = parse_session_recap_available(resp.meta.as_ref());
-    let feedback_trace_offer = parse_feedback_trace_offer(resp.meta.as_ref());
     let default_auth_method_id = parse_default_auth_method_id(resp.meta.as_ref());
     Ok(InitializedAgent {
         models,
@@ -540,7 +535,6 @@ async fn initialize(tx: &AcpAgentTx, flags: &ConnectFlags) -> Result<Initialized
         available_commands,
         cancel_rewind_enabled,
         session_recap_available,
-        feedback_trace_offer,
     })
 }
 /// Parse `availableCommands` from an `InitializeResponse.meta` value.
@@ -556,11 +550,6 @@ pub fn parse_available_commands(meta: Option<&acp::Meta>) -> Vec<acp::AvailableC
 /// Default `false` when missing or non-bool so older agents and dark-launch defaults produce zero automatic recap traffic.
 pub fn parse_session_recap_available(meta: Option<&acp::Meta>) -> bool {
     meta.and_then(|m| m.get("sessionRecap"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-}
-pub fn parse_feedback_trace_offer(meta: Option<&acp::Meta>) -> bool {
-    meta.and_then(|m| m.get("feedbackTraceOffer"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
 }

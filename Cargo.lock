@@ -14781,7 +14781,6 @@ dependencies = [
  "xai-grok-dashboard-store",
  "xai-grok-external-agent-migration",
  "xai-grok-extra-ca",
- "xai-grok-feedback",
  "xai-grok-foreign-sessions",
  "xai-grok-gboom",
  "xai-grok-hooks",

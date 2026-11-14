@@ -30,7 +30,6 @@ pub mod monitor;
 pub mod read_file;
 pub mod scheduler;
 pub mod search_replace;
-pub mod send_feedback;
 pub mod send_subagent_message;
 pub(crate) mod storage;
 pub mod task;
@@ -78,7 +77,6 @@ pub use scheduler::create::{
 pub use scheduler::delete::{SCHEDULER_DELETE_TOOL_NAME, SchedulerDeleteTool};
 pub use scheduler::list::SchedulerListTool;
 pub use search_replace::SearchReplaceTool;
-pub use send_feedback::{SEND_FEEDBACK_TOOL_NAME, SendFeedbackTool};
 pub use send_subagent_message::{
     SEND_SUBAGENT_MESSAGE_TOOL_NAME, SendSubagentMessageDisposition, SendSubagentMessageTool,
 };

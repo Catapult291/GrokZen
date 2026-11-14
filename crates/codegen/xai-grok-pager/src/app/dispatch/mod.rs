@@ -16,7 +16,6 @@ mod dashboard;
 mod dashboard_telemetry;
 pub(crate) mod external_editor;
 mod import_claude;
-mod inline_feedback;
 mod interject;
 mod jump;
 mod modes;
@@ -43,7 +42,6 @@ pub(crate) use billing::{
 pub(crate) use ctx::{SwitchCause, switch_to_agent};
 pub(crate) use dashboard::{DashboardStopReadiness, dashboard_stop_readiness};
 pub(crate) use modes::{downgrade_displayed_auto_if_gated, effective_auto};
-pub(crate) use notes::FEEDBACK_TRACE_UPLOAD_TIMEOUT_MS;
 pub(crate) use notes::{
     recap_unavailable_toast, recap_unavailable_toast_with_locale, scrollback_has_user_messages,
 };

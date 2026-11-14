@@ -272,9 +272,6 @@ impl WritingToolCall {
                             ToolKind::Workflow => {
                                 Some(("turn.writing.workflow", "Writing workflow{ordinal}…"))
                             }
-                            ToolKind::Feedback => {
-                                Some(("turn.writing.feedback", "Writing feedback draft{ordinal}…"))
-                            }
                             ToolKind::ImageGen => Some((
                                 "turn.writing.image_prompt",
                                 "Writing image prompt{ordinal}…",
@@ -2354,20 +2351,6 @@ fn tool_call_to_block_with_locale(
         }
         _ if crate::acp::subagent_message::is_tool(tc) => {
             crate::acp::subagent_message::to_block(tc, labels)
-        }
-        _ if canonical_tool_name(tc)
-            == Some(xai_grok_tools::implementations::grok_build::SEND_FEEDBACK_TOOL_NAME) =>
-        {
-            let mut block = OtherToolCallBlock::new("Feedback drafted", String::new());
-            if !success {
-                let error = content_text(tc);
-                block.error = Some(if error.is_empty() {
-                    "Failed".to_owned()
-                } else {
-                    error
-                });
-            }
-            RenderBlock::ToolCall(ToolCallBlock::Other(block))
         }
         _ if matches!(
             extract_raw_field(tc, "variant").as_deref(),

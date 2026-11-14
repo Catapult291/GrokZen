@@ -58,11 +58,6 @@ pub(crate) fn handle_mcp_elicit(
         cancel_elicitation_request(old_tx);
     }
 
-    // Mandatory ingress wins: evict an open feedback modal before this elicitation installs and stashes its own state.
-    agent.displace_feedback_modal(
-        crate::views::feedback_modal::FeedbackModalDisplacement::McpElicitation,
-    );
-
     if let Some(mut old) =
         agent.take_unanswered_elicitation(crate::app::agent_view::UnansweredElicitation::Superseded)
     {
@@ -132,10 +127,6 @@ pub(crate) fn handle_ask_user_question(
     };
 
     // Mandatory ingress wins: evict an open feedback modal before this question installs and stashes its own state.
-    agent.displace_feedback_modal(
-        crate::views::feedback_modal::FeedbackModalDisplacement::AcpQuestion,
-    );
-
     // If a question is already active, cancel it before replacing.
     if let Some(mut old_qv) = agent.question_view.take() {
         agent.record_question_pause(&old_qv);
@@ -265,11 +256,6 @@ pub(super) fn handle_exit_plan_mode(
         drop(ext.response_tx);
         return false;
     };
-
-    // Mandatory ingress wins: evict an open feedback modal before the approval captures the session draft.
-    agent.displace_feedback_modal(
-        crate::views::feedback_modal::FeedbackModalDisplacement::PlanApproval,
-    );
 
     if let Some(mut old) = agent.unmount_plan_review() {
         tracing::warn!(

@@ -852,17 +852,7 @@ impl AgentBuilder {
                     | BuiltinAgentName::GrokBuildAskUser
             )
         );
-        if self.prompt_audience == PromptAudience::Primary
-            && is_parent_grok_build
-            && !tool_config
-                .tools
-                .iter()
-                .any(|tool| tool.kind == Some(ToolKind::Feedback))
-        {
-            tool_config
-                .tools
-                .push((&xai_grok_tools::implementations::grok_build::SendFeedbackTool).into());
-        }
+        let _ = is_parent_grok_build;
         if definition.inject_default_tools {
             if self.memory_backend.is_some() {
                 use xai_grok_tools::implementations::memory;
@@ -977,22 +967,11 @@ impl AgentBuilder {
                 .retain(|tc| tc.id != mem_search_id && tc.id != mem_get_id);
         }
         if self.prompt_audience == crate::prompt::context::PromptAudience::Subagent {
-            let feedback_id = xai_grok_tools::registry::types::ToolConfig::for_tool::<
-                xai_grok_tools::implementations::grok_build::SendFeedbackTool,
-            >()
-            .id;
-            let feedback_name =
-                xai_grok_tools::implementations::grok_build::SEND_FEEDBACK_TOOL_NAME;
             tool_config.tools.retain(|tool| {
                 !matches!(
                     tool.kind,
-                    Some(
-                        xai_grok_tools::types::tool::ToolKind::AskUser
-                            | xai_grok_tools::types::tool::ToolKind::Feedback
-                    )
-                ) && tool.id != feedback_id
-                    && tool.id != feedback_name
-                    && tool.name_override.as_deref() != Some(feedback_name)
+                    Some(xai_grok_tools::types::tool::ToolKind::AskUser)
+                )
             });
         } else if !self.ask_user_question_enabled {
             let ask_user_id = format!(
@@ -2067,14 +2046,6 @@ mod tests {
                 "[{label}] rendered descriptions must not leak template markers"
             );
             assert!(
-                names.contains(&"send_feedback"),
-                "[{label}] parent grok-build sessions must advertise send_feedback; got tools: {names:?}"
-            );
-            assert!(
-                builtin_names.contains(&"send_feedback"),
-                "[{label}] parent grok-build built-in definitions must advertise send_feedback; got tools: {builtin_names:?}"
-            );
-            assert!(
                 names.contains(&"enter_plan_mode"),
                 "[{label}] enter_plan_mode must always be present (TUI plan-mode keybind needs it); got tools: {names:?}"
             );
@@ -2204,23 +2175,9 @@ mod tests {
         use xai_grok_tools::computer::local::LocalTerminalBackend;
         use xai_grok_tools::notification::ToolNotificationHandle;
         use xai_grok_tools::registry::types::ToolConfig;
-        let feedback_id =
-            ToolConfig::for_tool::<xai_grok_tools::implementations::grok_build::SendFeedbackTool>()
-                .id;
-        let mut kindless_feedback_id = crate::config::AgentDefinition::default_grok_build();
-        kindless_feedback_id.tool_config.tools = vec![ToolConfig::from_id(&feedback_id)];
-        kindless_feedback_id.inject_default_tools = false;
-        let mut kindless_feedback_name = crate::config::AgentDefinition::default_grok_build();
-        kindless_feedback_name.tool_config.tools = vec![
-            ToolConfig::from_id("custom:tool")
-                .with_name(xai_grok_tools::implementations::grok_build::SEND_FEEDBACK_TOOL_NAME),
-        ];
-        kindless_feedback_name.inject_default_tools = false;
         for definition in [
             crate::config::AgentDefinition::default_grok_build(),
             crate::config::AgentDefinition::grok_build_ask_user(),
-            kindless_feedback_id,
-            kindless_feedback_name,
         ] {
             let agent = AgentBuilder::new(
                 std::env::temp_dir(),
@@ -2239,7 +2196,7 @@ mod tests {
                 .into_iter()
                 .map(|definition| definition.function.name)
                 .collect();
-            for parent_only in ["ask_user_question", "send_feedback"] {
+            for parent_only in ["ask_user_question"] {
                 assert!(
                     !names.iter().any(|name| name == parent_only),
                     "subagents must not receive {parent_only}: {names:?}"
@@ -2355,11 +2312,7 @@ mod tests {
             lost.iter().all(|name| {
                 matches!(
                     name.as_str(),
-                    "workflow"
-                        | "ask_user_question"
-                        | "send_feedback"
-                        | "enter_plan_mode"
-                        | "exit_plan_mode"
+                    "workflow" | "ask_user_question" | "enter_plan_mode" | "exit_plan_mode"
                 )
             }),
             "child strip must not drop unrelated tools: lost={lost:?}"
