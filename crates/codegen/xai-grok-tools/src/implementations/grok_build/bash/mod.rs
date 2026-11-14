@@ -898,8 +898,7 @@ fn split_command_segments(command: &str) -> Vec<String> {
 fn first_command_word(segment: &str) -> Option<&str> {
     let mut s = segment.trim_start();
     loop {
-        let bytes = s.as_bytes();
-        if bytes.is_empty() || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_') {
+        if !s.as_bytes().first().is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_') {
             break;
         }
         let eq = s.find('=');
@@ -916,8 +915,7 @@ fn first_command_word(segment: &str) -> Option<&str> {
         let eq = eq.expect("is_assignment implies Some(eq)");
         let after = &s[eq + 1..];
         let rest = if after.starts_with(['"', '\'']) {
-            let q = after.as_bytes()[0];
-            match after[1..].find(q as char) {
+            match after.chars().next().and_then(|q| after[1..].find(q)) {
                 Some(end) => &after[1 + end + 1..],
                 None => break,
             }
@@ -1563,8 +1561,10 @@ impl BashTool {
             "step": step,
             "elapsed_ms": elapsed.as_millis() as u64,
         });
-        if let Some(param) = param {
-            ctx["param"] = serde_json::Value::String(param.to_owned());
+        if let Some(param) = param
+            && let Some(ctx) = ctx.as_object_mut()
+        {
+            ctx.insert("param".to_string(), serde_json::Value::String(param.to_owned()));
         }
         xai_grok_telemetry::unified_log::debug(
             "shell.bash.background_finalize.step",
