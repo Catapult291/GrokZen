@@ -118,27 +118,26 @@ pub fn fork_session_params(
         "newCwd": parent_cwd_str.clone(),
         "sessionKind": "fork",
     });
-    if let Some(obj) = payload.as_object_mut() {
-        if let Some(nid) = new_session_id {
-            obj.insert(
-                "newSessionId".into(),
-                serde_json::Value::String(nid.to_string()),
-            );
-        }
-        if parent_is_worktree {
-            obj.insert(
-                "sourceWorkspaceDir".into(),
-                serde_json::Value::String(parent_cwd_str),
-            );
-        }
+    let Some(obj) = payload.as_object_mut() else {
+        return payload;
+    };
+    if let Some(nid) = new_session_id {
+        obj.insert(
+            "newSessionId".into(),
+            serde_json::Value::String(nid.to_string()),
+        );
     }
-    if let Some(obj) = payload.as_object_mut() {
-        if let Some(target) = target_prompt_index {
-            obj.insert(
-                "targetPromptIndex".into(),
-                serde_json::Value::from(target),
-            );
-        }
+    if parent_is_worktree {
+        obj.insert(
+            "sourceWorkspaceDir".into(),
+            serde_json::Value::String(parent_cwd_str),
+        );
+    }
+    if let Some(target) = target_prompt_index {
+        obj.insert(
+            "targetPromptIndex".into(),
+            serde_json::Value::from(target),
+        );
     }
     payload
 }

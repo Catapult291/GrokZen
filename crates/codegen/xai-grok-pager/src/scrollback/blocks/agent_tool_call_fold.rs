@@ -207,12 +207,11 @@ fn find_end(raw: &str, start: usize, final_chunk: bool) -> Option<usize> {
     }
     if let Some(offset) = rest.find(FUNCTION_END) {
         let mut end = start + offset + FUNCTION_END.len();
-        if let Some(tail) = raw.get(end..) {
-            if let Some(tool_call) = tail.find(TOOL_CALL_END)
-                && tail[..tool_call].trim().is_empty()
-            {
-                end += tool_call + TOOL_CALL_END.len();
-            }
+        if let Some(tail) = raw.get(end..)
+            && let Some(tool_call) = tail.find(TOOL_CALL_END)
+            && tail[..tool_call].trim().is_empty()
+        {
+            end += tool_call + TOOL_CALL_END.len();
         }
         return Some(end);
     }
