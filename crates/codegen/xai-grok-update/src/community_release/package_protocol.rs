@@ -44,7 +44,9 @@ impl PackageProtocol {
         if start.0 >= end.0 {
             anyhow::bail!("community package protocol block is malformed");
         }
-        let json = lines[start.0 + 1..end.0].join("\n");
+        let Some(json) = lines.get(start.0 + 1..end.0).map(|slice| slice.join("\n")) else {
+            anyhow::bail!("community package protocol block is malformed");
+        };
         let protocol: Self =
             serde_json::from_str(&json).context("parsing community package protocol")?;
         if protocol.schema != 1
