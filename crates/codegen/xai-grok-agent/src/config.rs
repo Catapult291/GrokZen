@@ -141,6 +141,22 @@ fn wait_tasks_tool_config() -> ToolConfig {
 fn kill_task_tool_config() -> ToolConfig {
     ToolConfig::from(&grok_build::KillTaskTool).with_name("kill_command_or_subagent")
 }
+/// The xAI Imagine media tools, as shipped by the static toolsets that name them.
+/// Gated by the product build policy: a build with `IMAGINE_TOOLS_ALLOWED == false`
+/// (the community default — it has no Imagine credentials) gets an empty list, so
+/// the tools vanish from every static toolset, the workspace catalog, and
+/// `/imagine`'s `required_tools()` visibility, and no config tier can bring them back.
+fn imagine_tool_configs() -> Vec<ToolConfig> {
+    if xai_grok_product::IMAGINE_TOOLS_ALLOWED {
+        vec![
+            (&grok_build::ImageGenTool).into(),
+            (&grok_build::ImageToVideoTool).into(),
+            (&grok_build::ReferenceToVideoTool).into(),
+        ]
+    } else {
+        Vec::new()
+    }
+}
 /// Complete workspace-executable toolset for hub registration.
 /// Extends `default_grok_build_toolset()` with tools injected by `AgentBuilder` or available only in specific modes.
 /// In proxy mode the workspace server executes all tools; the shell has zero local dispatch.
@@ -151,9 +167,7 @@ pub fn workspace_grok_build_toolset() -> ToolServerConfig {
     tools.push((&grok_build::ExitPlanModeTool).into());
     tools.push((&grok_build::AskUserQuestionTool).into());
     tools.push((&grok_build::WebSearchTool).into());
-    tools.push((&grok_build::ImageGenTool).into());
-    tools.push((&grok_build::ImageToVideoTool).into());
-    tools.push((&grok_build::ReferenceToVideoTool).into());
+    tools.extend(imagine_tool_configs());
     tools.push((&grok_build::WebFetchTool).into());
     tools.push((&memory::search_tool::MemorySearchImpl).into());
     tools.push((&memory::get_tool::MemoryGetImpl).into());
@@ -172,12 +186,8 @@ pub fn workspace_grok_build_toolset() -> ToolServerConfig {
 /// A server whose credential only serves the hub cannot run them, so it neither advertises nor serves them.
 pub fn api_backed_tool_ids() -> Vec<String> {
     #[allow(unused_mut)]
-    let mut ids = vec![
-        ToolConfig::from(&grok_build::WebSearchTool).id,
-        ToolConfig::from(&grok_build::ImageGenTool).id,
-        ToolConfig::from(&grok_build::ImageToVideoTool).id,
-        ToolConfig::from(&grok_build::ReferenceToVideoTool).id,
-    ];
+    let mut ids = vec![ToolConfig::from(&grok_build::WebSearchTool).id];
+    ids.extend(imagine_tool_configs().iter().map(|tc| tc.id.clone()));
     ids
 }
 /// Toolset for the `grok-computer` (workspace/sandbox) preset.
@@ -503,17 +513,18 @@ fn orchestrator_toolset() -> ToolServerConfig {
             // Web tools
             (&grok_build::WebSearchTool).into(),
             (&grok_build::WebFetchTool).into(),
-            // Imagine
-            (&grok_build::ImageGenTool).into(),
-            (&grok_build::ImageToVideoTool).into(),
-            (&grok_build::ReferenceToVideoTool).into(),
+        ]
+        .into_iter()
+        .chain(imagine_tool_configs())
+        .chain([
             // Memory
             (&memory::MemorySearchImpl).into(),
             (&memory::MemoryGetImpl).into(),
-            // Intentionally excluded:
-            // - SearchReplaceTool (no file editing; delegate to subagents)
-            // - OpenCodeWriteTool (no file writing; delegate to subagents)
-        ],
+        ])
+        // Intentionally excluded:
+        // - SearchReplaceTool (no file editing; delegate to subagents)
+        // - OpenCodeWriteTool (no file writing; delegate to subagents)
+        .collect(),
         behavior_preset: None,
     }
 }

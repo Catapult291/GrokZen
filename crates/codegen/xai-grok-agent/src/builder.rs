@@ -913,6 +913,15 @@ impl AgentBuilder {
                     (&xai_grok_tools::implementations::grok_build::ReferenceToVideoTool).into(),
                 );
             }
+            if !xai_grok_product::IMAGINE_TOOLS_ALLOWED {
+                // Build policy (community distribution: no Imagine credentials).
+                // Retain, don't gate the pushes: static toolsets and custom profiles
+                // may already carry the tools, and no config tier may re-add them.
+                tool_config.tools.retain(|tc| {
+                    !xai_grok_tools::implementations::grok_build::IMAGINE_TOOL_IDS
+                        .contains(&tc.id.as_str())
+                });
+            }
             let has_write_tool = tool_config
                 .tools
                 .iter()

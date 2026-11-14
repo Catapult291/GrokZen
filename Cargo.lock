@@ -14069,6 +14069,7 @@ dependencies = [
  "xai-grok-config",
  "xai-grok-hooks",
  "xai-grok-permission-rules",
+ "xai-grok-product",
  "xai-grok-sampling-types",
  "xai-grok-telemetry",
  "xai-grok-tools",
