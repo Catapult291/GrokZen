@@ -19,12 +19,13 @@ use xai_grok_tools::implementations::web_search::client::WebSearchClient;
 use xai_grok_tools::registry::types::{FinalizedToolset, ToolServerConfig};
 use xai_tool_protocol::SessionId;
 /// The tools a hub-only host must not offer: each one calls the API with the server's own credential.
-const API_BACKED_TOOLS: &[&str] = &[
-    "web_search",
-    "image_gen",
-    "image_to_video",
-    "reference_to_video",
-];
+/// The Imagine three are additionally cut from BOTH catalogs by the product build policy
+/// (`xai_grok_product::IMAGINE_TOOLS_ALLOWED == false`: the community distribution has no
+/// Imagine credentials), so `web_search` is the only API-backed tool that still appears in
+/// the sandbox catalog to be daemon-diffed.
+const API_BACKED_TOOLS: &[&str] = &["web_search"];
+/// The Imagine tools the build policy removes everywhere; both catalogs must lack them.
+const IMAGINE_TOOLS: &[&str] = &["image_gen", "image_edit", "image_to_video", "reference_to_video"];
 const API_BASE_URL: &str = "https://api.invalid/v1";
 static TRUNCATION_INSTALL_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Tool ids without their namespace, in catalog order.
@@ -66,6 +67,16 @@ fn daemon_catalog_is_the_sandbox_catalog_minus_the_api_backed_tools() {
         assert!(
             full_ids.contains(tool),
             "the sandbox catalog must still ship `{tool}`: {full_ids:?}"
+        );
+    }
+    for tool in IMAGINE_TOOLS {
+        assert!(
+            !full_ids.contains(tool),
+            "the Imagine build policy must cut `{tool}` from the sandbox catalog: {full_ids:?}"
+        );
+        assert!(
+            !unqualified_ids(&daemon).contains(tool),
+            "the Imagine build policy must cut `{tool}` from the daemon catalog"
         );
     }
     assert_eq!(full_ids, unqualified_ids(&sandbox));
