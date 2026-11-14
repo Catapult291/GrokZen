@@ -145,7 +145,9 @@ fn repair_truncated_json_impl(
     let mut i = 0usize;
 
     while i < bytes.len() {
-        let b = bytes[i];
+        let Some(b) = bytes.get(i).copied() else {
+            break;
+        };
         if in_string {
             if escape {
                 escape = false;
@@ -237,10 +239,12 @@ fn repair_truncated_json_impl(
                     _ => break,
                 }
                 let start = i;
-                while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+                while i < bytes.len()
+                    && bytes.get(i).is_some_and(|b| b.is_ascii_alphabetic())
+                {
                     i += 1;
                 }
-                match std::str::from_utf8(&bytes[start..i]).ok() {
+                match std::str::from_utf8(bytes.get(start..i).unwrap_or(&[])).ok() {
                     Some("true") | Some("false") | Some("null") => {
                         if let Some(frame) = stack.last_mut() {
                             frame.last_value_end = i;
@@ -258,7 +262,9 @@ fn repair_truncated_json_impl(
                 }
                 let start = i;
                 while i < bytes.len() {
-                    let c = bytes[i];
+                    let Some(c) = bytes.get(i).copied() else {
+                        break;
+                    };
                     if c.is_ascii_digit() || matches!(c, b'.' | b'e' | b'E' | b'+' | b'-') {
                         i += 1;
                     } else {
@@ -269,7 +275,7 @@ fn repair_truncated_json_impl(
                 if i >= bytes.len() {
                     break;
                 }
-                match std::str::from_utf8(&bytes[start..i])
+                match std::str::from_utf8(bytes.get(start..i).unwrap_or(&[]))
                     .ok()
                     .and_then(|t| t.parse::<f64>().ok())
                 {
