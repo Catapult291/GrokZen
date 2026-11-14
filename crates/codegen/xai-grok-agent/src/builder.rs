@@ -2303,11 +2303,7 @@ mod tests {
             lost.iter().all(|name| {
                 matches!(
                     name.as_str(),
-                    "workflow"
-                        | "ask_user_question"
-                        | "send_feedback"
-                        | "enter_plan_mode"
-                        | "exit_plan_mode"
+                    "workflow" | "ask_user_question" | "enter_plan_mode" | "exit_plan_mode"
                 )
             }),
             "child strip must not drop unrelated tools: lost={lost:?}"

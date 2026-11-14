@@ -235,7 +235,6 @@ mod tests {
         assert!(!subagent_id.contains(text));
     }
     #[test]
-    #[test]
     fn use_tool_maps_to_mcp_tool_access() {
         use crate::implementations::use_tool::UseToolInput;
         use crate::types::ToolInput;

@@ -642,7 +642,6 @@ pub(crate) fn localize_palette_entries_for_display(
             "Share Session" => "palette.share_session",
             "Rename Session" => "palette.rename_session",
             "Session Info" => "palette.session_info",
-            "Send Feedback" => "palette.send_feedback",
             "Context" => "palette.section.context",
             "Compact History" => "palette.compact_history",
             "Context Usage" => "palette.context_usage",

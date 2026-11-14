@@ -513,29 +513,6 @@ fn test_pasted_image(mime_type: &str) -> crate::prompt_images::PastedImage {
 fn test_pasted_png() -> crate::prompt_images::PastedImage {
     test_pasted_image("image/png")
 }
-#[test]
-fn minimal_voice_refusal_is_a_scrollback_block() {
-    use crate::app::app_view::{Partial, VoiceState, VoiceTarget};
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    app.screen_mode = crate::app::ScreenMode::Minimal;
-    app.voice_state = VoiceState::Recording {
-        hold: false,
-        target: VoiceTarget::Agent(id),
-        partial: Partial::Shown("dictated text".to_owned()),
-        route: Some(xai_grok_voice::VoiceRoute::Streaming),
-    };
-    app.agents
-        .get_mut(&id)
-        .unwrap()
-        .prompt
-        .set_text("/feedback ");
-    let effects = dispatch(Action::SendPrompt("/feedback ".to_owned()), &mut app);
-    assert!(effects.is_empty(), "{effects:?}");
-    let agent = test_agent(&app, id);
-    assert!(agent.toast.is_none(), "toasts are invisible in minimal");
-    assert!(last_system_text(&app, id).contains("Stop voice input"));
-}
 fn composer_image() -> crate::prompt_images::PastedImage {
     crate::prompt_images::PastedImage {
         element_id: xai_ratatui_textarea::ElementId::from_raw(0),

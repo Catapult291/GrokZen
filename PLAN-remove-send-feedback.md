@@ -106,17 +106,39 @@
 - [x] `send_feedback_notification`（`acp_session.rs:1410`，评分问卷）**保留**；shell 的 `/feedback` builtin（`slash_commands.rs` BuiltinCommand → `execute_feedback_command` → `feedback_manager`）属评分链路保留；`xai_grok_feedback` 库仍被 shell（feedback_manager/persistence）使用，根 Cargo.toml 成员与 shell 依赖保留
 - [x] 修复遗留损坏：`agent/mvp_agent/tests.rs` 全文件行首带行号前缀（步骤 5 会话重建文件的笔误，HEAD 即损坏；基线 66d9b9aa 完好）——按基线内容剥离前缀重建（8913 行，与步骤 5 已删 trace 测试群一致），`cargo check -p xai-grok-shell --all-targets` 通过
 
-### 步骤 7：收尾验证
-- [ ] `cargo check --workspace --all-targets` 全绿
-- [ ] `cargo test -p xai-grok-tools -p xai-grok-agent -p xai-grok-shell -p xai-grok-pager` 通过
-- [ ] `cargo fmt`（注意：仓库 fmt 风格，提交前统一跑）
-- [ ] `rg send_feedback`、`rg '"/feedback"'` 残留清点（stage-log.md 等文档中的历史记录保留）
+### 步骤 7：收尾验证 ✅（2026-11-14 会话 4）
+
+- [x] `cargo check --workspace --all-targets` 全绿（0 error；余 2 个基线已有 warning：`builder.rs` 的 `ToolConfig` 未用 import、`builtin_names` 未用变量）
+- [x] `cargo test -p xai-grok-pager -p xai-grok-agent -p xai-grok-tools`：pager 10404 个 lib 单测 + 全部集成测试通过，agent 全通过；tools 仅剩 2 个 Windows 平台预存在失败（`cgroup_memory_test` 依赖 Linux cgroupv2；`path_suggestions_production::pattern3_*` 断言 Unix 路径分隔符）
+- [x] `cargo test -p xai-grok-shell`：**运行并记录**，31 个 lib 测试 + 15 个集成目标失败；失败点全部位于本分支未改动的模块，根因是该社区版 `Distribution::current()` 关闭 `AccountLogin`（登录存储、账号目录、trace token 刷新类测试必然失败）与 Windows 平台差异，见下方清单
+- [x] `cargo fmt`：`cargo fmt --all` 在本机报 `os error 206`（路径过长），改为对改动包逐一 `cargo fmt -p ...`，全部通过
+- [x] 残留清点（`send_feedback` / `/feedback`）：代码侧仅剩评分链路与 shell `/feedback` builtin；详见下方「残留清单」
+- [x] 步骤 7 顺带清理的测试残留：
+  - `acp/tracker_tests.rs`：删 `send_feedback_update_renders_feedback_drafted`、`zh_localization_feedback_writing_label_keeps_ordinal_and_tool_identity`
+  - `app/queue_edit.rs`：删 `edit_local_feedback_carries_the_submitted_images`
+  - `app/dispatch/tests/notes.rs`：删 `minimal_voice_refusal_is_a_scrollback_block`（voice 拒绝只在已删的 `/feedback` 的 `submission_refusal` 上触发）
+  - `app/agent_view/plan.rs`：4 个用例的 `/feedback <text>` 改为 `/btw <text>`（`/feedback` 已不再是 pager builtin）
+  - `views/modal.rs`：删死映射 `"Send Feedback" => "palette.send_feedback"`；`agent/builder.rs` 白名单去 `send_feedback`
+  - `views/welcome/hero_box.rs`：副标题去掉 `/feedback` 推销语，并在 `zh-CN-metadata.json` 恢复 `welcome.hero.subtitle`（步骤 6 删键后中文界面会回退英文）
+  - `xai-grok-tools/permission_access.rs`：删重复的 `#[test]` 属性
+- [x] 环境操作：C 盘剩余 24 GB 时测试编译因资源不足失败，清理 `GrokZen` 与 `GrokZen-wt-feedback` 的 `target/debug/incremental`（约 126 GB，可重建缓存）后重跑通过
+
+#### 残留清单
+
+- `send_feedback`：只剩 shell 的 `send_feedback_notification`（评分问卷，按计划保留）。
+- `/feedback`：
+  - **保留（评分链路）**：shell `slash_commands.rs` builtin → `slash_exec.rs` → `feedback_manager.rs` / `feedback_client.rs`；`extensions/feedback.rs` 的 `x.ai/feedback*`；`acp_agent.rs` ext 分发。
+  - **遗留死链（可后续会话处理）**：`feedbackTraceOffer` meta（shell `agent_ops.rs` / login `meta.rs`）、`Feature::FeedbackTraceCard` 描述（config-types `registry.rs`、config `remote_settings.rs`）、pager `dispatch/prompt_ack.rs` 的 "run /feedback" 提示、pager `views/welcome` 之外的 `/feedback` 注释（`agent_view/cta.rs`、`agent_view/mod.rs`）。
+  - **文档**：`xai-grok-pager/docs/user-guide/` 与 `docs/tutorial/` 仍完整描述已删除的反馈表单（04-slash-commands、03-keyboard-shortcuts、19-plan-mode、21-terminal-support、26-config-reference 及 zh-CN 对应页）；历史 changelog 按约定保留。
+  - **测试支撑**：pty harness 与 test-support 的 mock `POST /v1/feedback` 端点（评分链路仍在用）。
+  - **telemetry**：`xai-grok-telemetry/events/feedback.rs`、`events/consent.rs` 中反馈弹窗/trace 卡事件定义已无发射方。
 
 ### 步骤 8：提交
 - [ ] 工作树内 `git add -A && git commit`（信息建议：`feat: 删除 send_feedback 工具与 /feedback 反馈弹窗`）
 
 ## 进度日志
 
+- 2026-11-14（会话 4）：完成步骤 7。`cargo check --workspace --all-targets` 全绿；pager/agent/tools 测试除 2 个 Windows 平台预存在失败外全通过（pager lib 10404 通过）。shell 套件按计划运行：31 个 lib 测试 + 15 个集成目标失败，全部落在未改动模块，根因是社区版关闭 `AccountLogin` 与 Windows 平台差异（无登录存储、无内置模型目录、cgroup/路径断言），已逐类记录在步骤 7。顺带清掉 5 个遗漏的 feedback 测试，并把 plan.rs 里 4 个用例的 `/feedback` 换成 `/btw`；修复 hero 副标题与中文 locale 回退。`cargo fmt --all` 在本机报路径过长，改为按包 fmt。测试编译一度因 C 盘仅剩 24 GB 失败（页面文件/mmap 报错），清理两处 `target/debug/incremental`（约 126 GB）后恢复。
 - 2026-11-14（会话 1）：完成步骤 1-3（tools/agent/shell 全绿）；步骤 4 lib 编译通过；步骤 5 已完成错误盘点（上表）。计划文档落盘 `PLAN-remove-send-feedback.md`。中途踩过的坑：`paste.rs` 曾误删 `take_deferred_send_after_paste`/`resume_deferred_send`/`try_handle_wrap_host_image_paste`/`route_popup_paste`（已从 git HEAD 恢复）；`task_result.rs` 曾误删 `if let Some(mut old_qv)` 行导致括号错配（已修）；`notes.rs` 曾误删 remember 函数群（已从原文件恢复）。
 - 2026-11-14（会话 3）：完成步骤 6。pty harness 删 6 个 feedback e2e 文件（顶层 2 + minimal 4）+ mod 注册，`plan_overlay_slash_runs_command.rs` 改用 `/rename` 驱动，`common.rs` 删 6 个 feedback 辅助；连带发现并清理 `xai-grok-pager-minimal` 的 feedback 渲染层（`src/feedback.rs` 等 5 处，步骤 4 删 `views::feedback_modal` 后该 crate 必然编译不过）；workspace hub_gate 测试表、locale 121 键、pager 死 import 与 Cargo 依赖一并处理。步骤 7 的 `cargo check --workspace --all-targets` 已提前全绿（其中修掉 `mvp_agent/tests.rs` 全文件行号前缀损坏）。
 - 2026-11-14（会话 2）：完成步骤 5。`dispatch/tests/notes.rs` 从 2564 行删到 694 行：43 个 feedback/trace/draft 测试按 `#[test]` 起始行 + 括号匹配整函数删除，同时删掉只被它们引用的辅助（`open_feedback_modal`、`confirm_trace_choice`、`expect_single_modal_post`、`park_send_this_session`、`Arrange` 类型与孤儿 doc 注释）；`test_pasted_png`/`test_pasted_image`/`composer_image`/`agent_ref`/`send_minimal_btw`/`esc` 被 remember/btw/recap 用例引用，保留。其余文件按表清理：turn_completion/tests.rs（`hook_denied_finalize_displaces_feedback_*`）、task_result.rs（`doctor_planning_displaces_feedback_*`）、billing.rs（`free_usage_upsell_displaces_feedback_*`）、queue.rs（`edited_queued_bare_feedback_opens_the_modal` + `run_edited_feedback_uses_row_text_*`）、effects/tests.rs（`upload_trace_request_*` 2 个）、router.rs（`send_feedback_clears_active_ephemeral_tip`）、notes.rs 内 `minimal_voice_refusal` 的 `feedback_modal` 断言行。遗留项 4（app_view trace offer）已按上方清单删除，`--all-targets` 清零。
@@ -127,5 +149,6 @@
 1. `xai-grok-shell` 的 `one_shot_feedback_gcs_config`、`team_blocks_one_shot_trace_upload`、`feedback_trace_offer` 及其测试辅助——trace 卡删除后已成死代码，可整体删（连带 `Feature::FeedbackTraceCard` 配置项与 `feedbackTraceOffer` meta 两端）。
 2. `xai_grok_feedback` 库与 `session/persistence_collect_session_files_tests.rs` 的 drafts artifact 测试——若评分链路不需要 drafts 存储，可整体下线。
 3. `session/mod.rs` 的 `FeedbackOutcome::SubmittedCleanupFailed`/`OutcomeUnknown` 变体是否仍被引用。
-4. pager `app_view.rs` 的 `shell_feedback_trace_offer` 与 `feedback_trace_choice_latched`。
-5. locale 的 `feedback.*` 键清理时注意区分评分（保留）与 /feedback（删除）。
+4. ~~pager `app_view.rs` 的 `shell_feedback_trace_offer` 与 `feedback_trace_choice_latched`~~（步骤 5 已删）。
+5. locale 的 `feedback.*` 键清理时注意区分评分（保留）与 /feedback（删除）——步骤 6 已完成。
+6. pager user-guide / tutorial 文档中的 `/feedback` 表单说明、telemetry 的反馈弹窗事件定义、`prompt_ack.rs` 的 `/feedback` 提示，以及 `agent_view/cta.rs` 等处的过期注释，可后续统一清理。
