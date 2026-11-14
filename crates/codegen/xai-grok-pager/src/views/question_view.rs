@@ -825,10 +825,10 @@ impl QuestionViewState {
         let freeform_has_image = !self.parked_images(q_idx).is_empty();
         option_selected
             || (freeform_selected
-                && (!self
+                && (self
                     .per_question_freeform
                     .get(q_idx)
-                    .is_some_and(|text| !text.trim().is_empty())
+                    .is_none_or(|text| text.trim().is_empty())
                     || freeform_has_image))
     }
 }

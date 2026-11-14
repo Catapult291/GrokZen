@@ -4726,7 +4726,7 @@ fn follow_indicator_row(layout: &mut AgentViewLayout) -> Option<u16> {
     .filter(|rect| rect.height > 0)
     .map(|rect| rect.y)
     .min();
-    if !next_pane_y.is_some_and(|y| y <= gap_y) {
+    if next_pane_y.is_none_or(|y| y > gap_y) {
         return Some(gap_y);
     }
     // Never take the scrollback's only row: an empty transcript is a worse trade than a missing arrow.

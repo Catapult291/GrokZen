@@ -1821,7 +1821,7 @@ pub(super) fn dispatch_action_result(
                 if let Some(ref mut modal) = agent.extensions_modal {
                     let confirmed_action = (origin
                         == crate::views::extensions_modal::ActionResultOrigin::Plugins)
-                        .then(|| modal.last_plugins_action.as_ref())
+                        .then_some(modal.last_plugins_action.as_ref())
                         .flatten()
                         .map(|a| {
                             let mut action = a.clone();

@@ -796,7 +796,7 @@ pub fn render_rewind_overlay(
                     y,
                     content_w,
                     MODE_KEYS.get(idx).copied().unwrap_or('0'),
-                    &rewind_static(locale, mode.label_id(), mode.label_default()),
+                    rewind_static(locale, mode.label_id(), mode.label_default()),
                     *active_idx == idx,
                     focused,
                     &theme,

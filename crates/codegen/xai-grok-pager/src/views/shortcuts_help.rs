@@ -466,7 +466,7 @@ pub fn filter_entries_with_locale(
                 let identity =
                     (*action_id)
                         .map(ExpandKey::Action)
-                        .or_else(|| match (long_help, &h.label) {
+                        .or(match (long_help, &h.label) {
                             (Some(_), Cow::Borrowed(label)) => Some(ExpandKey::Pseudo(label)),
                             _ => None,
                         });

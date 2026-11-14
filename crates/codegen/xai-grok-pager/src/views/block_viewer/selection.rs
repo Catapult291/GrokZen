@@ -377,7 +377,7 @@ impl BlockViewerPane {
             if i == sub_row as usize {
                 if col_in_sub >= line_w && i + 1 < wrapped.len() {
                     let text = item.display_text();
-                    let total = crate::scrollback::types::str_display_cells(&text)
+                    let total = crate::scrollback::types::str_display_cells(text)
                         .min(u16::MAX as usize) as u16;
                     return Some(TextEndpoint {
                         item_idx,

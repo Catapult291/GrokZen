@@ -134,10 +134,7 @@ pub fn fork_session_params(
         );
     }
     if let Some(target) = target_prompt_index {
-        obj.insert(
-            "targetPromptIndex".into(),
-            serde_json::Value::from(target),
-        );
+        obj.insert("targetPromptIndex".into(), serde_json::Value::from(target));
     }
     payload
 }

@@ -165,9 +165,7 @@ impl SearchToolCallBlock {
     /// - `FilesWithMatches`:   `(3 files)` / `(1 file)` / `(no matches)`
     /// - `Count`:              `(42 matches across 5 files)` / `(no matches)`
     fn match_summary(&self, locale: &crate::locale::LocaleContext) -> Option<String> {
-        let Some(match_count) = self.match_count else {
-            return None;
-        };
+        let match_count = self.match_count?;
         let zh = locale.locale() == crate::locale::UiLocale::ZhCn;
         if match_count == 0 {
             if zh {

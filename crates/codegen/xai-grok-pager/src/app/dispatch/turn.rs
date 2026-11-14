@@ -968,24 +968,24 @@ pub(super) fn handle_bg_task_killed(
     outcome: Option<xai_grok_tools::types::KillOutcome>,
 ) -> Vec<Effect> {
     use xai_grok_tools::types::KillOutcome;
-    if let Some(agent) = find_agent_by_session_id(&mut app.agents, &session_id) {
-        if agent.foreign_tasks.contains_key(&task_id) {
-            match outcome {
-                Some(KillOutcome::NotFound) => {
-                    agent.foreign_tasks.remove(&task_id);
-                }
-                // Killed: stay pending — the owning session is the one that would
-                // report completion, so the next poll lands the truth.
-                Some(KillOutcome::Killed) => {}
-                _ => {
-                    if let Some(foreign) = agent.foreign_tasks.get_mut(&task_id) {
-                        foreign.task.pending_kill = false;
-                        foreign.task.kill_requested_at = None;
-                    }
+    if let Some(agent) = find_agent_by_session_id(&mut app.agents, &session_id)
+        && agent.foreign_tasks.contains_key(&task_id)
+    {
+        match outcome {
+            Some(KillOutcome::NotFound) => {
+                agent.foreign_tasks.remove(&task_id);
+            }
+            // Killed: stay pending — the owning session is the one that would
+            // report completion, so the next poll lands the truth.
+            Some(KillOutcome::Killed) => {}
+            _ => {
+                if let Some(foreign) = agent.foreign_tasks.get_mut(&task_id) {
+                    foreign.task.pending_kill = false;
+                    foreign.task.kill_requested_at = None;
                 }
             }
-            return vec![];
         }
+        return vec![];
     }
     if let Some((session, scrollback)) = task_view_by_session_id(app, &session_id) {
         match outcome {

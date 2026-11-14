@@ -419,9 +419,7 @@ impl AgentView {
             AgentDeferredSend::SubmitQuestion(identity) => {
                 // A late completion may arrive after the card was dismissed or replaced.
                 // Never reissue the submit into a different question.
-                let Some(qv) = self.question_view.as_ref() else {
-                    return None;
-                };
+                let qv = self.question_view.as_ref()?;
                 if qv.tool_call_id != identity.tool_call_id
                     || qv.active_tab != identity.question_idx
                     || self.question_card_generation != identity.card_generation
