@@ -38,10 +38,13 @@ impl PackageProtocol {
             .enumerate()
             .filter(|(_, line)| **line == END)
             .collect();
-        if starts.len() != 1 || ends.len() != 1 || starts[0].0 >= ends[0].0 {
+        let (Some(&start), Some(&end)) = (starts.first(), ends.first()) else {
+            anyhow::bail!("community package protocol block is malformed");
+        };
+        if start.0 >= end.0 {
             anyhow::bail!("community package protocol block is malformed");
         }
-        let json = lines[starts[0].0 + 1..ends[0].0].join("\n");
+        let json = lines[start.0 + 1..end.0].join("\n");
         let protocol: Self =
             serde_json::from_str(&json).context("parsing community package protocol")?;
         if protocol.schema != 1
