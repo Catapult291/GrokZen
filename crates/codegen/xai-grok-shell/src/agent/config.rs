@@ -2193,9 +2193,15 @@ impl Config {
     }
     /// `image_gen` (and `/imagine`). Default on.
     /// `imagine_tools_disabled` is a remote force-off (env/config cannot re-enable).
+    /// A build with the Imagine policy off (community distribution: no Imagine
+    /// credentials) force-offs first — no requirement, env, config, or remote tier
+    /// can re-enable, matching the toolset-level compile-out.
     /// Otherwise: requirement > env > `[features]` > remote > default.
     pub(crate) fn resolve_image_gen(&self) -> Resolved<bool> {
         use xai_grok_tools::implementations::grok_build::IMAGE_GEN_TOOL_NAME;
+        if !xai_grok_product::IMAGINE_TOOLS_ALLOWED {
+            return Resolved::new(false, ConfigSource::BuildPolicy);
+        }
         if let Some(pinned) = self.requirements.image_gen.pinned() {
             return Resolved::new(pinned, ConfigSource::Requirement);
         }
@@ -2220,6 +2226,9 @@ impl Config {
     /// Same denylist / requirement pattern as [`Self::resolve_image_gen`]; no `[features]` key (defaults on).
     pub(crate) fn resolve_image_edit(&self) -> Resolved<bool> {
         use xai_grok_tools::implementations::grok_build::IMAGE_EDIT_TOOL_NAME;
+        if !xai_grok_product::IMAGINE_TOOLS_ALLOWED {
+            return Resolved::new(false, ConfigSource::BuildPolicy);
+        }
         if let Some(pinned) = self.requirements.image_edit.pinned() {
             return Resolved::new(pinned, ConfigSource::Requirement);
         }
@@ -2234,11 +2243,15 @@ impl Config {
     }
     /// `image_to_video` / `reference_to_video` (and `/imagine-video`). Default on.
     /// Registered as a pair; denylisting either tool name (or `video_gen`) disables both.
+    /// The Imagine build policy (community distribution) force-offs first; see [`Self::resolve_image_gen`].
     /// Otherwise same precedence as [`Self::resolve_image_gen`].
     pub(crate) fn resolve_video_gen(&self) -> Resolved<bool> {
         use xai_grok_tools::implementations::grok_build::{
             IMAGE_TO_VIDEO_TOOL_NAME, REFERENCE_TO_VIDEO_TOOL_NAME,
         };
+        if !xai_grok_product::IMAGINE_TOOLS_ALLOWED {
+            return Resolved::new(false, ConfigSource::BuildPolicy);
+        }
         if let Some(pinned) = self.requirements.video_gen.pinned() {
             return Resolved::new(pinned, ConfigSource::Requirement);
         }
