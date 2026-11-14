@@ -182,7 +182,7 @@ impl StreamDecoder {
                 .saturating_add(8);
             decoded.reserve(needed);
             let (_, read, _) = self.decoder.decode_to_string(remaining, &mut decoded, last);
-            remaining = &remaining[read..];
+            remaining = remaining.get(read..).unwrap_or(&[]);
             if remaining.is_empty() {
                 break;
             }
