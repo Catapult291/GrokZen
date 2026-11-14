@@ -915,10 +915,10 @@ fn hash_manifest_entry(
         if copied > entry.size() || copied > MAX_ENTRY_BYTES {
             anyhow::bail!("community release ZIP entry exceeded its declared size: {name}");
         }
-        hasher.update(&buffer[..read]);
+        hasher.update(buffer.get(..read).unwrap_or(&[]));
         if let Some(output) = output.as_mut() {
             output
-                .write_all(&buffer[..read])
+                .write_all(buffer.get(..read).unwrap_or(&[]))
                 .with_context(|| format!("writing extracted candidate {name}"))?;
         }
     }
@@ -1093,10 +1093,10 @@ fn hash_tar_entry<R: Read>(
         if copied > declared_size || copied > MAX_ENTRY_BYTES {
             anyhow::bail!("community release tar entry exceeded its declared size: {name}");
         }
-        hasher.update(&buffer[..read]);
+        hasher.update(buffer.get(..read).unwrap_or(&[]));
         if let Some(output) = output.as_mut() {
             output
-                .write_all(&buffer[..read])
+                .write_all(buffer.get(..read).unwrap_or(&[]))
                 .with_context(|| format!("writing extracted candidate {name}"))?;
         }
     }
@@ -1317,7 +1317,7 @@ fn extract_unix_package(
                 .checked_add(read as u64)
                 .ok_or_else(|| anyhow::anyhow!("community release tar padding overflow"))?;
             if padding_bytes > MAX_TAR_ZERO_PADDING_BYTES
-                || decoded_tail[..read].iter().any(|byte| *byte != 0)
+                || decoded_tail.get(..read).unwrap_or(&[]).iter().any(|byte| *byte != 0)
             {
                 anyhow::bail!("community release tar.gz contains trailing decoded data");
             }

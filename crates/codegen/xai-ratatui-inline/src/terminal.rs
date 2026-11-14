@@ -336,8 +336,9 @@ where
     /// otherwise omit the later widget from the physical terminal forever.
     fn normalize_current_buffer_wide_cells(&mut self) {
         let current = self.current;
-        let reset_indices = normalize_overwritten_wide_cells(&mut self.buffers[current]);
-        let link_ids = &mut self.link_ids[current];
+        let reset_indices =
+            normalize_overwritten_wide_cells(front_back_mut(&mut self.buffers, current).0);
+        let link_ids = front_back_mut(&mut self.link_ids, current).0;
         for index in reset_indices {
             if let Some(id) = link_ids.get_mut(index) {
                 *id = 0;
@@ -1088,7 +1089,11 @@ fn normalize_overwritten_wide_cells(buffer: &mut Buffer) -> Vec<usize> {
         let row_end = (row_start + row_width).min(buffer.content.len());
         let mut index = row_start;
         while index < row_end {
-            let symbol_width = buffer.content[index].symbol().width();
+            // index < row_end <= content.len(), so the lookup always succeeds.
+            let Some(lead) = buffer.content.get(index) else {
+                break;
+            };
+            let symbol_width = lead.symbol().width();
             if symbol_width <= 1 {
                 index += 1;
                 continue;
@@ -1096,11 +1101,14 @@ fn normalize_overwritten_wide_cells(buffer: &mut Buffer) -> Vec<usize> {
 
             let continuation_end = index.saturating_add(symbol_width).min(row_end);
             let is_clipped = index.saturating_add(symbol_width) > row_end;
-            let is_overwritten = buffer.content[index + 1..continuation_end]
-                .iter()
-                .any(|cell| cell.symbol() != " ");
+            let is_overwritten = buffer
+                .content
+                .get(index + 1..continuation_end)
+                .is_some_and(|cells| cells.iter().any(|cell| cell.symbol() != " "));
             if is_clipped || is_overwritten {
-                buffer.content[index].reset();
+                if let Some(lead) = buffer.content.get_mut(index) {
+                    lead.reset();
+                }
                 reset_indices.push(index);
                 index += 1;
             } else {
