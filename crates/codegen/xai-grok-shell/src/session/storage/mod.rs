@@ -753,7 +753,8 @@ impl UpdatesIterator {
                     "session update line exceeds the 64 MiB safety limit",
                 ));
             }
-            self.line_buffer.extend_from_slice(&available[..take]);
+            self.line_buffer
+                .extend_from_slice(available.get(..take).unwrap_or(&[]));
             self.reader.consume(take);
             if newline.is_some() {
                 return Ok(self.line_buffer.len());
