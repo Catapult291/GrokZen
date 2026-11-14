@@ -23,9 +23,6 @@ fn note_text(locale: &crate::locale::LocaleContext, id: &str, english: &str) -> 
 }
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use xai_grok_feedback::{
-    FeedbackDraftStore, FeedbackSource, FeedbackTaxonomy, derive_title, structured_feedback,
-};
 
 /// Monotonic counter for correlating async rewrite responses with the modal that requested them.
 /// It prevents stale results from populating a different note's review modal when the user closes and re-opens quickly.

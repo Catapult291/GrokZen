@@ -83,7 +83,7 @@ async fn minimal_parked_plan_commits_to_scrollback() {
         duplicated(&mut harness, "ONE"),
     );
 
-    // ── revise: `s` focuses the feedback input, Enter sends it ──
+    // ── revise: `s` focuses the revision input, Enter sends it ──
     harness.inject_keys(b"s").expect("request changes");
     harness.update(Duration::from_millis(400));
     let _second = park_plan(
