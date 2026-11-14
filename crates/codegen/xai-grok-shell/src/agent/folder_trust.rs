@@ -375,9 +375,11 @@ fn resolve_trust_prompt_locale(
 }
 
 fn cli_locale_arg(args: &[String]) -> Option<&str> {
-    args.windows(2)
-        .find_map(|pair| (pair[0] == "--locale").then_some(pair[1].as_str()))
-        .or_else(|| args.iter().find_map(|arg| arg.strip_prefix("--locale=")))
+    args.windows(2).find_map(|pair| match pair {
+        [flag, value] if flag == "--locale" => Some(value.as_str()),
+        _ => None,
+    })
+    .or_else(|| args.iter().find_map(|arg| arg.strip_prefix("--locale=")))
 }
 
 /// Full prompt text; the question has no trailing newline so the answer is typed on the same line.
