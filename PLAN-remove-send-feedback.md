@@ -133,11 +133,12 @@
   - **测试支撑**：pty harness 与 test-support 的 mock `POST /v1/feedback` 端点（评分链路仍在用）。
   - **telemetry**：`xai-grok-telemetry/events/feedback.rs`、`events/consent.rs` 中反馈弹窗/trace 卡事件定义已无发射方。
 
-### 步骤 8：提交
-- [ ] 工作树内 `git add -A && git commit`（信息建议：`feat: 删除 send_feedback 工具与 /feedback 反馈弹窗`）
+### 步骤 8：提交 ✅（已完成）
+- [x] 工作树内 `git add -A && git commit`（信息建议：`feat: 删除 send_feedback 工具与 /feedback 反馈弹窗`）——分支共 4 个提交（55259565、e30981b8、e9f9ca9d、76f2e70a）
 
 ## 进度日志
 
+- 2026-11-14（会话 5）：分支已合并入 `zh-dev`（主工作区直接 `git merge remove-send-feedback`，ort 策略自动合并，无冲突）。合并后 `cargo check` 全 workspace 通过。分支使命完成，worktree `GrokZen-wt-feedback` 可择期移除。
 - 2026-11-14（会话 4）：完成步骤 7。`cargo check --workspace --all-targets` 全绿；pager/agent/tools 测试除 2 个 Windows 平台预存在失败外全通过（pager lib 10404 通过）。shell 套件按计划运行：31 个 lib 测试 + 15 个集成目标失败，全部落在未改动模块，根因是社区版关闭 `AccountLogin` 与 Windows 平台差异（无登录存储、无内置模型目录、cgroup/路径断言），已逐类记录在步骤 7。顺带清掉 5 个遗漏的 feedback 测试，并把 plan.rs 里 4 个用例的 `/feedback` 换成 `/btw`；修复 hero 副标题与中文 locale 回退。`cargo fmt --all` 在本机报路径过长，改为按包 fmt。测试编译一度因 C 盘仅剩 24 GB 失败（页面文件/mmap 报错），清理两处 `target/debug/incremental`（约 126 GB）后恢复。
 - 2026-11-14（会话 1）：完成步骤 1-3（tools/agent/shell 全绿）；步骤 4 lib 编译通过；步骤 5 已完成错误盘点（上表）。计划文档落盘 `PLAN-remove-send-feedback.md`。中途踩过的坑：`paste.rs` 曾误删 `take_deferred_send_after_paste`/`resume_deferred_send`/`try_handle_wrap_host_image_paste`/`route_popup_paste`（已从 git HEAD 恢复）；`task_result.rs` 曾误删 `if let Some(mut old_qv)` 行导致括号错配（已修）；`notes.rs` 曾误删 remember 函数群（已从原文件恢复）。
 - 2026-11-14（会话 3）：完成步骤 6。pty harness 删 6 个 feedback e2e 文件（顶层 2 + minimal 4）+ mod 注册，`plan_overlay_slash_runs_command.rs` 改用 `/rename` 驱动，`common.rs` 删 6 个 feedback 辅助；连带发现并清理 `xai-grok-pager-minimal` 的 feedback 渲染层（`src/feedback.rs` 等 5 处，步骤 4 删 `views::feedback_modal` 后该 crate 必然编译不过）；workspace hub_gate 测试表、locale 121 键、pager 死 import 与 Cargo 依赖一并处理。步骤 7 的 `cargo check --workspace --all-targets` 已提前全绿（其中修掉 `mvp_agent/tests.rs` 全文件行号前缀损坏）。
