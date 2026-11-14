@@ -53,6 +53,18 @@ pub use image_gen::{
     IMAGE_GEN_TOOL_NAME, IMAGINE_COMMAND_NAME, ImageGenTool, imagine_instruction,
     imagine_usage_message,
 };
+
+/// Fully qualified ids of every xAI Imagine media tool, in toolset order.
+/// The `AgentBuilder` build-policy filter retains against this list, so a new
+/// Imagine tool must be added here (and to [`image_gen`] toolset helpers) or it
+/// would survive the cut.
+pub const IMAGINE_TOOL_IDS: &[&str] = &[
+    "GrokBuild:image_gen",
+    "GrokBuild:image_edit",
+    "GrokBuild:image_to_video",
+    "GrokBuild:reference_to_video",
+];
+
 pub use init_or_update_app::INIT_OR_UPDATE_APP_TOOL_NAME;
 pub use kill_task::{KillTaskTool, KillTerminalCommandTool};
 pub use list_agents::{LIST_AGENTS_TOOL_NAME, ListAgentsTool};
