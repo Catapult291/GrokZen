@@ -41,16 +41,20 @@ fn partial_tail<'a>(text: &'a str, marker: &str) -> &'a str {
     let bytes = marker.as_bytes();
     (1..bytes.len())
         .rev()
-        .find(|&len| text.ends_with(&marker[..len]))
-        .map(|len| &text[text.len() - len..])
+        .find(|&len| text.ends_with(marker.get(..len).unwrap_or("")))
+        .and_then(|len| text.get(text.len() - len..))
         .unwrap_or_default()
 }
 
 fn straddles(probe: &str, chunk: &str, marker: &str) -> bool {
     let marker = marker.as_bytes();
     (1..marker.len()).any(|split| {
-        probe.as_bytes().ends_with(&marker[..split])
-            && chunk.as_bytes().starts_with(&marker[split..])
+        probe
+            .as_bytes()
+            .ends_with(marker.get(..split).unwrap_or(&[]))
+            && chunk
+                .as_bytes()
+                .starts_with(marker.get(split..).unwrap_or(&[]))
     })
 }
 
@@ -183,7 +187,7 @@ fn find_start(text: &str, from: usize, fenced: &[bool]) -> Option<usize> {
     let mut best: Option<usize> = None;
     for marker in START_MARKERS {
         let mut search = from;
-        while let Some(offset) = text[search..].find(marker) {
+        while let Some(offset) = text.get(search..).and_then(|rest| rest.find(marker)) {
             let index = search + offset;
             if !fenced.get(index).copied().unwrap_or(false) {
                 best = Some(best.map_or(index, |current: usize| current.min(index)));
@@ -314,8 +318,14 @@ fn fenced_bytes(text: &str) -> Vec<bool> {
         if indent <= 3 {
             if let Some((ch, len)) = fence {
                 let run = bytes.iter().take_while(|b| **b == ch).count();
-                if run >= len && trimmed[run..].trim().is_empty() {
-                    mask[line_start..line_end].fill(true);
+                if run >= len
+                    && trimmed
+                        .get(run..)
+                        .is_some_and(|rest| rest.trim().is_empty())
+                {
+                    if let Some(slot) = mask.get_mut(line_start..line_end) {
+                        slot.fill(true);
+                    }
                     fence = None;
                     line_start = line_end;
                     continue;
@@ -325,15 +335,19 @@ fn fenced_bytes(text: &str) -> Vec<bool> {
             {
                 let run = bytes.iter().take_while(|b| **b == ch).count();
                 if run >= 3 {
-                    mask[line_start..line_end].fill(true);
+                    if let Some(slot) = mask.get_mut(line_start..line_end) {
+                        slot.fill(true);
+                    }
                     fence = Some((ch, run));
                     line_start = line_end;
                     continue;
                 }
             }
         }
-        if fence.is_some() {
-            mask[line_start..line_end].fill(true);
+        if fence.is_some()
+            && let Some(slot) = mask.get_mut(line_start..line_end)
+        {
+            slot.fill(true);
         }
         line_start = line_end;
     }
