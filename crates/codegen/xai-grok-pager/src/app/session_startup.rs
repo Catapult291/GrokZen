@@ -132,8 +132,13 @@ pub fn fork_session_params(
             );
         }
     }
-    if let Some(target) = target_prompt_index {
-        payload["targetPromptIndex"] = serde_json::Value::from(target);
+    if let Some(obj) = payload.as_object_mut() {
+        if let Some(target) = target_prompt_index {
+            obj.insert(
+                "targetPromptIndex".into(),
+                serde_json::Value::from(target),
+            );
+        }
     }
     payload
 }

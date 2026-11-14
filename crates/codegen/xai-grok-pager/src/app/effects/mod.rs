@@ -415,16 +415,27 @@ pub(crate) fn execute(
                         "copyMode": copy_mode,
                         "worktreeType": wt_type,
                     });
-                        if let Some(rc) = restore_code {
-                            payload["restoreCode"] = serde_json::Value::Bool(rc);
-                        }
-                        if let Some(ref r) = spec.git_ref {
-                            payload["gitRef"] = serde_json::Value::String(r.clone());
-                        }
-                        // `/fork` with a fork point: the shell copies the parent conversation only
-                        // up to this prompt, exactly like the `x.ai/session/fork` payload.
-                        if let Some(target) = target_prompt_index {
-                            payload["targetPromptIndex"] = serde_json::Value::from(target);
+                        if let Some(obj) = payload.as_object_mut() {
+                            if let Some(rc) = restore_code {
+                                obj.insert(
+                                    "restoreCode".into(),
+                                    serde_json::Value::Bool(rc),
+                                );
+                            }
+                            if let Some(ref r) = spec.git_ref {
+                                obj.insert(
+                                    "gitRef".into(),
+                                    serde_json::Value::String(r.clone()),
+                                );
+                            }
+                            // `/fork` with a fork point: the shell copies the parent conversation only
+                            // up to this prompt, exactly like the `x.ai/session/fork` payload.
+                            if let Some(target) = target_prompt_index {
+                                obj.insert(
+                                    "targetPromptIndex".into(),
+                                    serde_json::Value::from(target),
+                                );
+                            }
                         }
                         let ext_req = acp::ExtRequest::new(
                             "x.ai/git/worktree/resume_session",
