@@ -2198,15 +2198,6 @@ fn tool_call_to_block_with_locale(
                     block.content = Some(sources_list.join("\n"));
                 }
             } else {
-                if let Some(ref raw) = tc.raw_output
-                    && let Ok(ToolOutput::WebSearch(ws)) =
-                        serde_json::from_value::<ToolOutput>(raw.clone())
-                {
-                    if !ws.content.is_empty() {
-                        block.content = Some(ws.content);
-                    }
-                    block.citations = ws.citations;
-                }
                 if success && block.content.is_none() {
                     let text = content_text(tc);
                     if !text.is_empty() {

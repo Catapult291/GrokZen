@@ -70,7 +70,6 @@ impl From<&crate::types::ToolInput> for AccessKind {
             ToolInput::SendSubagentMessage(message) => AccessKind::AgentMessage {
                 subagent_id: message.subagent_id.clone(),
             },
-            ToolInput::WebSearch(ws) => AccessKind::WebSearch(ws.query.clone()),
             ToolInput::SearchReplace(search_replace) => {
                 AccessKind::Edit(search_replace.file_path.to_string())
             }
@@ -298,20 +297,6 @@ mod tests {
         assert!(
             matches!(access, AccessKind::WebFetch(ref u) if u == "https://custom.example.com/api"),
             "WebFetch should produce AccessKind::WebFetch with the URL, got {access:?}"
-        );
-    }
-    #[test]
-    fn web_search_maps_to_web_search_access() {
-        use crate::implementations::grok_build::web_search::WebSearchInput;
-        use crate::types::ToolInput;
-        let input = ToolInput::WebSearch(WebSearchInput {
-            query: "rust lang".into(),
-            allowed_domains: None,
-        });
-        let access = AccessKind::from(&input);
-        assert!(
-            matches!(access, AccessKind::WebSearch(ref q) if q == "rust lang"),
-            "WebSearch should produce AccessKind::WebSearch with the query, got {access:?}"
         );
     }
     /// The patch text names its files; no grant scope can vouch for them, so a patch prompts every time.

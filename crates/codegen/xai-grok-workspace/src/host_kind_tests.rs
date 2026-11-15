@@ -14,16 +14,14 @@ use std::sync::Arc;
 use xai_computer_hub_sdk::{AuthCredential, SharedAuthProvider};
 use xai_grok_tools::implementations::grok_build::image_gen::ImageGenClient;
 use xai_grok_tools::implementations::grok_build::video_gen::VideoGenClient;
-use xai_grok_tools::implementations::web_search::WebSearchConfig;
-use xai_grok_tools::implementations::web_search::client::WebSearchClient;
 use xai_grok_tools::registry::types::{FinalizedToolset, ToolServerConfig};
 use xai_tool_protocol::SessionId;
 /// The tools a hub-only host must not offer: each one calls the API with the server's own credential.
 /// The Imagine three are additionally cut from BOTH catalogs by the product build policy
 /// (`xai_grok_product::IMAGINE_TOOLS_ALLOWED == false`: the community distribution has no
-/// Imagine credentials), so `web_search` is the only API-backed tool that still appears in
-/// the sandbox catalog to be daemon-diffed.
-const API_BACKED_TOOLS: &[&str] = &["web_search"];
+/// Imagine credentials); the API-backed `web_search` tool has been removed outright, so no
+/// API-backed tool appears in any catalog anymore.
+const API_BACKED_TOOLS: &[&str] = &[];
 /// The Imagine tools the build policy removes everywhere; both catalogs must lack them.
 const IMAGINE_TOOLS: &[&str] = &[
     "image_gen",
@@ -131,11 +129,6 @@ async fn only_a_sandbox_session_carries_the_credential() {
         assert_eq!(expected, ctx.auth_provider.is_some(), "{host:?}");
         assert_eq!(expected, ctx.image_gen_config.has_credentials(), "{host:?}");
         assert_eq!(expected, ctx.video_gen_config.is_enabled(), "{host:?}");
-        assert_eq!(
-            expected,
-            matches!(ctx.web_search_config, WebSearchConfig::Enabled { .. }),
-            "{host:?}"
-        );
         let toolset = session_for(host).await;
         let resources = toolset.resources.lock().await;
         assert_eq!(
@@ -145,11 +138,6 @@ async fn only_a_sandbox_session_carries_the_credential() {
         );
         assert_eq!(expected, resources.contains::<ImageGenClient>(), "{host:?}");
         assert_eq!(expected, resources.contains::<VideoGenClient>(), "{host:?}");
-        assert_eq!(
-            expected,
-            resources.contains::<WebSearchClient>(),
-            "{host:?}"
-        );
     }
 }
 /// Run `test` against everything `connect_local_workspace` builds for `host` short of the hub
@@ -209,25 +197,15 @@ fn a_daemon_host_serves_pinned_toolsets_only_and_can_neither_upload_nor_deploy()
         let resolver = bind_resolver_fixture(&handle);
         let served = resolver(
             SessionId::new("daemon-pinned").unwrap(),
-            Some(pinned(&[
-                "GrokBuild:read_file",
-                "GrokBuild:web_search",
-                "GrokBuild:image_gen",
-            ])),
+            Some(pinned(&["GrokBuild:read_file", "GrokBuild:image_gen"])),
         )
         .await
         .expect("a pinned bind is served");
         let names = handler_names(&served);
         assert!(names.iter().any(|n| n == "read_file"), "{names:?}");
-        assert!(
-            !names.iter().any(|n| n == "web_search" || n == "image_gen"),
-            "{names:?}"
-        );
+        assert!(!names.iter().any(|n| n == "image_gen"), "{names:?}");
         assert_eq!(
-            vec![
-                "GrokBuild:image_gen".to_owned(),
-                "GrokBuild:web_search".to_owned()
-            ],
+            vec!["GrokBuild:image_gen".to_owned()],
             served.unserved_tool_ids
         );
         assert_eq!(None, served.resolve_error);
@@ -258,22 +236,19 @@ fn a_sandbox_host_keeps_uploads_the_credential_and_lax_binds() {
         let resolver = bind_resolver_fixture(&handle);
         let served = resolver(
             SessionId::new("sandbox-pinned").unwrap(),
-            Some(pinned(&["GrokBuild:read_file", "GrokBuild:web_search"])),
+            Some(pinned(&["GrokBuild:read_file", "GrokBuild:image_gen"])),
         )
         .await
         .expect("bind");
         let names = handler_names(&served);
-        assert!(names.iter().any(|n| n == "web_search"), "{names:?}");
+        assert!(names.iter().any(|n| n == "image_gen"), "{names:?}");
         assert!(served.unserved_tool_ids.is_empty());
         assert_eq!(None, served.resolve_error);
         let widened = resolver(SessionId::new("sandbox-unpinned").unwrap(), None)
             .await
             .expect("bind");
         let names = handler_names(&widened);
-        assert!(
-            names.iter().any(|n| n == "web_search") && names.iter().any(|n| n == "read_file"),
-            "{names:?}"
-        );
+        assert!(names.iter().any(|n| n == "read_file"), "{names:?}");
         assert_eq!(None, widened.resolve_error);
     });
 }

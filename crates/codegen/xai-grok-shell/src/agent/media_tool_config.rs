@@ -44,7 +44,6 @@ pub fn load_media_tool_config(
         remote_settings,
         is_headless: config.mode == AgentMode::Headless,
         cli_subagents: None,
-        cli_web_search_model: None,
         cli_session_summary_model: None,
         memory_enabled_override: None,
         disable_web_search: false,

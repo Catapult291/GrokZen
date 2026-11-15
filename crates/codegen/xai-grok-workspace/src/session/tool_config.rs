@@ -452,11 +452,10 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
         use xai_grok_tools::implementations::grok_build::app_builder::AppBuilderDeployerConfig;
         use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
         use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
-        use xai_grok_tools::implementations::web_search::WebSearchConfig;
         let fs = Arc::new(xai_grok_tools::computer::local::LocalFs)
             as Arc<dyn xai_grok_tools::computer::types::AsyncFileSystem>;
         let notification_handle = xai_grok_tools::notification::ToolNotificationHandle::noop();
-        let (image_gen_config, video_gen_config, web_search_config, app_builder_deployer_config) =
+        let (image_gen_config, video_gen_config, app_builder_deployer_config) =
             if let (Some(auth), Some(url)) = (&self.auth, &self.api_base_url) {
                 let cred = auth.current();
                 match cred {
@@ -481,22 +480,12 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
                                 tier_restricted: false,
                                 zdr_restricted: false,
                             },
-                            WebSearchConfig::Enabled {
-                                api_key: token,
-                                base_url: url.clone(),
-                                model: default_web_search_model(),
-                                extra_headers: headers,
-                                alpha_test_key: None,
-                                allowed_domains: None,
-                                excluded_domains: None,
-                            },
                             AppBuilderDeployerConfig::default(),
                         )
                     }
                     _ => (
                         ImageGenConfig::default(),
                         VideoGenConfig::default(),
-                        WebSearchConfig::default(),
                         AppBuilderDeployerConfig::default(),
                     ),
                 }
@@ -504,7 +493,6 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
                 (
                     ImageGenConfig::default(),
                     VideoGenConfig::default(),
-                    WebSearchConfig::default(),
                     AppBuilderDeployerConfig::default(),
                 )
             };
@@ -521,7 +509,6 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
             skills: vec![],
             state_path: self.resolve_state_path(session_id),
             memory_backend: None,
-            web_search_config,
             web_fetch_config: build_web_fetch_config(),
             lsp: None,
             image_gen_config,
@@ -595,9 +582,6 @@ fn build_web_fetch_config() -> xai_grok_tools::implementations::grok_build::web_
         params.allow_local = Some(true);
     }
     WebFetchConfig::Enabled { params }
-}
-fn default_web_search_model() -> String {
-    std::env::var("GROK_WEB_SEARCH_MODEL").unwrap_or_else(|_| "grok-4.5".to_string())
 }
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
@@ -678,7 +662,6 @@ pub mod test_support {
                     PathBuf::new()
                 },
                 memory_backend: None,
-                web_search_config: Default::default(),
                 web_fetch_config: Default::default(),
                 lsp: None,
                 image_gen_config: Default::default(),

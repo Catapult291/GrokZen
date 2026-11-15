@@ -273,12 +273,6 @@ pub(crate) fn acp_tool_update(
                 )]))
                 .raw_output(raw_output_json(output, rewriter)),
         )),
-        ToolOutput::WebSearch(_) => Some(acp::ToolCallUpdate::new(
-            acp::ToolCallId::new(Arc::from(tool_call_id)),
-            acp::ToolCallUpdateFields::new()
-                .status(Some(acp::ToolCallStatus::Completed))
-                .raw_output(raw_output_json(output, rewriter)),
-        )),
         // Web fetch output is converted to text content for the model.
         // Success (Content) maps to Completed; errors (DomainNotAllowed, CrossHostRedirect) map to Failed
         // This matches the pattern used by ReadFile, ListDir, and SearchReplace.

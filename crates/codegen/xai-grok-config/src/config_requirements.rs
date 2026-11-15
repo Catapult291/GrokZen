@@ -67,8 +67,6 @@ pub struct ModelRequirements {
     pub allowed_models: Option<AllowlistPin>,
     #[serde(default, rename = "default", deserialize_with = "de_string")]
     pub default_model: Option<String>,
-    #[serde(default, deserialize_with = "de_string")]
-    pub web_search: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -226,20 +224,6 @@ impl RequirementsToml {
             pins.managed_mcps_enabled,
             self.managed_mcps.enabled,
             "managed_mcps.enabled",
-            push,
-        );
-    }
-
-    pub fn enforce_web_search(
-        &self,
-        web_search: &mut Option<String>,
-        push: &mut impl FnMut(&'static str, String),
-    ) {
-        write_text(
-            web_search,
-            self.models.web_search.as_deref(),
-            "models.web_search",
-            false,
             push,
         );
     }

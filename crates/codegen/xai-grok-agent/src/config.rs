@@ -166,7 +166,6 @@ pub fn workspace_grok_build_toolset() -> ToolServerConfig {
     tools.push((&grok_build::EnterPlanModeTool).into());
     tools.push((&grok_build::ExitPlanModeTool).into());
     tools.push((&grok_build::AskUserQuestionTool).into());
-    tools.push((&grok_build::WebSearchTool).into());
     tools.extend(imagine_tool_configs());
     tools.push((&grok_build::WebFetchTool).into());
     tools.push((&memory::search_tool::MemorySearchImpl).into());
@@ -186,8 +185,10 @@ pub fn workspace_grok_build_toolset() -> ToolServerConfig {
 /// A server whose credential only serves the hub cannot run them, so it neither advertises nor serves them.
 pub fn api_backed_tool_ids() -> Vec<String> {
     #[allow(unused_mut)]
-    let mut ids = vec![ToolConfig::from(&grok_build::WebSearchTool).id];
-    ids.extend(imagine_tool_configs().iter().map(|tc| tc.id.clone()));
+    let ids = imagine_tool_configs()
+        .iter()
+        .map(|tc| tc.id.clone())
+        .collect::<Vec<_>>();
     ids
 }
 /// Toolset for the `grok-computer` (workspace/sandbox) preset.
@@ -346,7 +347,6 @@ pub fn grok_build_hashline_toolset(
         task_output_tool_config(),
         wait_tasks_tool_config(),
         task_tool_config(),
-        (&grok_build::WebSearchTool).into(),
         (&grok_build::SchedulerCreateTool).into(),
         (&grok_build::SchedulerDeleteTool).into(),
         (&grok_build::SchedulerListTool).into(),
@@ -502,7 +502,6 @@ fn orchestrator_toolset() -> ToolServerConfig {
             (&grok_build::SchedulerListTool).into(),
             (&grok_build::MonitorTool).into(),
             // Web tools
-            (&grok_build::WebSearchTool).into(),
             (&grok_build::WebFetchTool).into(),
         ]
         .into_iter()

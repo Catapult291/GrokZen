@@ -458,7 +458,7 @@ fn resolve_runtime_fields_propagates_disable_zdr_incompatible_tools() {
             remote_settings: None,
             is_headless: false,
             cli_subagents: None,
-            cli_web_search_model: None,
+
             cli_session_summary_model: None,
             memory_enabled_override: None,
             disable_web_search: false,
@@ -513,7 +513,7 @@ fn resolve_runtime_fields_propagates_disable_web_search() {
             remote_settings: None,
             is_headless: true,
             cli_subagents: None,
-            cli_web_search_model: None,
+
             cli_session_summary_model: None,
             memory_enabled_override: None,
             disable_web_search,
@@ -535,14 +535,9 @@ fn resolve_runtime_fields_propagates_disable_web_search() {
     assert!(cfg.disable_web_search);
 }
 #[test]
-fn new_from_toml_cfg_restores_web_search_and_session_summary_models() {
+fn new_from_toml_cfg_restores_session_summary_models() {
     let empty: toml::Value = toml::Value::Table(toml::map::Map::new());
     let cfg = Config::new_from_toml_cfg(&empty).expect("empty config should parse");
-    assert_eq!(
-        cfg.web_search_model,
-        crate::models::default_web_search_model(),
-        "empty config should produce the compiled-in default web_search model"
-    );
     assert_eq!(
         cfg.session_summary_model,
         Some(crate::models::default_session_summary_model().to_owned()),
@@ -556,14 +551,12 @@ fn new_from_toml_cfg_restores_web_search_and_session_summary_models() {
     let with_overrides: toml::Value = toml::from_str(
         r#"
             [models]
-            web_search = "custom-ws-model"
             session_summary = "custom-ss-model"
             image_description = "custom-id-model"
             "#,
     )
     .unwrap();
     let cfg2 = Config::new_from_toml_cfg(&with_overrides).expect("config should parse");
-    assert_eq!(cfg2.web_search_model, "custom-ws-model");
     assert_eq!(
         cfg2.session_summary_model,
         Some("custom-ss-model".to_owned())
@@ -571,28 +564,6 @@ fn new_from_toml_cfg_restores_web_search_and_session_summary_models() {
     assert_eq!(
         cfg2.image_description_model,
         Some("custom-id-model".to_owned())
-    );
-}
-#[test]
-fn hidden_default_web_search_resolution_is_explicit_and_responses_only() {
-    let endpoints = EndpointsConfig::default();
-    let resolved = resolve_web_search_sampling_config(
-        crate::models::default_web_search_model(),
-        &IndexMap::new(),
-        Some("session-token"),
-        false,
-        None,
-        None,
-        &endpoints,
-    )
-    .expect("hidden default web search model should resolve");
-    assert_eq!(resolved.model, crate::models::default_web_search_model());
-    assert_eq!(resolved.base_url, endpoints.proxy_url());
-    assert_eq!(resolved.api_backend, ApiBackend::Responses);
-    assert_eq!(
-        resolved.api_key.as_deref(),
-        Some("session-token"),
-        "hidden default should still use normal credential resolution"
     );
 }
 #[test]
@@ -743,50 +714,6 @@ fn session_resolver_is_not_stamped_onto_third_party_samplers() {
             .map(|id| id.as_ref()),
         Some("root-group")
     );
-}
-/// A cold cache disables web search rather than sending an unauthenticated request.
-#[tokio::test]
-async fn web_search_with_auth_provider_requires_warm_cache() {
-    let endpoints = EndpointsConfig::default();
-    let provider = xai_grok_login::AuthProviderRef::new(
-        "web-search-provider-test".into(),
-        xai_grok_login::AuthProviderConfig {
-            command: "printf ws-token".into(),
-            args: None,
-            token_ttl_secs: Some(3600),
-            timeout_secs: None,
-            cwd: None,
-        },
-    );
-    let mut entry = test_model_entry("m", "https://litellm.example/v1", None, None, None);
-    entry.auth_provider = Some(provider.clone());
-    let mut catalog = IndexMap::new();
-    catalog.insert("proxied-search".to_string(), entry);
-    assert!(
-        resolve_web_search_sampling_config(
-            "proxied-search",
-            &catalog,
-            Some("session-jwt"),
-            false,
-            None,
-            None,
-            &endpoints,
-        )
-        .is_none(),
-        "a cold provider cache must disable web search, not send an unauthenticated request"
-    );
-    let _ = provider.ensure_fresh_token(None).await;
-    let resolved = resolve_web_search_sampling_config(
-        "proxied-search",
-        &catalog,
-        Some("session-jwt"),
-        false,
-        None,
-        None,
-        &endpoints,
-    )
-    .expect("warm cache resolves");
-    assert_eq!(resolved.api_key.as_deref(), Some("ws-token"));
 }
 /// Bad `[mcp_servers.*]` entries are dropped, not fatal.
 #[test]
@@ -979,36 +906,6 @@ fn shell_environment_policy_known_keys_track_the_policy_struct() {
         set: _,
         include_only: _,
     } = ShellEnvironmentPolicyKnownKeys::default();
-}
-#[test]
-fn web_search_disable_api_key_auth_swaps_first_party_key_for_session() {
-    let endpoints = EndpointsConfig::default();
-    let mut models = IndexMap::new();
-    models.insert(
-        "ws-model".to_string(),
-        test_model_entry(
-            "ws-model",
-            "https://api.x.ai/v1",
-            Some("first-party-key"),
-            None,
-            None,
-        ),
-    );
-    let resolved = resolve_web_search_sampling_config(
-        "ws-model",
-        &models,
-        Some("session-token"),
-        true,
-        None,
-        None,
-        &endpoints,
-    )
-    .expect("web search model should resolve");
-    assert_eq!(
-        resolved.api_key.as_deref(),
-        Some("session-token"),
-        "first-party API key must be swapped for the session token when disabled"
-    );
 }
 #[test]
 fn parses_model_api_key() {
@@ -7018,7 +6915,6 @@ fn clear_runtime_env_vars() {
     unsafe {
         std::env::remove_var("GROK_SUBAGENTS");
         std::env::remove_var("GROK_RESPECT_GITIGNORE");
-        std::env::remove_var("GROK_WEB_SEARCH_MODEL");
         std::env::remove_var("GROK_SESSION_SUMMARY_MODEL");
         std::env::remove_var("GROK_CURSOR_SKILLS_ENABLED");
         std::env::remove_var("GROK_CURSOR_RULES_ENABLED");
@@ -7060,7 +6956,7 @@ fn resolve_runtime_fields_compat_asymmetric_sources() {
         remote_settings: Some(&remote),
         is_headless: false,
         cli_subagents: None,
-        cli_web_search_model: None,
+
         cli_session_summary_model: None,
         memory_enabled_override: None,
         disable_web_search: false,
@@ -7084,7 +6980,7 @@ fn resolve_runtime_fields_interactive_defaults() {
         remote_settings: None,
         is_headless: false,
         cli_subagents: None,
-        cli_web_search_model: None,
+
         cli_session_summary_model: None,
         memory_enabled_override: None,
         disable_web_search: false,
@@ -7096,10 +6992,6 @@ fn resolve_runtime_fields_interactive_defaults() {
     assert!(!cfg.respect_gitignore);
     assert!(cfg.managed_mcps_enabled);
     assert!(!cfg.managed_mcp_gateway_tools_enabled);
-    assert_eq!(
-        cfg.web_search_model,
-        crate::models::default_web_search_model()
-    );
     assert_eq!(
         cfg.session_summary_model,
         Some(crate::models::default_session_summary_model().to_owned())
@@ -7118,7 +7010,7 @@ fn resolve_runtime_fields_headless_defaults() {
         remote_settings: None,
         is_headless: true,
         cli_subagents: None,
-        cli_web_search_model: None,
+
         cli_session_summary_model: None,
         memory_enabled_override: None,
         disable_web_search: false,
@@ -7148,7 +7040,7 @@ fn resolve_runtime_fields_managed_gateway_tools_from_remote() {
         remote_settings: Some(&remote),
         is_headless: false,
         cli_subagents: None,
-        cli_web_search_model: None,
+
         cli_session_summary_model: None,
         memory_enabled_override: None,
         disable_web_search: false,
@@ -7169,7 +7061,7 @@ fn resolve_runtime_fields_subagents_from_config() {
         remote_settings: None,
         is_headless: false,
         cli_subagents: None,
-        cli_web_search_model: None,
+
         cli_session_summary_model: None,
         memory_enabled_override: None,
         disable_web_search: false,
@@ -7190,7 +7082,7 @@ fn resolve_runtime_fields_cli_subagents_override() {
         remote_settings: None,
         is_headless: false,
         cli_subagents: Some(true),
-        cli_web_search_model: None,
+
         cli_session_summary_model: None,
         memory_enabled_override: None,
         disable_web_search: false,
@@ -7211,7 +7103,7 @@ fn resolve_runtime_fields_cli_no_subagents_disables_over_config() {
         remote_settings: None,
         is_headless: false,
         cli_subagents: Some(false),
-        cli_web_search_model: None,
+
         cli_session_summary_model: None,
         memory_enabled_override: None,
         disable_web_search: false,
@@ -7233,7 +7125,7 @@ fn resolve_runtime_fields_partial_subagents_table_stays_enabled() {
         remote_settings: None,
         is_headless: true,
         cli_subagents: None,
-        cli_web_search_model: None,
+
         cli_session_summary_model: None,
         memory_enabled_override: None,
         disable_web_search: false,
@@ -7256,7 +7148,7 @@ fn resolve_runtime_fields_gitignore_from_env() {
         remote_settings: None,
         is_headless: false,
         cli_subagents: None,
-        cli_web_search_model: None,
+
         cli_session_summary_model: None,
         memory_enabled_override: None,
         disable_web_search: false,
@@ -7278,7 +7170,7 @@ fn resolve_runtime_fields_model_overrides_from_cli() {
         remote_settings: None,
         is_headless: false,
         cli_subagents: None,
-        cli_web_search_model: Some("custom-ws"),
+
         cli_session_summary_model: Some("custom-ss"),
         memory_enabled_override: None,
         disable_web_search: false,
@@ -7286,7 +7178,6 @@ fn resolve_runtime_fields_model_overrides_from_cli() {
         laziness_debug_log: None,
         storage_mode: None,
     });
-    assert_eq!(cfg.web_search_model, "custom-ws");
     assert_eq!(cfg.session_summary_model, Some("custom-ss".to_owned()));
 }
 #[test]
@@ -7304,7 +7195,7 @@ fn resolve_runtime_fields_path_hints_from_remote() {
         remote_settings: Some(&remote),
         is_headless: false,
         cli_subagents: None,
-        cli_web_search_model: None,
+
         cli_session_summary_model: None,
         memory_enabled_override: None,
         disable_web_search: false,
@@ -7325,7 +7216,7 @@ fn resolve_runtime_fields_idempotent() {
         remote_settings: None,
         is_headless: false,
         cli_subagents: None,
-        cli_web_search_model: None,
+
         cli_session_summary_model: None,
         memory_enabled_override: None,
         disable_web_search: false,
@@ -7337,12 +7228,10 @@ fn resolve_runtime_fields_idempotent() {
     let first_subagents = cfg.subagents_enabled;
     let first_gitignore = cfg.respect_gitignore;
     let first_mcps = cfg.managed_mcps_enabled;
-    let first_ws = cfg.web_search_model.clone();
     cfg.resolve_runtime_fields(&ctx);
     assert_eq!(cfg.subagents_enabled, first_subagents);
     assert_eq!(cfg.respect_gitignore, first_gitignore);
     assert_eq!(cfg.managed_mcps_enabled, first_mcps);
-    assert_eq!(cfg.web_search_model, first_ws);
 }
 #[test]
 fn telemetry_mode_toml_roundtrip() {

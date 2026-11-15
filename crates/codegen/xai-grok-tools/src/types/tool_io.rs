@@ -31,7 +31,6 @@ use crate::implementations::grok_build::todo::TodoWriteInput;
 use crate::implementations::grok_build::update_goal::UpdateGoalInput;
 use crate::implementations::grok_build::video_gen::{ImageToVideoInput, ReferenceToVideoInput};
 use crate::implementations::grok_build::web_fetch::WebFetchInput;
-use crate::implementations::grok_build::web_search::WebSearchInput;
 use crate::implementations::lsp::LspToolInput;
 use crate::implementations::memory::types::{MemoryGetInput, MemorySearchInput};
 use crate::implementations::opencode::write::WriteInput;
@@ -72,7 +71,6 @@ pub enum ToolInput {
     WaitTasks(WaitTasksToolInput),
     KillTask(KillTaskToolInput),
     Task(TaskToolInput),
-    WebSearch(WebSearchInput),
     ImageGen(ImageGenInput),
     ImageEdit(ImageEditInput),
     ImageToVideo(ImageToVideoInput),
@@ -215,12 +213,6 @@ mod tests {
         })
         .try_into();
         assert_eq!(kill.unwrap().task_id, "t1");
-        let ws: Result<WebSearchInput, _> = ToolInput::WebSearch(WebSearchInput {
-            query: "q".into(),
-            allowed_domains: None,
-        })
-        .try_into();
-        assert_eq!(ws.unwrap().query, "q");
     }
     #[test]
     fn dynamic_input_holds_arbitrary_json() {

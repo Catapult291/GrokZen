@@ -2107,9 +2107,6 @@ mod turn_start_anchor_tests;
 #[path = "acp_session_tests/wait_for_mcp_prefix_tests.rs"]
 mod wait_for_mcp_prefix_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/web_search_e2e_tests.rs"]
-mod web_search_e2e_tests;
-#[cfg(test)]
 mod managed_gateway_tool_tests {
     use super::*;
     use xai_grok_tools::types::output::{MCPOutput, ToolOutput};

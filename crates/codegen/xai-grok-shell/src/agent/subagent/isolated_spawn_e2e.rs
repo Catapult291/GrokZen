@@ -69,7 +69,6 @@ fn spawn_ctx(parent_cwd: PathBuf) -> SubagentSpawnContext {
         session_env: Arc::new(HashMap::new()),
         memory_config: None,
         memory_mode: crate::config::MemoryMode::Legacy,
-        web_search_sampling_config: None,
         web_fetch_config: Default::default(),
         image_gen_config: Default::default(),
         video_gen_config: Default::default(),

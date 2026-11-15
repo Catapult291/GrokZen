@@ -252,10 +252,6 @@ pub struct SessionContext {
     /// When `Some`, injected into `Resources` so `memory_search` / `memory_get`
     /// tools can access it. When `None`, the tools return "not enabled".
     pub memory_backend: Option<Arc<dyn crate::types::memory_backend::MemoryBackend>>,
-    /// Optional web search configuration. When `Enabled`, a `WebSearchClient` is created and
-    /// injected into `Resources` so the `web_search` tool can call the Responses API. When
-    /// `Disabled` (default), the tool returns a graceful error if invoked.
-    pub web_search_config: crate::implementations::web_search::WebSearchConfig,
     /// Optional web fetch configuration. When `Enabled`, a `WebFetchClient`
     /// is created and injected into `Resources` so the `web_fetch` tool can
     /// fetch URLs. When `Disabled` (default), the tool is not registered.
@@ -745,7 +741,6 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::WaitTasksTool>();
         b.register_with_params::<grok_build::TaskTool, grok_build::task::TaskParams>();
         b.register::<grok_build::SendSubagentMessageTool>();
-        b.register::<grok_build::WebSearchTool>();
         b.register_with_params::<grok_build::WebFetchTool, grok_build::web_fetch::WebFetchParams>();
         b.register::<grok_build::LspTool>();
         b.register_with_params::<
@@ -1153,13 +1148,6 @@ impl ToolRegistryBuilder {
         }
         if let Some(auth_provider) = ctx.auth_provider.clone() {
             resources.insert(auth_provider);
-        }
-        if let Ok(client) = crate::implementations::web_search::client::WebSearchClient::new(
-            &ctx.web_search_config,
-            ctx.api_key_provider.clone(),
-        ) {
-            let client = client.with_attribution_callback(ctx.attribution_callback.clone());
-            resources.insert(client);
         }
         if let Some(lsp) = ctx.lsp {
             resources.insert(lsp);
@@ -2504,7 +2492,6 @@ mod tests {
             skills: vec![],
             state_path: tmp.path().join("state.json"),
             memory_backend: None,
-            web_search_config: crate::implementations::web_search::WebSearchConfig::default(),
             web_fetch_config:
                 crate::implementations::grok_build::web_fetch::WebFetchConfig::default(),
             lsp: None,
@@ -2762,7 +2749,6 @@ mod tests {
                 "todo_write",
                 "task",
                 SEND_SUBAGENT_MESSAGE_TOOL_NAME,
-                "web_search",
                 "web_fetch",
                 "lsp",
                 IMAGE_GEN_TOOL_NAME,
@@ -5173,15 +5159,6 @@ mod tests {
                 },
                 ToolConfig {
                     id: "GrokBuild:grep".to_string(),
-                    params: None,
-                    name_override: None,
-                    params_name_overrides: None,
-                    description_override: None,
-                    behavior_version: None,
-                    kind: None,
-                },
-                ToolConfig {
-                    id: "GrokBuild:web_search".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,

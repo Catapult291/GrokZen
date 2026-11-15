@@ -283,7 +283,6 @@ pub(crate) async fn spawn_session_actor(
     inference_idle_timeout_secs: u64,
     max_retries: Option<u32>,
     subagent_rate_limit_max_attempts: u32,
-    web_search_sampling_config: Option<xai_grok_sampler::SamplerConfig>,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
@@ -529,38 +528,11 @@ pub(crate) async fn spawn_session_actor(
         };
     drop(history_scan);
     let primary_model_id = sampling_config.model.clone();
-    let web_search_config_step = spawn_step!("web_search_config_load");
     let web_search_domains = if disable_web_search {
         None
     } else {
         crate::util::config::resolve_web_search_domains_from_disk()
     };
-    let web_search_config = if disable_web_search {
-        xai_grok_tools::implementations::WebSearchConfig::Disabled
-    } else if let Some(cfg) = web_search_sampling_config {
-        if let Some(api_key) = cfg.api_key {
-            xai_grok_tools::implementations::WebSearchConfig::Enabled {
-                api_key,
-                base_url: cfg.base_url,
-                model: cfg.model,
-                extra_headers: cfg.extra_headers,
-                alpha_test_key: credentials.alpha_test_key.clone(),
-                allowed_domains: web_search_domains
-                    .as_ref()
-                    .and_then(|o| o.allowed_domains.clone()),
-                excluded_domains: web_search_domains
-                    .as_ref()
-                    .and_then(|o| o.excluded_domains.clone()),
-            }
-        } else {
-            tracing::warn!("web_search disabled: resolved config has no API key");
-            xai_grok_tools::implementations::WebSearchConfig::Disabled
-        }
-    } else {
-        tracing::warn!("web_search disabled: configured model could not be resolved");
-        xai_grok_tools::implementations::WebSearchConfig::Disabled
-    };
-    drop(web_search_config_step);
     let embed_base_url = sampling_config.base_url.clone();
     let embed_api_key = sampling_config.api_key.clone();
     let session_pruning_config: crate::config::PruningConfig = memory_config.as_ref().map_or_else(
@@ -1205,7 +1177,6 @@ pub(crate) async fn spawn_session_actor(
         memory_backend: memory_backend_for_spec,
         memory_v2_access: crate::session::agent_rebuild::MemoryV2AccessSlot::new(memory_v2_access),
         memory_v2_exposed: memory_v2_exposed(memory_config.as_ref()),
-        web_search_config: web_search_config.clone(),
         web_search_domains,
         backend_search: backend_tools_enabled,
         web_fetch_config: web_fetch_config.clone(),
@@ -2596,7 +2567,6 @@ pub(crate) async fn spawn_session_on_thread(
     inference_idle_timeout_secs: u64,
     max_retries: Option<u32>,
     subagent_rate_limit_max_attempts: u32,
-    web_search_sampling_config: Option<xai_grok_sampler::SamplerConfig>,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
@@ -2810,7 +2780,6 @@ pub(crate) async fn spawn_session_on_thread(
                     inference_idle_timeout_secs,
                     max_retries,
                     subagent_rate_limit_max_attempts,
-                    web_search_sampling_config,
                     web_fetch_config,
                     image_gen_config,
                     video_gen_config,

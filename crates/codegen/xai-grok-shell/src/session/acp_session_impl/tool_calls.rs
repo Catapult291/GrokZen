@@ -2731,12 +2731,6 @@ impl SessionActor {
                 vec![acp::ToolCallLocation::new(diag.path.clone())],
                 vec![],
             ),
-            ToolInput::WebSearch(ws) => (
-                format!("Web search: \"{}\"", ws.query),
-                acp::ToolKind::Search,
-                vec![],
-                vec![],
-            ),
             ToolInput::ImageGen(ig) => (
                 format!("imagine: {}", ig.prompt),
                 acp::ToolKind::Other,

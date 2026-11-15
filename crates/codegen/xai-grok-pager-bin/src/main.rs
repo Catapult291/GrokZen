@@ -1646,7 +1646,6 @@ async fn run_agent_command(
         remote_settings: remote_settings.as_ref(),
         is_headless: !is_leader,
         cli_subagents: None,
-        cli_web_search_model: None,
         cli_session_summary_model: None,
         memory_enabled_override: None,
         disable_web_search,

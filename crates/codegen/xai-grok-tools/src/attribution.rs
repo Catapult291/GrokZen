@@ -15,8 +15,6 @@ pub enum ToolConsumer {
     VideoGenStart,
     #[strum(serialize = "VideoGen.poll")]
     VideoGenPoll,
-    #[strum(serialize = "WebSearch")]
-    WebSearch,
 }
 /// 401 attribution callback. Shell wires this to emit telemetry.
 pub trait Auth401AttributionCallback: Send + Sync + std::fmt::Debug {
@@ -50,6 +48,5 @@ mod tests {
         assert_eq!(ToolConsumer::ImageGen.as_ref(), "ImageGen");
         assert_eq!(ToolConsumer::VideoGenStart.as_ref(), "VideoGen.start");
         assert_eq!(ToolConsumer::VideoGenPoll.as_ref(), "VideoGen.poll");
-        assert_eq!(ToolConsumer::WebSearch.as_ref(), "WebSearch");
     }
 }

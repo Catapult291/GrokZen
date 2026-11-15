@@ -626,8 +626,6 @@ pub struct RemoteSettings {
     #[serde(default, deserialize_with = "deserialize_tolerant_announcements")]
     pub announcements: Option<Vec<RemoteAnnouncement>>,
     #[serde(default)]
-    pub web_search_model: Option<String>,
-    #[serde(default)]
     pub session_summary_model: Option<String>,
     #[serde(default)]
     pub image_description_model: Option<String>,

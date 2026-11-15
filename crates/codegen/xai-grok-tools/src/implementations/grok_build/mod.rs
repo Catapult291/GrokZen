@@ -38,7 +38,6 @@ pub mod todo;
 pub mod update_goal;
 pub mod video_gen;
 pub mod web_fetch;
-pub mod web_search;
 pub mod workflow;
 pub use app_builder::AppBuilderDeployerConfig;
 pub use ask_user_question::AskUserQuestionTool;
@@ -90,7 +89,6 @@ pub use video_gen::{
     imagine_video_usage_message,
 };
 pub use web_fetch::{WebFetchClient, WebFetchConfig, WebFetchParams, WebFetchTool};
-pub use web_search::WebSearchTool;
 pub use workflow::{
     WORKFLOW_TOOL_NAME, WorkflowTool, is_workflow_tool, is_workflow_tool_id,
     workflow_tool_short_name,

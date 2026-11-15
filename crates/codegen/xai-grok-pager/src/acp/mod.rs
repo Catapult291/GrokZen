@@ -196,7 +196,6 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
                 remote_settings: flags.remote_settings.as_ref(),
                 is_headless: false,
                 cli_subagents: flags.no_subagents.then_some(false),
-                cli_web_search_model: None,
                 cli_session_summary_model: None,
                 memory_enabled_override: flags.memory_enabled_override,
                 disable_web_search: flags.disable_web_search,
