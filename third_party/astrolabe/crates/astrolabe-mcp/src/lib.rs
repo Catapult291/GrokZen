@@ -53,9 +53,10 @@ pub use root::{
 pub use server::{AstrolabeServer, HostLspServer, StartupFailedServer};
 
 pub const TOOL_CATALOG_TTL_MS: u64 = 86_400_000;
-/// Catalog tools: `resolve_context`, `search_code`, `find_symbol`,
-/// `get_languages`, plus the language-server-backed
-/// `find_references` / `goto_definition` / `get_diagnostics`.
+/// Catalog tools: `resolve_contx`, `search_code`, `find_symbol`,
+/// `get_lang`, plus the language-server-backed
+/// `find_refs` / `goto_def` / `get_diag`. The old long names are still accepted
+/// on `tools/call` (see [`compat::TOOL_ALIASES`]) but never advertised.
 pub const TOOL_COUNT: usize = 4 + PRECISE_TOOL_COUNT;
 /// Language-server-backed tools defined in `precise_tools`, mounted on the server.
 pub const PRECISE_TOOL_COUNT: usize = 3;
@@ -64,11 +65,11 @@ pub const PRECISE_TOOL_COUNT: usize = 3;
 pub const CATALOG_TOOL_NAMES: &[&str] = &[
     "search_code",
     "find_symbol",
-    "resolve_context",
-    "get_diagnostics",
-    "find_references",
-    "goto_definition",
-    "get_languages",
+    "resolve_contx",
+    "get_diag",
+    "find_refs",
+    "goto_def",
+    "get_lang",
 ];
 
 #[cfg(test)]
@@ -88,14 +89,38 @@ mod tests {
         let expected: HashSet<&str> = [
             "search_code",
             "find_symbol",
-            "resolve_context",
-            "get_diagnostics",
-            "find_references",
-            "goto_definition",
-            "get_languages",
+            "resolve_contx",
+            "get_diag",
+            "find_refs",
+            "goto_def",
+            "get_lang",
         ]
         .into_iter()
         .collect();
         assert_eq!(unique, expected);
+    }
+
+    #[test]
+    fn aliases_map_old_names_onto_the_catalog() {
+        let catalog: HashSet<&str> = CATALOG_TOOL_NAMES.iter().copied().collect();
+        let mut seen: HashSet<&str> = HashSet::new();
+        for (alias, canonical) in crate::compat::TOOL_ALIASES {
+            assert!(
+                catalog.contains(canonical),
+                "alias {alias} -> {canonical} is not a catalog tool"
+            );
+            assert!(
+                !catalog.contains(alias),
+                "alias {alias} must not shadow a catalog name"
+            );
+            assert!(seen.insert(alias), "duplicate alias {alias}");
+            assert_eq!(crate::compat::canonical_tool_name(alias), Some(*canonical));
+            assert_eq!(
+                crate::compat::canonical_tool_name(canonical),
+                None,
+                "a canonical name must not be an alias"
+            );
+        }
+        assert_eq!(seen.len(), crate::compat::TOOL_ALIAS_NAMES.len());
     }
 }

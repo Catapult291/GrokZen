@@ -9,21 +9,39 @@
 
 use std::path::Path;
 
+/// Shared Cursor L1 guidance. `astrolabe setup --scope=project` renders the
+/// same file into the project's `.cursor/rules/astrolabe.mdc`, so the MCP
+/// instructions and the Cursor rule never drift into two hand-maintained copies.
+const CURSOR_L1_TEMPLATE: &str = include_str!("../contexts/cursor-l1.md");
+
 /// L1: the MCP `instructions` field. CRITICAL bootstrap + the factual
 /// index-root header (中文事实段原样保留).
 pub fn connection_instructions(context_name: &str, root: &Path) -> String {
-    let _ = context_name;
+    // Cursor's built-in tools outrank MCP instructions, so Cursor gets the
+    // shared L1 file (setup --scope=project renders it into .cursor/rules).
+    // Every other context keeps the original text.
+    if context_name == "cursor" {
+        let mut text = CURSOR_L1_TEMPLATE
+            .replace("{{INDEX_ROOT}}", &astrolabe_core::paths::display_path(root))
+            .trim_end()
+            .to_string();
+        if let Some(hint) = go_layout_hint(root) {
+            text.push('\n');
+            text.push_str(&hint);
+        }
+        return text;
+    }
     format!(
-        "CRITICAL: Prefer Astrolabe over Grep/Read for code. Tools: resolve_context, search_code, find_symbol, find_references, goto_definition, get_diagnostics, get_languages. All are read-only: batch independent calls in parallel in one turn.\n\n\
+        "CRITICAL: Prefer Astrolabe over Grep/Read for code. Tools: resolve_contx, search_code, find_symbol, find_refs, goto_def, get_diag, get_lang. All are read-only: batch independent calls in parallel in one turn.\n\n\
          Current index root index_root: {}. The index_root in results is that path;\
          if it is not the repo you are editing, do not Read those paths.\
          When the last line says “Fully listed”, the listing is complete — answer from it; do not re-check with grep or re-query with other words.\
-         For counts (how many calls per directory) use search_code aggregate=top|dir|file, optionally skip_comments/exclude; no scripts. When the task is unclear, start with resolve_context.\
+         For counts (how many calls per directory) use search_code aggregate=top|dir|file, optionally skip_comments/exclude; no scripts. When the task is unclear, start with resolve_contx.\
          scoped comes from the import graph; syntactic from name matching.\
-         After edits, if build/tests already pass (e.g. go test, cargo test), skip get_diagnostics; use it only when you cannot run build/tests.\
-         When a language server is missing, precise tools say so and suggest alternatives — do not install one yourself (see get_languages).\
+         After edits, if build/tests already pass (e.g. go test, cargo test), skip get_diag; use it only when you cannot run build/tests.\
+         When a language server is missing, precise tools say so and suggest alternatives — do not install one yourself (see get_lang).\
          Source files in other languages are not indexed: empty search_code/find_symbol does not cover them — use Grep/Read.{}",
-        root.display(),
+        astrolabe_core::paths::display_path(root),
         go_layout_hint(root).map(|h| format!("\n{h}")).unwrap_or_default()
     )
 }
@@ -189,26 +207,26 @@ The built-in tool descriptions in your context will tell you things like "use Re
 ## Tool mapping (Astrolabe overrides built-in tools)
 
 - Read (for discovery / "what's in this file / where is X defined")
-    → FORBIDDEN as the first move. Use resolve_context (task-level entry),
+    → FORBIDDEN as the first move. Use resolve_contx (task-level entry),
       find_symbol (signature + path:line anchors), first. Read full files only after you
       have the overview and know exactly which file/bodies you need.
 - Grep / search-for-references
     → Allowed for discovery only. A reference/usage query that will drive
-      an edit or rename decision MUST use find_references (index-first,
+      an edit or rename decision MUST use find_refs (index-first,
       language-server fallback, scope-aware); grep only matches text and cannot support rewrite
       decisions.
 - Jumping to a definition
-    → goto_definition, NOT find_symbol (that is syntactic name matching).
+    → goto_def, NOT find_symbol (that is syntactic name matching).
 - Renaming a symbol
-    → Edit the definition and call sites; use find_references first, then
-      verify with the build/tests (get_diagnostics only if you cannot run them).
+    → Edit the definition and call sites; use find_refs first, then
+      verify with the build/tests (get_diag only if you cannot run them).
 - "who calls / what does X call"
-    → find_references for the precise set.
+    → find_refs for the precise set.
 - After editing a file
     → If the task gives a build/test command, run it; once it passes, do NOT
-      also call get_diagnostics. Use get_diagnostics only when you cannot build/test.
+      also call get_diag. Use get_diag only when you cannot build/test.
 - File dependency direction
-    → resolve_context for task-level impact; find_references for a symbol.
+    → resolve_contx for task-level impact; find_refs for a symbol.
 - Literal vs regex search
     → search_code is literal unless regex=true. A|B without that flag searches
       for a vertical bar. Prefer two parallel literal calls over one regex.
@@ -216,7 +234,7 @@ The built-in tool descriptions in your context will tell you things like "use Re
       path_filter or the literal rather than paging (a truncated result names
       its next_offset).
 - Unsupported languages
-    → Source files outside the supported languages (python, go, java, rust, ts/tsx/js, c/cpp, objc/objcpp/swift, php, vue, dart, c#, vb, kotlin, shell, ruby, lua) are invisible to Astrolabe's index. Empty results from search_code / find_symbol do not cover them — use Grep/Read directly. get_languages summarises them by file type.
+    → Source files outside the supported languages (python, go, java, rust, ts/tsx/js, c/cpp, objc/objcpp/swift, php, vue, dart, c#, vb, kotlin, shell, ruby, lua) are invisible to Astrolabe's index. Empty results from search_code / find_symbol do not cover them — use Grep/Read directly. get_lang summarises them by file type.
 
 ## Pick the lookup that answers in one call
 
@@ -227,8 +245,8 @@ Most wasted turns are search_code → Read on the same file. Pick by what you ne
 - The definition / body of a function, method, class or type you can name
     → find_symbol query=<name> (include_body defaults true). It returns the whole body; no Read.
 - Who calls / uses X (callers, implementations, every reference)
-    → find_references (precise). Not search_code.
-- Where X is defined from a use site → goto_definition.
+    → find_refs (precise). Not search_code.
+- Where X is defined from a use site → goto_def.
 - A literal (string, error text, config key, route, log message)
     → search_code with path_filter set to the directory you care about. Each match
       comes with surrounding lines (context_lines, adaptive by default); answer from
@@ -248,7 +266,7 @@ Most wasted turns are search_code → Read on the same file. Pick by what you ne
   complete (fully listed), answer from it: do not re-check with grep or re-query with other words. Counting (how many calls per directory or file): search_code aggregate=top|dir|file gives
   "N hits / M files" per row plus a total — add skip_comments=true to ignore comment/string
   hits and exclude=["_test.go","vendor"] to skip paths; count_only=true for totals only.
-  Do not write a script for this. Batch rename: find_references symbol=<old> dry_run_rename=<new>
+  Do not write a script for this. Batch rename: find_refs symbol=<old> dry_run_rename=<new>
   returns a per-file edit checklist (read-only), then edit file by file.
 - Broad queries (common words, short names, no path_filter) produce big truncated
   pages: narrow with path_filter, a more specific literal, or find_symbol first
@@ -257,19 +275,19 @@ Most wasted turns are search_code → Read on the same file. Pick by what you ne
 ## Supported languages & unindexed files
 
 Astrolabe indexes the following languages: python, go, java, rust, typescript, tsx, javascript, c, cpp, objc, objcpp, swift, php, vue, dart, csharp, vb, kotlin, shell, ruby, lua, proto.
-Source files in other languages are not indexed: empty results from `search_code` and `find_symbol` do not cover them. Use Grep/Read directly when searching or examining unsupported language files. `get_languages` summarises them by file type. Files of supported languages are indexed even with syntax errors (symbols in the broken region may be missing); `get_languages` lists up to 10 such files, or gives the path of a Markdown report with all of them.
+Source files in other languages are not indexed: empty results from `search_code` and `find_symbol` do not cover them. Use Grep/Read directly when searching or examining unsupported language files. `get_lang` summarises them by file type. Files of supported languages are indexed even with syntax errors (symbols in the broken region may be missing); `get_lang` lists up to 10 such files, or gives the path of a Markdown report with all of them.
 
 ## Language-server install (session-gated)
 
-Precise tools (`find_references`, `goto_definition`, `get_diagnostics`) need a language server.
+Precise tools (`find_refs`, `goto_def`, `get_diag`) need a language server.
 If one is missing they return `confidence: unknown` with the server name and
 do **not** download anything.
 
 When that happens:
-1. Tell the user which server is missing (see the tool text / `get_languages`
+1. Tell the user which server is missing (see the tool text / `get_lang`
    Ready / needs_install / AST-only rows).
 2. Ask whether they will install it on this machine.
-3. After it is on PATH, retry the precise tool. Use `get_languages` to confirm
+3. After it is on PATH, retry the precise tool. Use `get_lang` to confirm
    Ready / needs_install / AST-only.
 4. If the user declines or the client is non-interactive, leave the server
    unavailable — do not invent a silent fallback.
@@ -281,8 +299,8 @@ permission to install.
 
 All Astrolabe tools are read-only: they never write, create, or
 delete anything. Read-only tasks (surveys, reviews, codebase exploration, "just look
-around") can and should still use `search_code` / `find_symbol` / `find_references` /
-`resolve_context` — they return precise path:line anchors and exact symbol bodies at
+around") can and should still use `search_code` / `find_symbol` / `find_refs` /
+`resolve_contx` — they return precise path:line anchors and exact symbol bodies at
 a fraction of the tokens of whole-file reads. A deny reminder from the anti-drift hook
 is NOT a ban on reading or exploring; it points at the cheaper read-only route.
 
@@ -308,26 +326,26 @@ Astrolabe provides indexed, symbol-aware tools that are generally more efficient
 ## Tool mapping (Astrolabe recommended toolset)
 
 - Read (for discovery / "what's in this file / where is X defined")
-    → Avoid as the first move. Prefer resolve_context (task-level entry),
+    → Avoid as the first move. Prefer resolve_contx (task-level entry),
       find_symbol (signature + path:line anchors), first. Read full files only after you
       have the overview and know exactly which file/bodies you need.
 - Grep / search-for-references
     → Allowed for discovery. A reference/usage query that will drive
-      an edit or rename decision should use find_references (index-first,
+      an edit or rename decision should use find_refs (index-first,
       language-server fallback, scope-aware); grep only matches text and cannot support rewrite
       decisions.
 - Jumping to a definition
-    → goto_definition, NOT find_symbol (that is syntactic name matching).
+    → goto_def, NOT find_symbol (that is syntactic name matching).
 - Renaming a symbol
-    → Use find_references first, then edit the definition and call sites,
-      then verify with the build/tests (get_diagnostics only if you cannot run them).
+    → Use find_refs first, then edit the definition and call sites,
+      then verify with the build/tests (get_diag only if you cannot run them).
 - "who calls / what does X call"
-    → find_references for the precise set.
+    → find_refs for the precise set.
 - After editing a file
     → If the task gives a build/test command, run it; once it passes, do NOT
-      also call get_diagnostics. Use get_diagnostics only when you cannot build/test.
+      also call get_diag. Use get_diag only when you cannot build/test.
 - File dependency direction
-    → resolve_context for task-level impact; find_references for a symbol.
+    → resolve_contx for task-level impact; find_refs for a symbol.
 - Literal vs regex search
     → search_code is literal unless regex=true. A|B without that flag searches
       for a vertical bar. Prefer two parallel literal calls over one regex.
@@ -335,7 +353,7 @@ Astrolabe provides indexed, symbol-aware tools that are generally more efficient
       path_filter or the literal rather than paging (a truncated result names
       its next_offset).
 - Unsupported languages
-    → Source files outside the supported languages (python, go, java, rust, ts/tsx/js, c/cpp, objc/objcpp/swift, php, vue, dart, c#, vb, kotlin, shell, ruby, lua) are invisible to Astrolabe's index. Empty results from search_code / find_symbol do not cover them — use Grep/Read directly. get_languages summarises them by file type.
+    → Source files outside the supported languages (python, go, java, rust, ts/tsx/js, c/cpp, objc/objcpp/swift, php, vue, dart, c#, vb, kotlin, shell, ruby, lua) are invisible to Astrolabe's index. Empty results from search_code / find_symbol do not cover them — use Grep/Read directly. get_lang summarises them by file type.
 
 ## Pick the lookup that answers in one call
 
@@ -346,8 +364,8 @@ Most wasted turns are search_code → Read on the same file. Pick by what you ne
 - The definition / body of a function, method, class or type you can name
     → find_symbol query=<name> (include_body defaults true). It returns the whole body; no Read.
 - Who calls / uses X (callers, implementations, every reference)
-    → find_references (precise). Not search_code.
-- Where X is defined from a use site → goto_definition.
+    → find_refs (precise). Not search_code.
+- Where X is defined from a use site → goto_def.
 - A literal (string, error text, config key, route, log message)
     → search_code with path_filter set to the directory you care about. Each match
       comes with surrounding lines (context_lines, adaptive by default); answer from
@@ -367,7 +385,7 @@ Most wasted turns are search_code → Read on the same file. Pick by what you ne
   complete (fully listed), answer from it: do not re-check with grep or re-query with other words. Counting (how many calls per directory or file): search_code aggregate=top|dir|file gives
   "N hits / M files" per row plus a total — add skip_comments=true to ignore comment/string
   hits and exclude=["_test.go","vendor"] to skip paths; count_only=true for totals only.
-  Do not write a script for this. Batch rename: find_references symbol=<old> dry_run_rename=<new>
+  Do not write a script for this. Batch rename: find_refs symbol=<old> dry_run_rename=<new>
   returns a per-file edit checklist (read-only), then edit file by file.
 - Broad queries (common words, short names, no path_filter) produce big truncated
   pages: narrow with path_filter, a more specific literal, or find_symbol first
@@ -376,19 +394,19 @@ Most wasted turns are search_code → Read on the same file. Pick by what you ne
 ## Supported languages & unindexed files
 
 Astrolabe indexes the following languages: python, go, java, rust, typescript, tsx, javascript, c, cpp, objc, objcpp, swift, php, vue, dart, csharp, vb, kotlin, shell, ruby, lua, proto.
-Source files in other languages are not indexed: empty results from `search_code` and `find_symbol` do not cover them. Use Grep/Read directly when searching or examining unsupported language files. `get_languages` summarises them by file type. Files of supported languages are indexed even with syntax errors (symbols in the broken region may be missing); `get_languages` lists up to 10 such files, or gives the path of a Markdown report with all of them.
+Source files in other languages are not indexed: empty results from `search_code` and `find_symbol` do not cover them. Use Grep/Read directly when searching or examining unsupported language files. `get_lang` summarises them by file type. Files of supported languages are indexed even with syntax errors (symbols in the broken region may be missing); `get_lang` lists up to 10 such files, or gives the path of a Markdown report with all of them.
 
 ## Language-server install (session-gated)
 
-Precise tools (`find_references`, `goto_definition`, `get_diagnostics`) need a language server.
+Precise tools (`find_refs`, `goto_def`, `get_diag`) need a language server.
 If one is missing they return `confidence: unknown` with the server name and
 do **not** download anything.
 
 When that happens:
-1. Tell the user which server is missing (see the tool text / `get_languages`
+1. Tell the user which server is missing (see the tool text / `get_lang`
    Ready / needs_install / AST-only rows).
 2. Ask whether they will install it on this machine.
-3. After it is on PATH, retry the precise tool. Use `get_languages` to confirm
+3. After it is on PATH, retry the precise tool. Use `get_lang` to confirm
    Ready / needs_install / AST-only.
 4. If the user declines or the client is non-interactive, leave the server
    unavailable — do not invent a silent fallback.
@@ -400,7 +418,7 @@ permission to install.
 
 All Astrolabe tools are read-only. Read-only tasks (surveys,
 reviews, exploration) can and should still use `search_code` / `find_symbol` /
-`find_references` / `resolve_context` — precise path:line anchors, fewer tokens than
+`find_refs` / `resolve_contx` — precise path:line anchors, fewer tokens than
 whole-file reads. A deny reminder is not a ban on exploring; it suggests the cheaper
 read-only route.
 
@@ -441,16 +459,16 @@ produced incorrect behavior before and are explicitly disallowed.
 
 Task                                    Tool to use
 --------------------------------------  ----------------------------------------
-First context for a coding task         resolve_context
-Repo structure / language coverage      resolve_context / get_languages
+First context for a coding task         resolve_contx
+Repo structure / language coverage      resolve_contx / get_lang
 Locate a symbol by name                 find_symbol
 Read a symbol's body (no whole file)    find_symbol (include_body defaults true; not search_code + Read)
-Find references / callers (precise)     find_references
-Jump to a definition                    goto_definition
+Find references / callers (precise)     find_refs
+Jump to a definition                    goto_def
 Literal substring / explicit regex      search_code + path_filter (matches come with context; no follow-up Read)
 Count hits per dir/file      search_code aggregate=top|dir|file (+ skip_comments, exclude, count_only)
-Check a file after edits (no build/test) get_diagnostics (skip once tests pass)
-Language / LSP readiness                get_languages (Ready / needs_install / AST-only)
+Check a file after edits (no build/test) get_diag (skip once tests pass)
+Language / LSP readiness                get_lang (Ready / needs_install / AST-only)
 
 Built-in Read/Edit/Glob/Grep are permitted on code files ONLY when:
 - Astrolabe has been tried on the target and failed, OR
@@ -462,22 +480,22 @@ Built-in Read/Edit/Glob/Grep are permitted on code files ONLY when:
 - You absolutely have to read the full file for some reason.
 
 All Astrolabe tools are read-only and safe for exploration tasks;
-read-only surveys should still prefer search_code / find_symbol / find_references over
+read-only surveys should still prefer search_code / find_symbol / find_refs over
 repeated whole-file Reads. Because they are read-only they run concurrently: when you
 need several independent lookups (e.g. find_symbol for three names, or search_code for
 two literals), send them as parallel tool calls in a single message.
 
 Read/Edit/Glob are fine for non-code files: markdown, JSON, YAML, TOML, .env,
 config files, lockfiles, plain text, images. Editing stays with the built-in
-Edit. Use find_references before a rename, then build/test (or get_diagnostics).
+Edit. Use find_refs before a rename, then build/test (or get_diag).
 
 ## Required workflow before editing code
 
-1. resolve_context for orientation (skip if already done this session).
-2. find_symbol for the symbols you'll touch; goto_definition when provenance matters.
-3. For any rename: find_references, then edit definition and call sites. Never
+1. resolve_contx for orientation (skip if already done this session).
+2. find_symbol for the symbols you'll touch; goto_def when provenance matters.
+3. For any rename: find_refs, then edit definition and call sites. Never
    guess occurrences of a symbol across files from grep alone.
-4. Verify with the project's build/tests; get_diagnostics on edited files only
+4. Verify with the project's build/tests; get_diag on edited files only
    when you cannot run them (not again after they pass).
 
 ## Self-check
@@ -497,9 +515,9 @@ mod tests {
         let instructions = connection_instructions("claude-code", dummy_root);
         assert!(instructions.contains("CRITICAL"));
         assert!(instructions.contains("/workspace/test_repo"));
-        assert!(instructions.contains("resolve_context"));
+        assert!(instructions.contains("resolve_contx"));
         assert!(instructions.contains("search_code"));
-        assert!(instructions.contains("get_languages"));
+        assert!(instructions.contains("get_lang"));
         assert!(instructions.contains("parallel"));
         // Complete results need no grep re-check: said in the default-loaded tier.
         assert!(instructions.contains("Fully listed"), "{instructions}");
@@ -513,9 +531,22 @@ mod tests {
             "{instructions}"
         );
         assert!(
-            !instructions.contains("call resolve_context first"),
+            !instructions.contains("call resolve_contx first"),
             "{instructions}"
         );
+    }
+
+    #[test]
+    fn cursor_connection_instructions_use_shared_l1_template() {
+        let root = Path::new("/workspace/cursor_repo");
+        let l1 = connection_instructions("cursor", root);
+        assert!(l1.contains("CRITICAL"), "{l1}");
+        assert!(l1.contains("/workspace/cursor_repo"), "{l1}");
+        assert!(l1.contains("astrolabe-find_symbol"), "{l1}");
+        assert!(!l1.contains("{{INDEX_ROOT}}"), "{l1}");
+        // Non-cursor contexts still use the original L1 wording.
+        let claude = connection_instructions("claude-code", root);
+        assert!(!claude.contains("astrolabe-find_symbol"), "{claude}");
     }
 
     fn tmp_repo(tag: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
@@ -593,18 +624,15 @@ mod tests {
 
     #[test]
     fn every_tier_skips_diagnostics_after_passing_tests() {
-        // E1 (batch 7): get_diagnostics after `go test` already passed cost a
+        // E1 (batch 7): get_diag after `go test` already passed cost a
         // turn and a gopls start in 3 of the 4 runs7 runs that called it.
         let l1 = connection_instructions("claude-code", Path::new("/r"));
-        assert!(l1.contains("skip get_diagnostics"), "{l1}");
+        assert!(l1.contains("skip get_diag"), "{l1}");
         for name in ["claude-code", "default"] {
             let m = manual(name);
+            assert!(m.contains("do NOT\n      also call get_diag"), "{name}");
             assert!(
-                m.contains("do NOT\n      also call get_diagnostics"),
-                "{name}"
-            );
-            assert!(
-                !m.contains("get_diagnostics to confirm the code still holds"),
+                !m.contains("get_diag to confirm the code still holds"),
                 "{name}"
             );
         }
@@ -685,9 +713,9 @@ mod tests {
     fn manual_claude_code_strict_doctrine() {
         let m = manual("claude-code");
         assert!(m.contains("FORBIDDEN"));
-        assert!(m.contains("find_references"));
-        assert!(m.contains("goto_definition"));
-        assert!(m.contains("get_diagnostics"));
+        assert!(m.contains("find_refs"));
+        assert!(m.contains("goto_def"));
+        assert!(m.contains("get_diag"));
         assert!(m.contains("SUPERSEDED"));
         assert!(m.contains("Disallowed rationalizations"));
         assert!(m.contains("paramount importance"));
@@ -699,15 +727,15 @@ mod tests {
         assert!(m.contains("search_code is literal unless regex=true"));
         assert!(!m.contains("offset=next_offset"), "paging is not taught");
         assert!(!m.contains("narrow Grep"), "no grep re-check advice");
-        assert!(m.contains("get_languages") || m.contains("language server"));
+        assert!(m.contains("get_lang") || m.contains("language server"));
     }
 
     #[test]
     fn manual_default_mild_advisory() {
         let m = manual("default");
         assert!(!m.contains("FORBIDDEN"));
-        assert!(m.contains("find_references"));
-        assert!(m.contains("get_languages") || m.contains("language server"));
+        assert!(m.contains("find_refs"));
+        assert!(m.contains("get_lang") || m.contains("language server"));
         assert!(m.contains("You have hereby read"));
     }
 
@@ -728,8 +756,8 @@ mod tests {
         let p = cc_system_prompt_override();
         assert!(p.contains("You are Claude Code, Anthropic's official CLI for Claude."));
         assert!(p.contains("SUPERSEDED"));
-        assert!(p.contains("find_references"));
-        assert!(p.contains("resolve_context"));
+        assert!(p.contains("find_refs"));
+        assert!(p.contains("resolve_contx"));
         assert!(p.contains("Self-check"));
         assert!(p.contains("All Astrolabe tools are read-only"));
         assert_ne!(p, manual("claude-code"));

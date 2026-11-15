@@ -1,8 +1,9 @@
 # Vendored third-party workspace.
 #
-# Upstream:  Astrolabe 0.17.2 (MIT OR Apache-2.0)
-#            https://github.com/wojiushirencai/Astrolabe, tag v0.17.2,
-#            commit 65ab6e91fdd0e2c4f24e3810156c8429db1969f0.
+# Upstream:  Astrolabe 0.17.9 (MIT OR Apache-2.0)
+#            https://github.com/wojiushirencai/Astrolabe, tag v0.17.9,
+#            commit e6ae722abd71b3edab50c9855908cde22c32a0d8 (release merge
+#            c30912456b174798c5e8d8e4932bdea629173ee7).
 # Source of truth: that tag. Re-vendoring means replacing `crates/` and this
 # manifest, then re-applying the patches below (they are small and listed).
 #
@@ -16,7 +17,8 @@
 # `crates/codegen/xai-grok-astrolabe`.
 #
 # ============================================================================
-# VENDORING NOTES — re-apply / re-bless ALL of the following on every upgrade:
+# VENDORING NOTES — re-apply / re-bless the active entries on every upgrade;
+# retired entries stay listed so old patch numbers remain traceable:
 # ============================================================================
 # Local modifications to the upstream source:
 #  1. `crates/astrolabe-mcp/Cargo.toml`: `[features] native = []`.
@@ -29,24 +31,31 @@
 #     - `new_native()` / `new_native_configured()` / `new_native_with_lsp()` /
 #       `new_native_with_options()` / `new_native_full()` (structured output
 #       always on; watcher, built-in LSP, persistence and `.gitignore` policy
-#       selectable) and `pub(crate)` accessors for index state, stats, leader
-#       lock, root and `native_note_edited()`;
+#       selectable), `pub(crate)` accessors for index state, stats, leader
+#       lock, root and `native_note_edited()`, and a wake hook for the
+#       hibernated index;
 #     - `SearchParams.glob` (include glob; `#[schemars(skip)]` keeps it out of
 #       the MCP schema and its size budget) plus `build_include_set()` and the
-#       two candidate filters that consume it.
+#       two candidate filters that consume it;
+#     - `BudgetOnly.host_lsp` + `HostLspServer` (native-only host LSP pool
+#       reporting for `get_languages`; `#[serde(skip)]`, re-exported from
+#       `lib.rs`).
 #  5. `crates/astrolabe-mcp/src/session.rs`: `pub(crate) fn note_edited()`;
 #     `scan_options()` keeps the cold build, inline repair and watcher on one
 #     set of scan gates.
 #  6. `crates/astrolabe-mcp/src/knobs.rs`: `McpKnobs.lsp_enabled`,
-#     `persist_enabled` and `respect_gitignore`, plumbed through
-#     `reindex::mcp_index_options()` and `session.rs`; env overrides
+#     `persist_enabled`, `respect_gitignore` and host-only `extra_excludes`,
+#     plumbed through `reindex::mcp_index_options()`, `session.rs` (scan gates,
+#     watcher, cold build and the hibernation-wake re-election all go through
+#     `RootSession::persist_enabled()`, so `persist = none` never creates
+#     `<root>/.astrolabe/`) and `live_backend.rs`; env overrides
 #     `ASTROLABE_PERSIST` / `ASTROLABE_RESPECT_GITIGNORE`.
 #  7. Rustfmt applied to every touched file; no semantic change.
 #  8. `crates/astrolabe-mcp/src/index.rs`: `text_only_paths` skips `.gitignore`
 #     and `.ignore` (VCS pattern files); ripgrep hides dotfiles, so returning
 #     them made `search_code` and `grep` disagree on the same literal. Unit
 #     tests cover that and the `respect_gitignore = false` admitted set.
-#  9. `crates/astrolabe-mcp/src/native.rs`: v0.17.2's per-call `index_root`
+#  9. `crates/astrolabe-mcp/src/native.rs`: the per-call `index_root`
 #     stays off the Grok tool contract; every native param builder passes
 #     `index_root: None`, so the engine keeps its single workspace root.
 # 10. `crates/astrolabe-core/src/scan.rs`: `discover_new_files()` — bounded
@@ -57,21 +66,23 @@
 #     inline, degrading to a stale note + background rebuild past
 #     `ASTROLABE_BARRIER_MAX`. This is the backstop for create events the
 #     watcher never delivered (polling window, network mount).
-# 11. `crates/astrolabe-core/src/watch.rs`: `NotifyFeed` retains the
-#     non-selective OS watcher (`watcher: Some(..)`). Upstream dropped it at
-#     the end of `init_notify`, which dropped the callback sender and made the
-#     feed report `Disconnected` on the first drain — so Windows/macOS always
-#     fell back to polling (measured: every barrier test that needs an event
-#     within 120 ms failed). Linux registers per-directory (`Selective`), which
-#     owns the watcher, so upstream CI never saw it.
+# 11. RETIRED in v0.17.9 — fixed upstream by #127: `NotifyFeed` now retains
+#     the non-selective OS watcher itself. The old local patch existed because
+#     upstream dropped it at the end of `init_notify`, which dropped the
+#     callback sender and made the feed report `Disconnected` on the first
+#     drain on Windows/macOS.
 # 12. `crates/astrolabe-core/src/watch.rs`: default `poll_interval` is 2 s on
 #     Windows (10 s elsewhere) for the remaining real fallbacks; a 10 s cycle
 #     kept a new file invisible for a full cycle.
-# 13. `crates/astrolabe-mcp/src/server.rs` `get_languages_inner`: one line
-#     naming which languages answer precise queries from the index alone
+# 13. `crates/astrolabe-mcp/src/server.rs` `get_lang_inner`: one line naming
+#     which languages answer precise queries from the index alone
 #     (goto_definition = Go; find_references = Go and unique top-level
 #     TS/TSX/Python names), mirroring `refs_graph::graph_first_language` and
-#     `live_backend::index_definition`. Read-only text; no engine change.
+#     `live_backend::index_definition`, plus the host LSP inventory/legend
+#     when `BudgetOnly.host_lsp` is set. Read-only text; no engine change.
+# 14. `crates/astrolabe-core/src/lsp/transport.rs`: Windows language-server
+#     children are spawned with `CREATE_NO_WINDOW`, so an in-process host does
+#     not flash a console per server.
 # ============================================================================
 
 [workspace]
@@ -79,7 +90,7 @@ members = ["crates/astrolabe-core", "crates/astrolabe-mcp"]
 resolver = "2"
 
 [workspace.package]
-version = "0.17.2"
+version = "0.17.9"
 edition = "2021"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -143,12 +154,20 @@ tree-sitter-lua = "0.5"
 # Protobuf IDL (LanguageFn / tree-sitter-language, host tree-sitter 0.27).
 tree-sitter-proto = "0.6.0"
 # astrolabe-mcp. Caret (not `=`) so patch releases still apply.
-# rmcp 3.4.0 is the floor because it implements MCP spec 2026-07-28
-# (initialize is optional; per-request `_meta` is the new lifecycle).
-rmcp = { version = "3.4.0", features = ["server", "transport-io", "schemars"] }
+# rmcp 3.9.0 includes fixes for RUSTSEC-2026-0457, -0461, and -0462.
+# It retains MCP spec 2026-07-28 support and the per-request `_meta` lifecycle.
+rmcp = { version = "3.9.0", features = ["server", "transport-io", "schemars"] }
 schemars = "1.2"
 regex = "1.13"
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "io-std", "signal"] }
+
+# Global allocator for astrolabe-mcp (src/main.rs). mimalloc keeps far less
+# free memory in per-thread arenas than the system allocator after a large
+# index build, and `mi_collect(true)` can hand the pages back to the OS.
+# `libmimalloc-sys` is listed explicitly so alloc.rs can call `mi_collect`;
+# its `extended` feature exposes the binding.
+mimalloc = { version = "0.1", default-features = false }
+libmimalloc-sys = "0.1"
 
 # LSP installer (download / checksum / extract). Pinned for parallel tasks.
 sha2 = "0.10"

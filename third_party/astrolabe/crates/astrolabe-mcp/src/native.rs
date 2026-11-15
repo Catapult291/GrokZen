@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock};
 
-use crate::precise_tools::{FindReferencesParams, GetDiagnosticsParams, GotoDefinitionParams};
+use crate::precise_tools::{FindRefsParams, GetDiagParams, GotoDefParams};
 use crate::server::{AstrolabeServer, BudgetOnly, QueryParams, ResolveContextParams, SearchParams};
 
 /// Same default the MCP tool uses when `budget_tokens` is omitted.
@@ -264,6 +264,7 @@ impl AstrolabeServer {
             exclude: req.exclude,
             count_only: false,
             skip_comments: req.skip_comments,
+            agent_id: None,
             glob: req.glob,
         };
         split(self.search_code(Parameters(params)))
@@ -295,6 +296,8 @@ impl AstrolabeServer {
             depth: req.depth,
             budget_tokens: budget(req.budget_tokens),
             offset: req.offset,
+            agent_id: None,
+            dedup: None,
         };
         split(self.find_symbol(Parameters(params)))
     }
@@ -309,14 +312,15 @@ impl AstrolabeServer {
             dedup: Some(false),
             offset: req.offset,
             path_filter: req.path_filter,
+            agent_id: None,
         };
-        split(self.resolve_context(Parameters(params)))
+        split(self.resolve_contx(Parameters(params)))
     }
 
     /// In-process `find_references`. Blocks the calling thread; may start a
     /// language server when the index cannot decide.
     pub fn native_find_references(&self, req: NativeFindReferences) -> NativeOutput {
-        let params = FindReferencesParams {
+        let params = FindRefsParams {
             root: None,
             index_root: None,
             symbol: req.symbol,
@@ -327,12 +331,12 @@ impl AstrolabeServer {
             offset: req.offset,
             dry_run_rename: req.dry_run_rename,
         };
-        split(self.find_references(Parameters(params)))
+        split(self.find_refs(Parameters(params)))
     }
 
     /// In-process `goto_definition`. Blocks the calling thread.
     pub fn native_goto_definition(&self, req: NativeGotoDefinition) -> NativeOutput {
-        let params = GotoDefinitionParams {
+        let params = GotoDefParams {
             root: None,
             index_root: None,
             path: req.path,
@@ -342,12 +346,12 @@ impl AstrolabeServer {
             budget_tokens: budget(req.budget_tokens),
             offset: req.offset,
         };
-        split(self.goto_definition(Parameters(params)))
+        split(self.goto_def(Parameters(params)))
     }
 
     /// In-process `get_diagnostics`. Blocks the calling thread.
     pub fn native_get_diagnostics(&self, req: NativeDiagnostics) -> NativeOutput {
-        let params = GetDiagnosticsParams {
+        let params = GetDiagParams {
             root: None,
             index_root: None,
             path: req.path,
@@ -356,7 +360,7 @@ impl AstrolabeServer {
             lsp: req.lsp,
             toolchain: req.toolchain,
         };
-        split(self.get_diagnostics(Parameters(params)))
+        split(self.get_diag(Parameters(params)))
     }
 
     /// In-process `get_languages` with the default budget and no host LSP
@@ -374,7 +378,7 @@ impl AstrolabeServer {
         budget_tokens: usize,
         host_lsp: Vec<crate::server::HostLspServer>,
     ) -> NativeOutput {
-        split(self.get_languages(Parameters(BudgetOnly {
+        split(self.get_lang(Parameters(BudgetOnly {
             root: None,
             index_root: None,
             budget_tokens: budget(budget_tokens),
@@ -423,6 +427,11 @@ impl AstrolabeServer {
             if status.state != "building" || Instant::now() >= deadline {
                 return status;
             }
+            // Hibernation unloads the index without marking it `Building`;
+            // a readiness wait is a legitimate wake trigger, so the next
+            // poll sees the rebuild instead of timing out for a cold index
+            // nobody asked for.
+            self.native_wake_if_hibernated();
             std::thread::sleep(Duration::from_millis(20));
         }
     }

@@ -288,7 +288,7 @@ mod tests {
     fn readonly_excludes_nothing_catalog_is_already_read_only() {
         let ctx = ClientContext::builtin("readonly").unwrap();
         assert!(ctx.excluded_tools.is_empty());
-        assert!(!ctx.excludes("find_references"));
+        assert!(!ctx.excludes("find_refs"));
         assert_eq!(ctx.structured_tool_output, Some(false));
     }
 
@@ -365,14 +365,14 @@ name: demo
 notes: filter hook
 structured_tool_output: false
 excluded_tools:
-  - find_references
-  - get_languages
+  - find_refs
+  - get_lang
 "#,
             "demo",
         )
         .unwrap();
-        assert!(ctx.excludes("find_references"));
-        assert!(ctx.excludes("get_languages"));
+        assert!(ctx.excludes("find_refs"));
+        assert!(ctx.excludes("get_lang"));
         assert!(!ctx.excludes("find_symbol"));
     }
 
@@ -427,13 +427,13 @@ name: demo
 future_list:
   - ignored
 excluded_tools:
-  - goto_definition
+  - goto_def
 "#,
             "demo",
         )
         .unwrap();
-        assert!(ctx.excludes("goto_definition"));
-        assert_eq!(ctx.excluded_tools, vec!["goto_definition".to_string()]);
+        assert!(ctx.excludes("goto_def"));
+        assert_eq!(ctx.excluded_tools, vec!["goto_def".to_string()]);
     }
 
     #[test]
@@ -457,12 +457,12 @@ excluded_tools:
     #[test]
     fn excluded_tools_flow_list() {
         let ctx = parse_context_yaml(
-            "name: demo\nexcluded_tools: [find_references, get_languages]\nnotes: flow\n",
+            "name: demo\nexcluded_tools: [find_refs, get_lang]\nnotes: flow\n",
             "demo",
         )
         .unwrap();
-        assert!(ctx.excludes("find_references"));
-        assert!(ctx.excludes("get_languages"));
+        assert!(ctx.excludes("find_refs"));
+        assert!(ctx.excludes("get_lang"));
     }
 
     #[test]
