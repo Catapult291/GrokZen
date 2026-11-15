@@ -183,13 +183,14 @@ pub fn workspace_grok_build_toolset() -> ToolServerConfig {
 }
 /// Fully qualified ids of the workspace tools that call the Grok API with the workspace server's own credential.
 /// A server whose credential only serves the hub cannot run them, so it neither advertises nor serves them.
+/// Sourced from the static `IMAGINE_TOOL_IDS` inventory instead of the shipped toolset: the
+/// community build policy compiles the Imagine tools out of every catalog, and a policy-empty
+/// list would let the registry's still-registered handlers slip through the hub-only filter.
 pub fn api_backed_tool_ids() -> Vec<String> {
-    #[allow(unused_mut)]
-    let ids = imagine_tool_configs()
+    xai_grok_tools::implementations::grok_build::IMAGINE_TOOL_IDS
         .iter()
-        .map(|tc| tc.id.clone())
-        .collect::<Vec<_>>();
-    ids
+        .map(|id| id.to_string())
+        .collect()
 }
 /// Toolset for the `grok-computer` (workspace/sandbox) preset.
 fn grok_computer_toolset() -> ToolServerConfig {

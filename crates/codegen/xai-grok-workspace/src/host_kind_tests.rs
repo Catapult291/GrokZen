@@ -115,35 +115,42 @@ async fn session_for(host: WorkspaceHostKind) -> Arc<FinalizedToolset> {
 /// or API client in `Resources`. The sandbox still hands them all the credential.
 #[tokio::test]
 async fn only_a_sandbox_session_carries_the_credential() {
-    for (host, expected) in [
-        (WorkspaceHostKind::Daemon, false),
-        (WorkspaceHostKind::Sandbox, true),
-    ] {
-        let factory = host.session_context_factory(bearer(), API_BASE_URL.to_owned());
-        let ctx = factory.build_session_context(
-            &format!("host-kind-{host:?}-ctx"),
-            PathBuf::from("/tmp"),
-            Arc::new(HashMap::new()),
-            factory.build_terminal_backend().backend().clone(),
-        );
-        assert_eq!(expected, ctx.auth_provider.is_some(), "{host:?}");
-        assert_eq!(expected, ctx.image_gen_config.has_credentials(), "{host:?}");
-        assert_eq!(expected, ctx.video_gen_config.is_enabled(), "{host:?}");
-        let toolset = session_for(host).await;
-        let resources = toolset.resources.lock().await;
-        assert_eq!(
-            expected,
-            resources.contains::<SharedAuthProvider>(),
-            "{host:?}"
-        );
-        assert_eq!(expected, resources.contains::<ImageGenClient>(), "{host:?}");
-        assert_eq!(expected, resources.contains::<VideoGenClient>(), "{host:?}");
-    }
+    // The finalize path builds a terminal backend whose actor is spawned with
+    // `spawn_local` on a current-thread runtime, so the body must run inside
+    // a `LocalSet` (a bare `#[tokio::test]` panics in `spawn_local`).
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for (host, expected) in [
+                (WorkspaceHostKind::Daemon, false),
+                (WorkspaceHostKind::Sandbox, true),
+            ] {
+                let factory = host.session_context_factory(bearer(), API_BASE_URL.to_owned());
+                let ctx = factory.build_session_context(
+                    &format!("host-kind-{host:?}-ctx"),
+                    PathBuf::from("/tmp"),
+                    Arc::new(HashMap::new()),
+                    factory.build_terminal_backend().backend().clone(),
+                );
+                assert_eq!(expected, ctx.auth_provider.is_some(), "{host:?}");
+                assert_eq!(expected, ctx.image_gen_config.has_credentials(), "{host:?}");
+                assert_eq!(expected, ctx.video_gen_config.is_enabled(), "{host:?}");
+                let toolset = session_for(host).await;
+                let resources = toolset.resources.lock().await;
+                assert_eq!(
+                    expected,
+                    resources.contains::<SharedAuthProvider>(),
+                    "{host:?}"
+                );
+                assert_eq!(expected, resources.contains::<ImageGenClient>(), "{host:?}");
+                assert_eq!(expected, resources.contains::<VideoGenClient>(), "{host:?}");
+            }
+        })
+        .await;
 }
 /// Run `test` against everything `connect_local_workspace` builds for `host` short of the hub
-/// connection, under a private workspace home and with data collection switched on: the
+/// connection, under a private workspace home and with the data-collection env opt-in set: the
 /// production seams decide the catalog, bind policy, credential reach and uploads, not a copy of
-/// the rule.
+/// the rule. The privacy build policy keeps the opt-in from re-enabling uploads.
 fn with_workspace<F: Future<Output = ()>>(
     host: WorkspaceHostKind,
     test: impl FnOnce(WorkspaceHandle) -> F,
@@ -154,7 +161,11 @@ fn with_workspace<F: Future<Output = ()>>(
         .set(
             "GROK_WORKSPACE_DATA_COLLECTION_DISABLED",
             Path::new("false"),
-        );
+        )
+        // `grok_home()` falls back to `~/.grok`, which a live Grok session on the
+        // same machine holds open; the daemon path blocks on it and the test hangs.
+        // Point it at the private root so the fixture is hermetic.
+        .set("GROK_HOME", root.path());
     tokio::runtime::Runtime::new()
         .expect("runtime")
         .block_on(async {
@@ -185,8 +196,9 @@ fn pinned(tool_ids: &[&str]) -> serde_json::Value {
 }
 /// A daemon host, as `connect_local_workspace` builds it: binds must pin their toolset (one
 /// without fails closed with `missing_tool_config`), a pinned API-backed tool comes back unserved
-/// rather than registering without its client, no upload machinery exists even with data
-/// collection switched on, and the deployer RPCs have no credential to carry off-host.
+/// rather than registering without its client, no upload machinery exists (the host kind alone
+/// also forbids one; the privacy build policy forbids it for every host), and the deployer RPCs
+/// have no credential to carry off-host.
 #[test]
 fn a_daemon_host_serves_pinned_toolsets_only_and_can_neither_upload_nor_deploy() {
     with_workspace(WorkspaceHostKind::Daemon, |handle| async move {
@@ -223,15 +235,17 @@ fn a_daemon_host_serves_pinned_toolsets_only_and_can_neither_upload_nor_deploy()
         assert!(reason.starts_with("missing_tool_config:"), "{reason}");
     });
 }
-/// The sandbox is unchanged: uploads and the deployer credential are in place, a pinned API-backed
-/// tool is served, and a bind without a toolset still widens to the full catalog unless the
-/// launcher asked for strict mode itself.
+/// The sandbox is unchanged where the build policy allows: the deployer credential is in place, a
+/// pinned API-backed tool is served, and a bind without a toolset still widens to the full catalog
+/// unless the launcher asked for strict mode itself. The privacy build policy locks session-data
+/// uploads off, so the sandbox has no upload machinery here either; the env opt-in cannot
+/// resurrect it (only a `test-uploads` build can).
 #[test]
-fn a_sandbox_host_keeps_uploads_the_credential_and_lax_binds() {
+fn a_sandbox_host_keeps_the_credential_and_lax_binds() {
     with_workspace(WorkspaceHostKind::Sandbox, |handle| async move {
         let shared = handle.shared();
         assert!(!shared.require_explicit_toolset);
-        assert!(shared.upload_queue().is_some());
+        assert!(shared.upload_queue().is_none());
         assert!(shared.auth_provider().is_some());
         let resolver = bind_resolver_fixture(&handle);
         let served = resolver(
