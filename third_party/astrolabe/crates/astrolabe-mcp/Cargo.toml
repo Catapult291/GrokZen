@@ -26,7 +26,7 @@ native = []
 # `version` is required alongside `path` for `cargo publish`: crates.io cannot
 # resolve a path dependency, so it needs a registry version to fall back on.
 # Publish order is therefore astrolabe-core first, then this crate.
-astrolabe-core = { path = "../astrolabe-core", version = "0.17.2" }
+astrolabe-core = { path = "../astrolabe-core", version = "0.17.9" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -38,8 +38,12 @@ regex.workspace = true
 rayon.workspace = true
 globset.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std", "signal"] }
+# Global allocator (src/main.rs) and `mi_collect` purge (src/alloc.rs).
+mimalloc.workspace = true
+libmimalloc-sys = { workspace = true, features = ["extended"] }
 
-# malloc_trim after index builds (src/alloc.rs). glibc only; already in the
-# lockfile through astrolabe-core.
-[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+# Platform allocator trims after index builds (src/alloc.rs): malloc_trim on
+# Linux glibc, malloc_zone_pressure_relief on macOS. Windows uses the CRT's
+# _heapmin, declared directly in alloc.rs.
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true

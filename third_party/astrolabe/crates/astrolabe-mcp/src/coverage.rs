@@ -1,4 +1,4 @@
-//! Index-coverage reporting for `get_languages` and the per-query note.
+//! Index-coverage reporting for `get_lang` and the per-query note.
 //!
 //! Two different things are kept apart:
 //! * **hard gaps** — supported-language files that are NOT in the index (over
@@ -141,7 +141,7 @@ impl RepoIndex {
             parts.push(format!("{partial} files have syntax errors"));
         }
         Some(format!(
-            "Note: {}; results may be incomplete — see get_languages.",
+            "Note: {}; results may be incomplete — see get_lang.",
             parts.join("，")
         ))
     }
@@ -212,7 +212,7 @@ impl RepoIndex {
                 ("hit file(s)", "have")
             };
             lines.push(format!(
-                "Note: {label} {}{tail} {verb} syntax errors; their symbols may be incomplete — see get_languages.",
+                "Note: {label} {}{tail} {verb} syntax errors; their symbols may be incomplete — see get_lang.",
                 names.join(", ")
             ));
         }
@@ -293,7 +293,7 @@ impl RepoIndex {
         (pre, entries.len() - pre)
     }
 
-    /// The coverage block of `get_languages`.
+    /// The coverage block of `get_lang`.
     pub(crate) fn coverage_detail(&self) -> String {
         let hard = self.hard_gaps();
         let partial = self.partial_files();

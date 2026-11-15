@@ -4135,6 +4135,7 @@ while True:
 
     // ---- audit fixes (lsp.md H1/H2/M3/M5/M6/M7/L1) ----
 
+    #[cfg(target_os = "linux")]
     fn process_gone(pid: i32) -> bool {
         match fs::read_to_string(format!("/proc/{pid}/stat")) {
             Err(_) => true,
@@ -4145,6 +4146,7 @@ while True:
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn wait_gone(pid: i32, within: Duration) -> bool {
         let until = Instant::now() + within;
         while Instant::now() < until {

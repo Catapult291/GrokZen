@@ -173,7 +173,7 @@ impl<R: Clone> LoopGuard<R> {
                 rate_note = Some(format!(
                     "⚠ loop guard: {} successful searches in the last {} seconds (limit {}).\
                      Likely looping: stop rotating queries in bulk, answer from results you have, or switch to \
-                     find_references / find_symbol / Read.",
+                     find_refs / find_symbol / Read.",
                     cfg.rate_window.as_secs(),
                     self.all.len() + 1,
                     cfg.rate_max
@@ -190,7 +190,7 @@ impl<R: Clone> LoopGuard<R> {
                          already ran {prior} times in the last {} seconds (limit {}); not re-executed — previous result attached below.\
                          That result is complete for this query (use it even if the original call was from another subtask or compressed context).\
                          For different info, change query/path_filter/budget_tokens, or switch approach\
-                         (find_references, goto_definition, Read with a line range).",
+                         (find_refs, goto_def, Read with a line range).",
                         cfg.repeat_window.as_secs(),
                         cfg.repeat_max
                     );

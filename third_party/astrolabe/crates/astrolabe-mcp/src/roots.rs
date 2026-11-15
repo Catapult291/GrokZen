@@ -262,7 +262,9 @@ impl RootDispatcher {
 }
 
 fn paths_eq(a: &Path, b: &Path) -> bool {
-    a == b || a.components().eq(b.components())
+    // Treat Windows `\\?\C:\…` and `C:\…` as the same root so residency
+    // and child registration do not split one project into two slots.
+    astrolabe_core::paths::paths_eq_normalized(a, b)
 }
 
 /// True when `child` is a component-bounded path prefix of `hint`.
@@ -593,6 +595,14 @@ mod tests {
         let evicted = d.evict_idle(now + Duration::from_secs(10_000));
         assert_eq!(evicted, vec![PathBuf::from("/x")]);
         assert!(d.resident().is_empty());
+    }
+
+    #[test]
+    fn paths_eq_treats_windows_verbatim_as_same() {
+        let a = PathBuf::from(r"\\?\C:\Users\z\proj");
+        let b = PathBuf::from(r"C:\Users\z\proj");
+        assert!(paths_eq(&a, &b));
+        assert!(!paths_eq(&a, Path::new(r"C:\Users\z\other")));
     }
 
     #[test]

@@ -1,0 +1,7 @@
+CRITICAL: Prefer Astrolabe over Grep/Read for code. Tools: resolve_contx, search_code, find_symbol, find_refs, goto_def, get_diag, get_lang. All are read-only: batch independent calls in parallel in one turn.
+
+Current index root index_root: {{INDEX_ROOT}}. The index_root in results is that path; if it is not the repo you are editing, do not Read those paths.
+
+Cursor exposes these MCP tools as `astrolabe-resolve_contx`, `astrolabe-search_code`, `astrolabe-find_symbol`, `astrolabe-find_refs`, `astrolabe-goto_def`, `astrolabe-get_diag`, and `astrolabe-get_lang`. Prefer them over the built-in Grep/Read/Glob for code discovery, references, and navigation; use the built-ins for non-code files and when Astrolabe is unavailable.
+
+When the last line says “Fully listed”, the listing is complete — answer from it; do not re-check with grep or re-query with other words. For counts (how many calls per directory) use search_code aggregate=top|dir|file, optionally skip_comments/exclude; no scripts. When the task is unclear, start with resolve_contx. scoped comes from the import graph; syntactic from name matching. After edits, if build/tests already pass (e.g. go test, cargo test), skip get_diag; use it only when you cannot run build/tests. When a language server is missing, precise tools say so and suggest alternatives — do not install one yourself (see get_lang). Source files in other languages are not indexed: empty search_code/find_symbol does not cover them — use Grep/Read.

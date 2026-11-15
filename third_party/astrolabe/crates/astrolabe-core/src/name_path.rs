@@ -24,6 +24,7 @@
 //!（O(Σ n_file²)）；查询串只小写一次，符号名比较走 ASCII 零分配快路。
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use crate::types::{CodeSymbol, SymbolId, SymbolKind};
 
@@ -146,9 +147,10 @@ pub fn match_name_path_with(
 
     // 1) 候选 = 最后一段的名字匹配者；2) 向上验证祖先链与绝对路径约束。
     let mut matched: Vec<SymbolId> = Vec::new();
-    // Candidates come in `symbols` order either way: from the name table
-    // (exact last segment: one binary search instead of a full scan) or
-    // from the full scan when no table was built.
+    // Candidates are symbol positions: from the name table (exact last
+    // segment: one binary search over distinct names instead of a full scan;
+    // substring: one scan over distinct names) or from the full scan when no
+    // table was built. Order is irrelevant — the result is sorted at the end.
     let candidates: Vec<usize> = match &index.names {
         Some(table) => table.matching(last, substring),
         None => symbols
@@ -366,6 +368,11 @@ impl NamePathIndex {
         for (i, s) in symbols.iter().enumerate() {
             buckets.entry(s.file).or_default().push(i);
         }
+        // Trim growth slack (up to 2x on many-file repos) once, at build time.
+        buckets.shrink_to_fit();
+        for positions in buckets.values_mut() {
+            positions.shrink_to_fit();
+        }
         NamePathIndex {
             by_id: index_by_id(symbols),
             buckets,
@@ -392,58 +399,201 @@ impl NamePathIndex {
     }
 }
 
-/// Lowercased symbol names plus the positions sorted by (lowercase name,
-/// position): an inverted index from a name to its symbols. Exact lookups
-/// are a binary search; each group lists positions in `symbols` order.
+/// Lowercased symbol names in a deduplicated, name-sorted arena plus CSR group
+/// offsets: an inverted index from a lowercase name to its symbols. Exact
+/// lookups binary-search the distinct names and return one contiguous position
+/// slice; substring lookups scan distinct names instead of every symbol.
+///
+/// All storage is a handful of flat `Vec`s — no per-symbol heap strings:
+/// - `arena`: concatenated distinct lowercase names, in name order;
+/// - `arena_offsets`: `U + 1` byte offsets into `arena`;
+/// - `group_offsets`: `U + 1` offsets into `sorted_syms`, one group per name;
+/// - `sorted_syms`: symbol positions grouped by lowercase name, ascending
+///   inside each group.
+///
+/// `lower()` is kept for callers that need per-symbol names; it materializes
+/// them lazily on first use and is not used by any lookup path.
 #[derive(Debug, Default)]
 pub struct NameTable {
-    lower: Vec<String>,
-    sorted: Vec<u32>,
+    /// Concatenated distinct lowercase names, in name order.
+    arena: String,
+    /// `U + 1` byte offsets into `arena`.
+    arena_offsets: Vec<u32>,
+    /// `U + 1` offsets into `sorted_syms`; group `u` is
+    /// `sorted_syms[group_offsets[u]..group_offsets[u + 1]]`.
+    group_offsets: Vec<u32>,
+    /// Symbol positions, grouped by lowercase name (ascending within a group).
+    sorted_syms: Vec<u32>,
+    /// Compatibility cache for [`Self::lower`], built on first call only.
+    legacy_lower: OnceLock<Vec<String>>,
 }
 
 impl NameTable {
     pub fn new(symbols: &[CodeSymbol]) -> Self {
         use rayon::prelude::*;
-        let lower: Vec<String> = symbols.par_iter().map(|s| s.name.to_lowercase()).collect();
-        let mut sorted: Vec<u32> = (0..symbols.len() as u32).collect();
-        sorted.par_sort_unstable_by(|&a, &b| {
-            lower[a as usize].cmp(&lower[b as usize]).then(a.cmp(&b))
+        let count =
+            u32::try_from(symbols.len()).expect("NameTable supports at most u32::MAX symbols");
+        if symbols.is_empty() {
+            return NameTable {
+                arena: String::new(),
+                arena_offsets: vec![0],
+                group_offsets: vec![0],
+                sorted_syms: Vec::new(),
+                legacy_lower: OnceLock::new(),
+            };
+        }
+
+        // 1) Concatenate `name.to_lowercase()` of every symbol into one buffer
+        //    plus per-symbol byte offsets. The ASCII fast path never allocates
+        //    a per-name `String`.
+        let capacity: usize = symbols.iter().map(|s| s.name.len()).sum();
+        let mut lower: Vec<u8> = Vec::with_capacity(capacity);
+        let mut lower_offsets: Vec<u32> = Vec::with_capacity(symbols.len() + 1);
+        lower_offsets.push(0);
+        for s in symbols {
+            if s.name.is_ascii() {
+                lower.extend(s.name.bytes().map(|b| b.to_ascii_lowercase()));
+            } else {
+                lower.extend_from_slice(s.name.to_lowercase().as_bytes());
+            }
+            let end =
+                u32::try_from(lower.len()).expect("lowercase name arena exceeds u32::MAX bytes");
+            lower_offsets.push(end);
+        }
+
+        // 2) Positions sorted by (lowercase name, position). UTF-8 byte order
+        //    equals `str` order, so comparing raw bytes is exact.
+        let mut sorted_syms: Vec<u32> = (0..count).collect();
+        sorted_syms.par_sort_unstable_by(|&a, &b| {
+            lower_bytes_at(&lower, &lower_offsets, a as usize)
+                .cmp(lower_bytes_at(&lower, &lower_offsets, b as usize))
+                .then(a.cmp(&b))
         });
-        NameTable { lower, sorted }
+
+        // 3) Count distinct names and their exact byte total, so the retained
+        //    CSR structures are allocated once (no growth/reallocation).
+        let mut uniq_count = 0usize;
+        let mut arena_len = 0usize;
+        let mut prev: Option<&[u8]> = None;
+        for &pos in &sorted_syms {
+            let name = lower_bytes_at(&lower, &lower_offsets, pos as usize);
+            if prev != Some(name) {
+                uniq_count += 1;
+                arena_len += name.len();
+                prev = Some(name);
+            }
+        }
+
+        // 4) Collapse equal adjacent names into the distinct sorted arena and
+        //    CSR group boundaries.
+        let mut arena = String::with_capacity(arena_len);
+        let mut arena_offsets: Vec<u32> = Vec::with_capacity(uniq_count + 1);
+        arena_offsets.push(0);
+        let mut group_offsets: Vec<u32> = Vec::with_capacity(uniq_count + 1);
+        group_offsets.push(0);
+        let mut prev: Option<&[u8]> = None;
+        for (i, &pos) in sorted_syms.iter().enumerate() {
+            let name = lower_bytes_at(&lower, &lower_offsets, pos as usize);
+            if prev != Some(name) {
+                if i > 0 {
+                    group_offsets.push(i as u32);
+                }
+                let name = std::str::from_utf8(name).expect("lowercased names are UTF-8");
+                arena.push_str(name);
+                let end = u32::try_from(arena.len()).expect("name arena exceeds u32::MAX bytes");
+                arena_offsets.push(end);
+                prev = Some(name.as_bytes());
+            }
+        }
+        group_offsets.push(count);
+        drop(lower);
+        drop(lower_offsets);
+
+        NameTable {
+            arena,
+            arena_offsets,
+            group_offsets,
+            sorted_syms,
+            legacy_lower: OnceLock::new(),
+        }
     }
 
     /// `name.to_lowercase()` of every symbol, by position.
+    ///
+    /// Compatibility accessor: the first call materializes one `String` per
+    /// symbol, so prefer [`Self::exact`] / [`Self::groups`] on hot paths.
     pub fn lower(&self) -> &[String] {
-        &self.lower
+        self.legacy_lower.get_or_init(|| {
+            let mut names = vec![String::new(); self.sorted_syms.len()];
+            for uniq in 0..self.unique_len() {
+                let name = self.unique_name(uniq);
+                for &pos in self.group(uniq) {
+                    names[pos as usize] = name.to_owned();
+                }
+            }
+            names
+        })
     }
 
     /// Positions (ascending) of the symbols whose lowercase name equals
     /// `lower_name` (which must already be lowercase).
     pub fn exact(&self, lower_name: &str) -> &[u32] {
-        let key = |i: &u32| self.lower[*i as usize].as_str();
-        let lo = self.sorted.partition_point(|i| key(i) < lower_name);
-        let len = self.sorted[lo..].partition_point(|i| key(i) == lower_name);
-        &self.sorted[lo..lo + len]
+        let uniq_len = self.unique_len();
+        // Binary search over the sorted distinct names: first index with
+        // `unique_name(i) >= lower_name`.
+        let (mut lo, mut hi) = (0, uniq_len);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.unique_name(mid) < lower_name {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if lo < uniq_len && self.unique_name(lo) == lower_name {
+            self.group(lo)
+        } else {
+            &[]
+        }
     }
 
     /// One group per distinct lowercase name (in name order); each group
     /// lists its positions ascending, so `group[0]` is the first occurrence.
     pub fn groups(&self) -> impl Iterator<Item = &[u32]> {
-        self.sorted
-            .chunk_by(|a, b| self.lower[*a as usize] == self.lower[*b as usize])
+        (0..self.unique_len()).map(move |uniq| self.group(uniq))
     }
 
-    /// Positions (ascending) whose name matches `seg_lower` the way
-    /// `name_matches` does: equal ignoring case, or containing it when
-    /// `substring`.
+    /// Number of distinct lowercase names.
+    fn unique_len(&self) -> usize {
+        self.group_offsets.len().saturating_sub(1)
+    }
+
+    /// Positions of distinct name `uniq`, ascending.
+    fn group(&self, uniq: usize) -> &[u32] {
+        let start = self.group_offsets[uniq] as usize;
+        let end = self.group_offsets[uniq + 1] as usize;
+        &self.sorted_syms[start..end]
+    }
+
+    /// Distinct lowercase name `uniq` (names are stored in sorted order).
+    fn unique_name(&self, uniq: usize) -> &str {
+        let start = self.arena_offsets[uniq] as usize;
+        let end = self.arena_offsets[uniq + 1] as usize;
+        &self.arena[start..end]
+    }
+
+    /// Positions whose name matches `seg_lower` the way `name_matches` does:
+    /// equal ignoring case, or containing it when `substring`. Within each
+    /// name group positions ascend; group order is the (sorted) name order.
     fn matching(&self, seg_lower: &str, substring: bool) -> Vec<usize> {
         if substring {
-            self.lower
-                .iter()
-                .enumerate()
-                .filter(|(_, l)| l.contains(seg_lower))
-                .map(|(i, _)| i)
-                .collect()
+            let mut out = Vec::new();
+            for uniq in 0..self.unique_len() {
+                if self.unique_name(uniq).contains(seg_lower) {
+                    out.extend(self.group(uniq).iter().map(|&pos| pos as usize));
+                }
+            }
+            out
         } else {
             self.exact(seg_lower).iter().map(|&i| i as usize).collect()
         }
@@ -451,11 +601,16 @@ impl NameTable {
 
     fn any_matches(&self, seg_lower: &str, substring: bool) -> bool {
         if substring {
-            self.lower.iter().any(|l| l.contains(seg_lower))
+            (0..self.unique_len()).any(|uniq| self.unique_name(uniq).contains(seg_lower))
         } else {
             !self.exact(seg_lower).is_empty()
         }
     }
+}
+
+/// Lowercase name of `pos` inside the build-time arena.
+fn lower_bytes_at<'a>(names: &'a [u8], offsets: &[u32], pos: usize) -> &'a [u8] {
+    &names[offsets[pos] as usize..offsets[pos + 1] as usize]
 }
 
 impl<'a> Ctx<'a> {
@@ -1038,5 +1193,45 @@ mod tests {
         assert_eq!(groups, vec![vec![1, 4], vec![0, 2, 3]]);
         assert_eq!(table.lower()[3], "foo");
         assert!(NameTable::new(&[]).groups().next().is_none());
+    }
+
+    /// The table stores distinct lowercase names once, in sorted order, and
+    /// only materializes per-symbol `String`s when the compatibility `lower()`
+    /// accessor is actually called.
+    #[test]
+    fn name_table_dedupes_into_sorted_arena_and_materializes_lazily() {
+        let symbols = vec![
+            sym(0, 1, "Beta", SymbolKind::Class, (1, 9)),
+            sym(1, 1, "alpha", SymbolKind::Function, (2, 3)),
+            sym(2, 2, "ALPHA", SymbolKind::Function, (1, 2)),
+            sym(3, 2, "beta", SymbolKind::Function, (3, 4)),
+            sym(4, 2, "alpha", SymbolKind::Function, (5, 6)),
+        ];
+        let table = NameTable::new(&symbols);
+        // No per-symbol lowercase `String` exists right after the build.
+        assert!(table.legacy_lower.get().is_none());
+        assert_eq!(table.unique_len(), 2);
+        let unique: Vec<&str> = (0..table.unique_len())
+            .map(|uniq| table.unique_name(uniq))
+            .collect();
+        assert_eq!(unique, vec!["alpha", "beta"]);
+        assert_eq!(table.arena, "alphabeta");
+        assert_eq!(table.exact("alpha"), &[1, 2, 4]);
+        assert_eq!(table.exact("beta"), &[0, 3]);
+        assert_eq!(
+            table.groups().map(<[u32]>::to_vec).collect::<Vec<_>>(),
+            vec![vec![1, 2, 4], vec![0, 3]]
+        );
+        // The compatibility accessor still answers by symbol position.
+        assert_eq!(table.lower()[0], "beta");
+        assert_eq!(table.lower()[2], "alpha");
+        assert!(table.legacy_lower.get().is_some());
+
+        // Empty tables answer every lookup without panicking.
+        let empty = NameTable::new(&[]);
+        assert!(empty.lower().is_empty());
+        assert!(empty.exact("x").is_empty());
+        assert_eq!(empty.groups().count(), 0);
+        assert!(NameTable::default().exact("x").is_empty());
     }
 }

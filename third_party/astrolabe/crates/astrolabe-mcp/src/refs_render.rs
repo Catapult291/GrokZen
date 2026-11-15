@@ -284,7 +284,7 @@ pub(crate) fn completion_line(total: usize, files: usize, source: &str) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::precise_tools::{run_find_references, FindReferencesParams, PreciseCapability};
+    use crate::precise_tools::{run_find_refs, FindRefsParams, PreciseCapability};
     use astrolabe_core::lsp::{Diagnostic, Position, Precise, Range};
     use astrolabe_core::types::RelPath;
     use rmcp::model::ContentBlock;
@@ -361,8 +361,8 @@ mod tests {
     }
 
     fn run(fake: Fake, budget: usize) -> (String, serde_json::Value) {
-        let r = run_find_references(
-            FindReferencesParams {
+        let r = run_find_refs(
+            FindRefsParams {
                 root: None,
                 index_root: None,
                 symbol: "callee".into(),

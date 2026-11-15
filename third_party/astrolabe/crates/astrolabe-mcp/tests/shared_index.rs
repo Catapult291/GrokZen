@@ -201,7 +201,7 @@ fn two_followers_forward_to_one_leader() {
     assert!(listed["result"]["tools"]
         .as_array()
         .is_some_and(|t| !t.is_empty()));
-    let refs = f2.call_text("find_references", json!({"symbol": "greet"}));
+    let refs = f2.call_text("find_refs", json!({"symbol": "greet"}));
     assert!(refs.contains("other.py"), "{refs}");
 
     for f in [&f1, &f2] {
@@ -289,7 +289,8 @@ fn per_session_state_is_isolated() {
     greet_symbol(&mut f2);
     assert!(f1.log().contains(FOLLOWER) && f2.log().contains(FOLLOWER));
 
-    let query = json!({"query": "greet"});
+    // Dedup requires a known agent_id (missing identity never shares a shard).
+    let query = json!({"query": "greet", "agent_id": "session-f1"});
     let first = f1.call_text("search_code", query.clone());
     let again = f1.call_text("search_code", query.clone());
     assert!(
@@ -297,14 +298,18 @@ fn per_session_state_is_isolated() {
         "dedup in the same session:\n{again}"
     );
     // Another session asking the same thing gets the full result.
-    let other = f2.call_text("search_code", query.clone());
+    let other_q = json!({"query": "greet", "agent_id": "session-f2"});
+    let other = f2.call_text("search_code", other_q);
     assert!(
         !other.contains("Same query already returned"),
         "dedup leaked across sessions:\n{other}"
     );
     assert_eq!(first, other, "same index, same first answer");
     // …and so does the leader's own client.
-    let own = leader.call_text("search_code", query);
+    let own = leader.call_text(
+        "search_code",
+        json!({"query": "greet", "agent_id": "session-leader"}),
+    );
     assert!(!own.contains("Same query already returned"), "{own}");
 }
 

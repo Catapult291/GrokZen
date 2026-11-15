@@ -54,8 +54,8 @@ fn indent_of(line: &str) -> usize {
 
 /// Whether the statement at `idx` (indent > 0) sits in module-level
 /// control flow rather than in a `def` / `class` body.
-fn module_level_at(lines: &[String], idx: usize) -> bool {
-    let mut want = indent_of(&lines[idx]);
+fn module_level_at(lines: &[&str], idx: usize) -> bool {
+    let mut want = indent_of(lines[idx]);
     if want == 0 {
         return true;
     }
@@ -85,7 +85,7 @@ fn module_level_at(lines: &[String], idx: usize) -> bool {
 
 /// `from M import …` statements in `lines`. Handles parenthesised and
 /// backslash-continued name lists and `;`-free one-liners.
-pub(crate) fn from_imports(lines: &[String]) -> Vec<FromImport> {
+pub(crate) fn from_imports(lines: &[&str]) -> Vec<FromImport> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < lines.len() {
@@ -143,13 +143,13 @@ pub(crate) fn from_imports(lines: &[String]) -> Vec<FromImport> {
 }
 
 /// Names listed in the module's `__all__` (`=`, `+=`, `.extend` / `.append`).
-pub(crate) fn dunder_all(lines: &[String]) -> HashSet<String> {
+pub(crate) fn dunder_all(lines: &[&str]) -> HashSet<String> {
     let mut out = HashSet::new();
     let mut i = 0;
     while i < lines.len() {
         let t = lines[i].trim_start();
         i += 1;
-        if !t.starts_with("__all__") || indent_of(&lines[i - 1]) != 0 {
+        if !t.starts_with("__all__") || indent_of(lines[i - 1]) != 0 {
             continue;
         }
         let mut text = t.to_string();
@@ -157,7 +157,7 @@ pub(crate) fn dunder_all(lines: &[String]) -> HashSet<String> {
             text.matches(['[', '(']).count() as i32 - text.matches([']', ')']).count() as i32;
         while depth > 0 && i < lines.len() {
             text.push(' ');
-            text.push_str(&lines[i]);
+            text.push_str(lines[i]);
             depth += lines[i].matches(['[', '(']).count() as i32
                 - lines[i].matches([']', ')']).count() as i32;
             i += 1;
@@ -174,7 +174,7 @@ pub(crate) fn dunder_all(lines: &[String]) -> HashSet<String> {
 /// Exported names under which `module` (whose lines are `lines`) re-exports
 /// `name`: `name` itself (`from .m import name`, `import *`, `__all__`), or
 /// an alias (`from .m import name as other`).
-fn reexported_as(lines: &[String], name: &str, from_module: &str) -> Vec<String> {
+fn reexported_as(lines: &[&str], name: &str, from_module: &str) -> Vec<String> {
     let mut out: BTreeSet<String> = BTreeSet::new();
     for fi in from_imports(lines) {
         if !fi.module_level {
@@ -203,7 +203,7 @@ fn reexported_as(lines: &[String], name: &str, from_module: &str) -> Vec<String>
 
 /// Local aliases of `name` bound by `from … import name as alias` anywhere
 /// in the file.
-pub(crate) fn local_aliases(lines: &[String], name: &str) -> Vec<String> {
+pub(crate) fn local_aliases(lines: &[&str], name: &str) -> Vec<String> {
     let mut out: BTreeSet<String> = BTreeSet::new();
     for fi in from_imports(lines) {
         for (n, alias) in fi.names {
@@ -294,9 +294,10 @@ pub(crate) fn python_scope(
         }
         for (g, check_submodule) in importers {
             let Some(path) = py_path(g) else { continue };
-            let Some(lines) = crate::refs_graph::read_lines(root, &path) else {
+            let Some(lines) = crate::refs_graph::read_line_view(root, &path) else {
                 continue;
             };
+            let lines = lines.borrowed_lines();
             let fis = from_imports(&lines);
             if check_submodule
                 && !fis.iter().any(|fi| {
@@ -438,9 +439,10 @@ pub(crate) fn graph_first(index: &RepoIndex, root: &Path, name: &str) -> bool {
     let Some(path) = index.file(decl.file).map(|f| f.path.as_str().to_string()) else {
         return false;
     };
-    let Some(lines) = crate::refs_graph::read_lines(root, &path) else {
+    let Some(lines) = crate::refs_graph::read_line_view(root, &path) else {
         return false;
     };
+    let lines = lines.borrowed_lines();
     // Module level: the definition (or its first decorator) starts at column 0.
     lines
         .get(decl.start_line.saturating_sub(1) as usize)
@@ -598,7 +600,9 @@ impl PyMember {
             .min_by_key(|(a, b, _)| b - a)?
             .2
             .clone();
-        let decl_lines = crate::refs_graph::read_lines(root, index.file(decl.file)?.path.as_str())?;
+        let decl_lines =
+            crate::refs_graph::read_line_view(root, index.file(decl.file)?.path.as_str())?;
+        let decl_lines = decl_lines.borrowed_lines();
         if !directly_in_class(
             &decl_lines,
             decl.start_line.saturating_sub(1) as usize,
@@ -636,9 +640,10 @@ impl PyMember {
             if !matches!(f.language, Some(Language::Python)) || scope.contains_key(&f.id.0) {
                 continue;
             }
-            let Some(lines) = crate::refs_graph::read_lines(root, f.path.as_str()) else {
+            let Some(lines) = crate::refs_graph::read_line_view(root, f.path.as_str()) else {
                 continue;
             };
+            let lines = lines.borrowed_lines();
             let hit = lines.iter().any(|l| {
                 let mut from = 0;
                 while let Some(i) = l[from..].find(&dotted) {
@@ -683,13 +688,7 @@ impl PyMember {
     }
 
     /// Verdict for the hit at `(line, byte)` (0-based line) in `file`.
-    pub(crate) fn verdict(
-        &self,
-        file: u32,
-        lines: &[String],
-        line: usize,
-        byte: usize,
-    ) -> PyVerdict {
+    pub(crate) fn verdict(&self, file: u32, lines: &[&str], line: usize, byte: usize) -> PyVerdict {
         let text = &lines[line];
         let before = &text[..byte];
         let line1 = line as u32 + 1;
@@ -838,7 +837,7 @@ fn binding_on(l: &str, pat: &str) -> Option<Option<String>> {
 
 /// Declared / assigned type of `self.attr` anywhere in the file, or of a
 /// class-level `attr: T`.
-fn self_attr_type(lines: &[String], attr: &str) -> Option<String> {
+fn self_attr_type(lines: &[&str], attr: &str) -> Option<String> {
     let pat = format!("self.{attr}");
     lines
         .iter()
@@ -855,16 +854,16 @@ fn self_attr_type(lines: &[String], attr: &str) -> Option<String> {
 
 /// Type of local / parameter `var` from its nearest earlier binding (up to
 /// 300 lines back).
-fn local_type(lines: &[String], line: usize, var: &str) -> Option<String> {
+fn local_type(lines: &[&str], line: usize, var: &str) -> Option<String> {
     (line.saturating_sub(300)..=line)
         .rev()
-        .find_map(|k| binding_on(&lines[k], var))
+        .find_map(|k| binding_on(lines[k], var))
         .flatten()
 }
 
 /// Whether the `def name` at or below `start0` (0-based; decorators come
 /// first) sits directly in a class body, not inside a function.
-fn directly_in_class(lines: &[String], start0: usize, name: &str) -> bool {
+fn directly_in_class(lines: &[&str], start0: usize, name: &str) -> bool {
     let Some(def_at) = (start0..lines.len().min(start0 + 80)).find(|&k| {
         let t = lines[k].trim_start();
         let t = t.strip_prefix("async ").unwrap_or(t);
@@ -874,7 +873,7 @@ fn directly_in_class(lines: &[String], start0: usize, name: &str) -> bool {
         // An attribute (`name: T = …`): fine.
         return true;
     };
-    let d = indent_of(&lines[def_at]);
+    let d = indent_of(lines[def_at]);
     for l in lines[..def_at].iter().rev() {
         let t = l.trim_start();
         if t.is_empty() || t.starts_with('#') || t.starts_with('@') || indent_of(l) >= d {
@@ -894,7 +893,7 @@ const LOWER_TYPE_HEADS: &[&str] = &["list", "dict", "set", "frozenset", "tuple",
 /// line inside a bracket left open on earlier lines (`Union[\n "Foo",`)
 /// takes that bracket as its context, and an `__all__ = [...]` entry is a
 /// reference too (pyright counts both).
-pub(crate) fn type_string_in(lines: &[String], line: usize, byte: usize) -> bool {
+pub(crate) fn type_string_in(lines: &[&str], line: usize, byte: usize) -> bool {
     let Some(text) = lines.get(line) else {
         return false;
     };
@@ -925,7 +924,7 @@ pub(crate) fn type_string_in(lines: &[String], line: usize, byte: usize) -> bool
 
 /// Head identifier of the innermost `[` left open by up to 30 previous
 /// lines, when that `[` is the innermost open bracket.
-fn open_bracket_before(lines: &[String], line: usize) -> Option<String> {
+fn open_bracket_before(lines: &[&str], line: usize) -> Option<String> {
     let mut depth = 0i32;
     for l in lines[line.saturating_sub(30)..line].iter().rev() {
         let code = l.split('#').next().unwrap_or("");
@@ -954,7 +953,7 @@ fn open_bracket_before(lines: &[String], line: usize) -> Option<String> {
 }
 
 /// The line is inside a top-level `__all__ = [ … ]` / `( … )`.
-fn in_dunder_all(lines: &[String], line: usize) -> bool {
+fn in_dunder_all(lines: &[&str], line: usize) -> bool {
     for k in (line.saturating_sub(200)..=line).rev() {
         let l = &lines[k];
         if l.starts_with("__all__") {
@@ -1104,8 +1103,8 @@ mod tests {
     use super::*;
     use astrolabe_core::types::RelPath;
 
-    fn ls(src: &str) -> Vec<String> {
-        src.lines().map(str::to_string).collect()
+    fn ls(src: &str) -> Vec<&str> {
+        src.lines().collect()
     }
 
     fn at(line: &str, word: &str) -> bool {
@@ -1673,7 +1672,8 @@ mod tests {
                 s.name == *sym && index.file(s.file).is_some_and(|f| f.path.as_str() == path)
             });
             let Some(decl) = decl else { continue };
-            let lines = crate::refs_graph::read_lines(&root, path).unwrap_or_default();
+            let lines = crate::refs_graph::read_line_view(&root, path).unwrap_or_default();
+            let lines = lines.borrowed_lines();
             let dline = decl.start_line.saturating_sub(1) as usize;
             let dcol = lines
                 .get(dline)
@@ -1715,9 +1715,10 @@ mod tests {
                             l.range.start.character
                         ]);
                         let len = l.range.end.character - l.range.start.character;
-                        let in_string = crate::refs_graph::read_lines(&root, l.path.as_str())
+                        let in_string = crate::refs_graph::read_line_view(&root, l.path.as_str())
                             .and_then(|ls| {
-                                let line = ls.get(l.range.start.line as usize)?.clone();
+                                let ls = ls.borrowed_lines();
+                                let line = ls.get(l.range.start.line as usize)?;
                                 let mut units_seen = 0u32;
                                 let mut byte = line.len();
                                 for (i, ch) in line.char_indices() {
@@ -1749,9 +1750,10 @@ mod tests {
                     let Some(id) = index.file_id(l.path.as_str()) else {
                         continue;
                     };
-                    let Some(ls) = crate::refs_graph::read_lines(&root, l.path.as_str()) else {
+                    let Some(ls) = crate::refs_graph::read_line_view(&root, l.path.as_str()) else {
                         continue;
                     };
+                    let ls = ls.borrowed_lines();
                     let Some(text) = ls.get(l.range.start.line as usize) else {
                         continue;
                     };

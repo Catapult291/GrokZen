@@ -10,6 +10,13 @@
 //! - `ASTROLABE_DENY_TEXT_SEARCH`: 硬禁用 Grep/Glob/shell 文本搜索（true/1/yes/on；默认 off）。
 //!   开启后首次即 deny（不再等阈值）；覆盖 soft DEFAULT_GREP_THRESHOLD。亦可通过
 //!   `hooks remind --deny-text-search` / 上下文 YAML `deny_text_search` 配置。
+//! - `ASTROLABE_HOOK_CURSOR_MODE`: Cursor 客户端的拦截策略（auto|enforce|advisory，默认 auto）。
+//!   auto 仅在本项目视为已启用 astrolabe MCP 且存在 cwd 对应该项目、带
+//!   `--context=cursor` 的 astrolabe 进程时保持强制拦截；否则降级为放行 + 温和提醒。
+//!   启用判定：`mcp-disabled.json` 不命中；项目级 `.cursor/mcp.json` 声明 astrolabe 时
+//!   要求 `mcp-approvals.json` 命中（条目形如 `astrolabe-<hex>`，兼容精确名），否则
+//!   全局 `~/.cursor/mcp.json` 声明 astrolabe 即视为启用。enforce 保持旧的强制拦截；
+//!   advisory 永远只提醒不拦截。claude-code 等其它客户端不受影响。
 //!
 //! 子代理计数隔离：并发子 Agent 触发的 PreToolUse payload 携带 `agent_id` / `agentId`
 //! （主线程 payload 不含该字段）时，计数状态按 `~/.astrolabe/hook_data/<session_id>/<agent分量>/`
@@ -62,6 +69,40 @@ pub(crate) const ENV_READ_THRESHOLD: &str = "ASTROLABE_READ_THRESHOLD";
 pub(crate) const ENV_GREP_THRESHOLD: &str = "ASTROLABE_GREP_THRESHOLD";
 pub(crate) const ENV_DENY_SILENCE_SECS: &str = "ASTROLABE_DENY_SILENCE_SECS";
 pub(crate) const ENV_DENY_TEXT_SEARCH: &str = "ASTROLABE_DENY_TEXT_SEARCH";
+/// Cursor 拦截策略手动逃生口：auto（默认）| enforce | advisory。
+pub(crate) const ENV_HOOK_CURSOR_MODE: &str = "ASTROLABE_HOOK_CURSOR_MODE";
+
+/// Cursor 客户端的 anti-drift 拦截策略。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum CursorMode {
+    /// 仅在确认本项目 astrolabe MCP 已批准且进程存活时强制拦截，否则放行。
+    #[default]
+    Auto,
+    /// 始终按旧逻辑强制拦截（手动逃生口）。
+    Enforce,
+    /// 始终只提醒、不拦截。
+    Advisory,
+}
+
+impl CursorMode {
+    /// 解析 `ASTROLABE_HOOK_CURSOR_MODE`；空/缺失/非法值回退 auto 并告警。
+    pub(crate) fn from_env(raw: Option<&str>) -> Self {
+        let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Self::Auto;
+        };
+        match raw.to_ascii_lowercase().as_str() {
+            "auto" => Self::Auto,
+            "enforce" => Self::Enforce,
+            "advisory" => Self::Advisory,
+            other => {
+                tracing::warn!(
+                    "invalid {ENV_HOOK_CURSOR_MODE}={other:?}; using auto (expected auto|enforce|advisory)"
+                );
+                Self::Auto
+            }
+        }
+    }
+}
 
 /// 运行时配置（从环境变量解析，进程启动后只读）
 #[derive(Debug, Clone, Copy)]
@@ -73,6 +114,8 @@ pub(crate) struct HooksConfig {
     /// Hard-deny Grep/Glob/shell text-search on first use.
     pub deny_text_search: bool,
     pub min_deny_interval_seconds: f64,
+    /// Cursor 客户端拦截策略（其它客户端忽略）。
+    pub cursor_mode: CursorMode,
 }
 
 impl Default for HooksConfig {
@@ -84,6 +127,7 @@ impl Default for HooksConfig {
             grep_threshold: DEFAULT_GREP_THRESHOLD,
             deny_text_search: false,
             min_deny_interval_seconds: DEFAULT_MIN_DENY_INTERVAL_SECONDS,
+            cursor_mode: CursorMode::Auto,
         }
     }
 }
@@ -164,6 +208,8 @@ impl HooksConfig {
             })
             .unwrap_or(DEFAULT_MIN_DENY_INTERVAL_SECONDS);
 
+        let cursor_mode = CursorMode::from_env(std::env::var(ENV_HOOK_CURSOR_MODE).ok().as_deref());
+
         Self {
             slice_read_max_limit,
             slice_read_threshold,
@@ -171,6 +217,7 @@ impl HooksConfig {
             grep_threshold,
             deny_text_search,
             min_deny_interval_seconds,
+            cursor_mode,
         }
     }
 }
@@ -214,8 +261,14 @@ pub(crate) fn config() -> &'static HooksConfig {
 
 /// 非符号工具子串：仍用于分类（AstrolabeNonSymbolic vs Symbolic），
 /// 但两类工具在 decide 中都会 `reset_burst`（含 grep/read/non_symbolic/slice）。
-pub(crate) const NON_SYMBOLIC_ASTROLABE_SUBSTRINGS: &[&str] =
-    &["search_code", "diagnostics", "languages"];
+pub(crate) const NON_SYMBOLIC_ASTROLABE_SUBSTRINGS: &[&str] = &[
+    "search_code",
+    "get_diag",
+    "get_lang",
+    // Legacy long names, still accepted as call-time aliases.
+    "diagnostics",
+    "languages",
+];
 
 /// 非 Claude-Code 客户端判定 read_file 的动作动词子串
 pub(crate) const READ_FILE_VERB_SUBSTRINGS: &[&str] = &["read", "view", "open", "show"];
@@ -335,6 +388,429 @@ impl Client {
             _ => Client::Other,
         }
     }
+}
+
+/// Cursor project 目录名 slug 算法（与 npm `setup/cursor.js:188-193` 及
+/// cursor-agent `workspace-paths.js` 一致）：
+/// 非 `[A-Za-z0-9]` → `-`，折叠连续 `-`，再去掉首尾 `-`。
+///
+/// 先剥离 Windows verbatim 前缀 `\\?\`，否则盘符会多出一个 `-`。
+/// 该函数不访问文件系统，纯字符串处理，便于单测。
+pub(crate) fn cursor_project_slug(raw_path: &str) -> String {
+    let raw = raw_path.strip_prefix(r"\\?\").unwrap_or(raw_path);
+    let mut out = String::with_capacity(raw.len());
+    let mut prev_dash = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// Cursor project 目录名 munging：先 canonicalize（失败回退原路径；macOS
+/// `/tmp` → `/private/tmp` 等软链必须解析），再按 [`cursor_project_slug`] 生成。
+/// 相对路径或空路径返回 `None`。
+pub(crate) fn cursor_project_dir_name(workspace_root: &Path) -> Option<String> {
+    let canonical =
+        std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+    if !canonical.is_absolute() {
+        return None;
+    }
+    let raw = canonical.to_str()?.trim();
+    let slug = cursor_project_slug(raw);
+    (!slug.is_empty()).then_some(slug)
+}
+
+/// 读取 Cursor 的 MCP 名单 JSON（`mcp-approvals.json` / `mcp-disabled.json`）。
+///
+/// 缺失、不可读、损坏或根节点不是数组时返回 `None`。损坏 JSON 只告警，
+/// 由调用方决定保守方向（审批文件按未批准处理；禁用文件按未禁用处理）。
+pub(crate) fn load_cursor_mcp_server_list(path: &Path) -> Option<Vec<String>> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(serde_json::Value::Array(items)) => Some(
+            items
+                .into_iter()
+                .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect(),
+        ),
+        Ok(other) => {
+            tracing::warn!(
+                path = %path.display(),
+                kind = ?other,
+                "cursor MCP list is not a JSON array; ignoring"
+            );
+            None
+        }
+        Err(err) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "cursor MCP list is invalid JSON; ignoring"
+            );
+            None
+        }
+    }
+}
+
+/// Cursor 审批/禁用名单条目是否指向 astrolabe。
+///
+/// 真实条目格式是 `astrolabe-<16位hex>`（例如 `astrolabe-2a22896e4eeae815`），
+/// 同时兼容历史/手写的精确名 `astrolabe`。
+pub(crate) fn list_contains_astrolabe(names: Option<Vec<String>>) -> bool {
+    names.is_some_and(|names| {
+        names.iter().any(|name| {
+            let lower = name.trim().to_ascii_lowercase();
+            lower == "astrolabe" || lower.starts_with("astrolabe-")
+        })
+    })
+}
+
+/// 某个 `.cursor/mcp.json` 的 `mcpServers` 是否声明了 astrolabe。
+/// 缺失或损坏按「未声明」处理（只告警，不影响其它判定分支）。
+pub(crate) fn mcp_json_has_astrolabe_server(path: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(value) => value
+            .get("mcpServers")
+            .and_then(|servers| servers.as_object())
+            .is_some_and(|servers| servers.contains_key("astrolabe")),
+        Err(err) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "cursor mcp.json is invalid JSON; ignoring"
+            );
+            false
+        }
+    }
+}
+
+/// 本项目是否视为已启用 astrolabe MCP。
+///
+/// 判定顺序（与 cursor-agent 的 ServerApprovalMiddleware 对齐）：
+/// 1. `mcp-disabled.json` 命中 astrolabe → 未启用；
+/// 2. 项目级 `<workspace_root>/.cursor/mcp.json` 声明 astrolabe → 必须
+///    `mcp-approvals.json` 命中（项目级 server 才走审批门禁）；
+/// 3. 否则全局 `~/.cursor/mcp.json` 声明 astrolabe → 已启用（全局 server 不走审批）；
+/// 4. 都没有 → 未启用。
+pub(crate) fn cursor_mcp_approved(home: &Path, workspace_root: &Path) -> bool {
+    let Some(project_dir) = cursor_project_dir_name(workspace_root) else {
+        return false;
+    };
+    let base = home.join(".cursor").join("projects").join(project_dir);
+    if list_contains_astrolabe(load_cursor_mcp_server_list(&base.join("mcp-disabled.json"))) {
+        return false;
+    }
+    let approved = list_contains_astrolabe(load_cursor_mcp_server_list(
+        &base.join("mcp-approvals.json"),
+    ));
+    let project_mcp = workspace_root.join(".cursor").join("mcp.json");
+    if mcp_json_has_astrolabe_server(&project_mcp) {
+        return approved;
+    }
+    mcp_json_has_astrolabe_server(&home.join(".cursor").join("mcp.json"))
+}
+
+/// 从 hook payload 提取工作区根目录。
+///
+/// Cursor 原生 preToolUse 顶层 `cwd` 恒为空，真实项目根在 `workspace_roots[0]`；
+/// `tool_input.cwd` 只是 Shell 单次命令的子目录，必须排在 `workspace_roots` 之后。
+/// 顺序：顶层 cwd/workspace_directory/workspace → `workspace_roots` →
+/// `tool_input.cwd`。只接受绝对路径。
+pub(crate) fn workspace_root_from_hook_input(input: &serde_json::Value) -> Option<PathBuf> {
+    let as_absolute = |s: &str| {
+        let s = s.trim();
+        if s.is_empty() {
+            None
+        } else {
+            let p = PathBuf::from(s);
+            p.is_absolute().then_some(p)
+        }
+    };
+
+    if let Some(root) = ["cwd", "workspace_directory", "workspace"]
+        .iter()
+        .find_map(|k| input.get(*k).and_then(|v| v.as_str()))
+        .and_then(as_absolute)
+    {
+        return Some(root);
+    }
+    if let Some(root) = input
+        .get("workspace_roots")
+        .and_then(|v| v.as_array())
+        .and_then(|roots| {
+            roots
+                .iter()
+                .filter_map(|v| v.as_str())
+                .find_map(as_absolute)
+        })
+    {
+        return Some(root);
+    }
+    input
+        .get("tool_input")
+        .or_else(|| input.get("toolInput"))
+        .and_then(|ti| ti.get("cwd"))
+        .and_then(|v| v.as_str())
+        .and_then(as_absolute)
+}
+
+/// 解析 Cursor 工作区根目录：payload → `CURSOR_PROJECT_DIR` →
+/// `CLAUDE_PROJECT_DIR` → 进程 cwd。
+///
+/// Cursor 运行全局 hooks 时 hook 进程 cwd 固定为 `~/.cursor`，因此环境变量
+/// 必须排在 `current_dir` 之前；`current_dir` 仅作为最后兜底。
+pub(crate) fn resolve_cursor_workspace_root_with(
+    input: &serde_json::Value,
+    get_env: impl Fn(&str) -> Option<String>,
+    fallback_cwd: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let from_env = |key: &str| {
+        get_env(key)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+    };
+    workspace_root_from_hook_input(input)
+        .or_else(|| from_env("CURSOR_PROJECT_DIR"))
+        .or_else(|| from_env("CLAUDE_PROJECT_DIR"))
+        .or(fallback_cwd)
+}
+
+/// 命令行是否带 Cursor 客户端上下文（`--context=cursor` 或 `--context cursor`）。
+pub(crate) fn cmdline_has_cursor_context(lower_cmdline: &str) -> bool {
+    let tokens: Vec<&str> = lower_cmdline.split_whitespace().collect();
+    if tokens.iter().any(|t| {
+        matches!(
+            *t,
+            "--context=cursor"
+                | "--context=cursor-agent"
+                | "--context=cursor_agent"
+                | "--context=cursor-cli"
+        )
+    }) {
+        return true;
+    }
+    tokens.windows(2).any(|w| {
+        w[0] == "--context"
+            && matches!(
+                w[1],
+                "cursor" | "cursor-agent" | "cursor_agent" | "cursor-cli"
+            )
+    })
+}
+
+/// 路径等价判定：优先 canonicalize（macOS `/var` ↔ `/private/var`），失败时退化为
+/// 分隔符归一化后的字符串比较。
+fn paths_equivalent(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => {
+            let norm = |p: &Path| {
+                p.to_string_lossy()
+                    .replace('\\', "/")
+                    .trim_end_matches('/')
+                    .to_string()
+            };
+            norm(a) == norm(b)
+        }
+    }
+}
+
+/// 单条进程记录是否匹配「正在为该项目提供服务的 astrolabe cursor MCP」。
+pub(crate) fn process_matches_cursor_astrolabe(
+    cmdline: &str,
+    proc_cwd: Option<&Path>,
+    workspace_root: Option<&Path>,
+) -> bool {
+    let lower = cmdline.to_ascii_lowercase();
+    // A hook may carry the same context and cwd as its MCP server. It is not
+    // evidence that the server is available (including a concurrent hook).
+    let is_hook = lower
+        .split_whitespace()
+        .any(|token| token.trim_matches(['\'', '"']) == "hooks");
+    if !lower.contains("astrolabe") || !cmdline_has_cursor_context(&lower) || is_hook {
+        return false;
+    }
+    match workspace_root {
+        None => true,
+        Some(root) => proc_cwd.is_some_and(|cwd| paths_equivalent(cwd, root)),
+    }
+}
+
+fn process_is_cursor_astrolabe_server(
+    pid: u32,
+    cmdline: &str,
+    proc_cwd: Option<&Path>,
+    workspace_root: Option<&Path>,
+) -> bool {
+    pid != std::process::id() && process_matches_cursor_astrolabe(cmdline, proc_cwd, workspace_root)
+}
+
+// ---- 进程存活探测 ----------------------------------------------------------
+// 只关心 Cursor 会话里的 astrolabe MCP 进程（`--context=cursor`）。
+// 无法可靠读取 cwd 时按「不存活」处理，倾向于降级放行（避免再次死锁）。
+
+#[cfg(target_os = "macos")]
+fn process_cwd_for_pid(pid: &str) -> Option<PathBuf> {
+    let lsof = if Path::new("/usr/sbin/lsof").exists() {
+        "/usr/sbin/lsof"
+    } else {
+        "lsof"
+    };
+    let out = std::process::Command::new(lsof)
+        .args(["-a", "-p", pid, "-d", "cwd", "-Fn"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix('n'))
+        .map(PathBuf::from)
+}
+
+#[cfg(target_os = "macos")]
+fn astrolabe_cursor_process_alive(workspace_root: Option<&Path>) -> bool {
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+    else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let line = line.trim_start();
+        let Some((pid, cmdline)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let Ok(process_id) = pid.parse::<u32>() else {
+            continue;
+        };
+        let cmdline = cmdline.trim_start();
+        if !process_is_cursor_astrolabe_server(process_id, cmdline, None, None) {
+            continue;
+        }
+        let cwd = process_cwd_for_pid(pid);
+        if process_matches_cursor_astrolabe(cmdline, cwd.as_deref(), workspace_root) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn astrolabe_cursor_process_alive(workspace_root: Option<&Path>) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str() else {
+            continue;
+        };
+        if !pid.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let proc_dir = entry.path();
+        let Ok(raw) = std::fs::read(proc_dir.join("cmdline")) else {
+            continue;
+        };
+        let cmdline = String::from_utf8_lossy(&raw).replace('\0', " ");
+        let Ok(process_id) = pid.parse::<u32>() else {
+            continue;
+        };
+        if !process_is_cursor_astrolabe_server(process_id, &cmdline, None, None) {
+            continue;
+        }
+        let cwd = std::fs::read_link(proc_dir.join("cwd")).ok();
+        if process_matches_cursor_astrolabe(&cmdline, cwd.as_deref(), workspace_root) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn astrolabe_cursor_process_alive(_workspace_root: Option<&Path>) -> bool {
+    // No reliable project-scoped probe is available on these platforms (including
+    // Windows). Unknown availability must not strand auto mode in a hard deny;
+    // users who require unconditional blocking can explicitly select enforce.
+    false
+}
+
+/// 结合批准状态与进程存活状态决定是否维持强制拦截。
+pub(crate) fn cursor_should_enforce(mode: CursorMode, approved: bool, alive: bool) -> bool {
+    match mode {
+        CursorMode::Enforce => true,
+        CursorMode::Advisory => false,
+        CursorMode::Auto => approved && alive,
+    }
+}
+
+/// 按 payload 与 home 计算 Cursor 是否应维持强制拦截。
+pub(crate) fn cursor_enforcement_for_payload(
+    mode: CursorMode,
+    input: &serde_json::Value,
+    home_override: Option<&Path>,
+) -> bool {
+    if mode != CursorMode::Auto {
+        return cursor_should_enforce(mode, false, false);
+    }
+    let workspace_root = resolve_cursor_workspace_root_with(
+        input,
+        |key| std::env::var(key).ok(),
+        std::env::current_dir().ok(),
+    );
+    let Some(workspace_root) = workspace_root else {
+        return false;
+    };
+    let Some(home) = home_override.map(PathBuf::from).or_else(get_user_home) else {
+        return false;
+    };
+    let approved = cursor_mcp_approved(&home, &workspace_root);
+    if !approved {
+        return false;
+    }
+    cursor_should_enforce(
+        CursorMode::Auto,
+        approved,
+        astrolabe_cursor_process_alive(Some(&workspace_root)),
+    )
+}
+
+/// Cursor 降级模式的非阻断提醒：`permission: allow` + 温和说明。
+pub(crate) fn build_cursor_advisory_output(deny_kind: DenyKind) -> String {
+    let area = match deny_kind {
+        DenyKind::Grep | DenyKind::TextSearch => "text search",
+        DenyKind::Glob => "Glob / file search",
+        DenyKind::Read | DenyKind::Slice => "file read",
+        DenyKind::Mixed => "grep/read",
+    };
+    let msg = format!(
+        "Astrolabe hook advisory: Astrolabe MCP is not available in this Cursor session \
+         (not approved for this project, or its --context=cursor server is not running), \
+         so this {area} call is allowed. No action required. To restore symbolic-index \
+         guidance, approve the astrolabe MCP server for this project; set \
+         ASTROLABE_HOOK_CURSOR_MODE=enforce to force the old blocking behavior."
+    );
+    serde_json::json!({
+        "permission": "allow",
+        "agent_message": msg,
+    })
+    .to_string()
 }
 
 /// 计数状态持久化结构体（保存在 ~/.astrolabe/hook_data/<session_id>/counter.json）
@@ -505,7 +981,7 @@ fn hashed_session_id(raw: &str) -> String {
 ///
 /// trim 后非空、长度 ≤ 128、且能通过 [`sanitize_session_id`] 校验（`[A-Za-z0-9_-]`）
 /// 时原样返回；否则返回 `ag-<fnv1a64 十六进制>`（防路径穿越，兼容带冒号/点/斜杠的 agent 名）。
-fn sanitize_agent_component(raw: &str) -> String {
+pub(crate) fn sanitize_agent_component(raw: &str) -> String {
     let trimmed = raw.trim();
     if !trimmed.is_empty() && trimmed.len() <= 128 && sanitize_session_id(trimmed).is_ok() {
         trimmed.to_string()
@@ -648,18 +1124,18 @@ fn command_value_to_string(v: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// 本服务固定目录里的 7 个工具名
+/// 本服务固定目录里的 7 个工具名（canonical 短名）。
 const ASTROLABE_CATALOG_TOOLS: &[&str] = &[
-    "resolve_context",
+    "resolve_contx",
     "search_code",
     "find_symbol",
-    "find_references",
-    "goto_definition",
-    "get_diagnostics",
-    "get_languages",
+    "find_refs",
+    "goto_def",
+    "get_diag",
+    "get_lang",
 ];
 
-/// 工具名是否属于 Astrolabe：含 "astrolabe" 且含固定目录或兼容别名里的某个工具名。
+/// 工具名是否属于 Astrolabe：含 "astrolabe" 且含固定目录、别名或兼容别名里的某个工具名。
 /// 第三方 `mcp__astrolabe_docs__fetch` 之类仅名字撞上的工具不算。
 pub(crate) fn is_astrolabe_tool(tool_name: &str) -> bool {
     if !tool_name.contains("astrolabe") {
@@ -668,6 +1144,9 @@ pub(crate) fn is_astrolabe_tool(tool_name: &str) -> bool {
     ASTROLABE_CATALOG_TOOLS
         .iter()
         .any(|t| tool_name.contains(t))
+        || crate::compat::TOOL_ALIAS_NAMES
+            .iter()
+            .any(|t| tool_name.contains(t))
         || crate::compat::COMPAT_TOOL_NAMES
             .iter()
             .any(|t| tool_name.contains(t))
@@ -696,6 +1175,123 @@ pub(crate) fn is_code_file_path(path: &str) -> bool {
     } else {
         false
     }
+}
+
+/// Only positively identified resources/documents are neutral. Unknown extensions and
+/// unsupported programming languages must retain the existing mixed-read guard.
+fn is_non_code_resource(path: &str) -> bool {
+    let path = path.trim().trim_matches(['\'', '"']);
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "svg" | "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" | "md" | "rst" | "txt" | "log"
+    ) && !Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(is_code_file_path)
+        .unwrap_or(false)
+}
+
+/// A deliberately small, lexical exception for explicit temporary diagnostic text.
+/// No globs, substitutions, traversal, directories, source files or implicit cwd searches.
+fn is_temporary_diagnostic_path(path: &str) -> bool {
+    (path.starts_with("/tmp/")
+        || path.starts_with("/private/tmp/")
+        || path.starts_with("/var/tmp/"))
+        && !path.contains(['$', '`', '*', '?', '[', ']', '<', '>', '\n'])
+        && !path.split('/').any(|part| part == ".." || part == ".")
+        && matches!(
+            Path::new(path).extension().and_then(|s| s.to_str()),
+            Some("txt" | "log")
+        )
+        && is_non_code_resource(path)
+}
+
+fn is_diagnostic_text_search(inv: &ShellInvocation) -> bool {
+    if !matches!(inv.command.as_str(), "grep" | "egrep" | "fgrep" | "rg") {
+        return false;
+    }
+    let segments = split_shell_segments(&inv.args);
+    if segments.len() != 1 {
+        return false;
+    }
+    let mut pattern_seen = false;
+    let mut explicit_pattern = false;
+    let mut paths = 0;
+    let mut options = true;
+    for token in &segments[0].tokens {
+        let t = token.text.as_str();
+        if explicit_pattern {
+            explicit_pattern = false;
+            pattern_seen = true;
+        } else if options && t == "--" {
+            options = false;
+        } else if options && (t == "-e" || t == "--regexp") {
+            explicit_pattern = true;
+        } else if options && t.starts_with('-') {
+            // Unknown options (especially recursive, file/type/glob and pattern-file
+            // options) are never assumed safe. Common output/matching flags only.
+            if !t.starts_with("--")
+                && t.len() > 1
+                && t[1..].chars().all(|c| "oEinivchHslqFwxa".contains(c))
+            {
+                continue;
+            }
+            return false;
+        } else if !pattern_seen {
+            pattern_seen = true;
+        } else if is_temporary_diagnostic_path(t) {
+            paths += 1;
+        } else {
+            return false;
+        }
+    }
+    pattern_seen && !explicit_pattern && (paths > 0 || inv.after_pipe)
+}
+
+/// All primary searches must qualify: a harmless diagnostic earlier in a compound
+/// command must not hide source discovery later. Unknown companion commands remain
+/// conservative rather than being treated as diagnostics by association.
+fn diagnostic_search_only(cmd: &str) -> bool {
+    if cmd.contains(['$', '`']) {
+        return false;
+    }
+    let invocations = shell_invocations(cmd);
+    let mut found = false;
+    for inv in &invocations {
+        if is_text_search_command(&inv.command) || is_git_grep(inv) {
+            if !is_diagnostic_text_search(inv) {
+                return false;
+            }
+            found |= !inv.after_pipe;
+        } else if !matches!(
+            inv.command.as_str(),
+            "ps" | "echo"
+                | "printf"
+                | "wc"
+                | "tail"
+                | "head"
+                | "cat"
+                | "sort"
+                | "strings"
+                | "file"
+                | "stat"
+                | "du"
+                | "pwd"
+                | "date"
+        ) || (READ_SHELL_COMMANDS.contains(&inv.command.as_str())
+            || matches!(inv.command.as_str(), "sort" | "strings"))
+            && iter_shell_path_arguments(&inv.args)
+                .iter()
+                .any(|p| !p.chars().all(|c| c.is_ascii_digit()) && !is_temporary_diagnostic_path(p))
+        {
+            return false;
+        }
+    }
+    found
 }
 
 /// 从 shell 命令行参数中提取非选项路径参数
@@ -1371,6 +1967,12 @@ pub(crate) fn classify_tool_ex(
         }
     }
 
+    // Explicit runtime/temporary-text diagnostics cannot be answered by a code
+    // index. Keep the hard text-search policy unchanged, including pipelines.
+    if !deny_text_search && full_command.map(diagnostic_search_only).unwrap_or(false) {
+        return ToolKind::Neutral;
+    }
+
     // 1.8 Soft primary code-search: non-piped `rg`/`grep -rn`/`git grep` (and wrappers
     // like `cd x && rg …`) count as Grep so Bash cannot bypass the host Grep deny.
     // Pipe-only greps stay Neutral here (`go test | grep FAIL`); hard mode still
@@ -1448,6 +2050,12 @@ pub(crate) fn classify_tool_ex(
     };
 
     if is_read {
+        // Resource reads must not inherit an unrelated code-discovery burst.
+        // Shell commands are excluded here: their representative command can hide
+        // another read/search in a compound command.
+        if full_command.is_none() && file_path.map(is_non_code_resource).unwrap_or(false) {
+            return ToolKind::Neutral;
+        }
         // 切片精读（slice read）：Read 工具带合法 limit 的局部读取计入连续切片额度；
         // 非代码文件（未索引语言/markdown 等）的切片保持中立——与全量读口径一致
         // （Read{is_code_file:false} 不计 n_read），把它们推向 search_code 没有意义；
@@ -1652,47 +2260,103 @@ pub(crate) fn decide_with(
 /// 就不是禁止探索而是给出更省 token 的探索方式）。
 /// 文案口径：直接给出切换指令（Stop using ... Call ... now），不再出现
 /// "You can continue using ... the counter was reset" 软口径。
+/// When PreToolUse carries a subagent `agent_id` for an Astrolabe MCP tool,
+/// rewrite `tool_input` so the MCP server receives that identity (Claude Code
+/// does not put agent id on MCP `_meta` today). `updatedInput` replaces the
+/// whole input — copy every original field and only add `agent_id`.
+///
+/// Returns `None` when the client is not known to honor `updatedInput`, when
+/// `agent_id` is already present, or when there is nothing to inject.
+fn build_agent_id_inject_output(
+    client: Client,
+    tool_input: &serde_json::Value,
+    agent_id: &str,
+) -> Option<String> {
+    let agent_id = agent_id.trim();
+    if agent_id.is_empty() {
+        return None;
+    }
+    match client {
+        // Claude Code family documents PreToolUse `updatedInput`.
+        Client::ClaudeCode
+        | Client::Codebuddy
+        | Client::Vscode
+        | Client::KimiCode
+        | Client::ZCode
+        | Client::Other => {}
+        // Cursor / Grok / OpenCode / Codex: do not emit — MCP side treats
+        // missing identity as no-dedup so siblings still get FULL bodies.
+        Client::Cursor | Client::Grok | Client::OpenCode | Client::Codex => return None,
+    }
+    let mut updated = match tool_input {
+        serde_json::Value::Object(map) => map.clone(),
+        _ => serde_json::Map::new(),
+    };
+    let already = ["agent_id", "agentId", "agent"].iter().any(|k| {
+        updated
+            .get(*k)
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty())
+    });
+    if already {
+        return None;
+    }
+    updated.insert(
+        "agent_id".to_string(),
+        serde_json::Value::String(agent_id.to_string()),
+    );
+    Some(
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "updatedInput": updated,
+            }
+        })
+        .to_string(),
+    )
+}
+
 pub(crate) fn build_output(client: Client, deny_kind: DenyKind) -> String {
     let max_limit = config().slice_read_max_limit;
     let slice_threshold = config().slice_read_threshold;
     let readonly_note = format!(" Note: all Astrolabe tools are read-only and safe for exploration tasks. Also note: slice reads with limit <= {max_limit} are still permitted, but {slice_threshold} consecutive ones without any Astrolabe tool call trigger a reminder (tunable via ASTROLABE_SLICE_READ_THRESHOLD).");
-    let unindexed_lang_note = " If your target files are in a language Astrolabe does not index (see the get_languages tool), grep is the correct tool for them — ignore this reminder.";
-    // Prefer symbolic tools: they reset n_grep/n_read/n_non_symbolic. search_code only
-    // clears n_slice — following a search_code-only hint can still hit Read/Grep deny.
+    let unindexed_lang_note = " If your target files are in a language Astrolabe does not index (see the get_lang tool), grep is the correct tool for them — ignore this reminder.";
+    // Prefer relevant symbolic tools for discovery; every recognized Astrolabe
+    // tool, including search_code, resets the complete discovery burst.
     let switch_instruction =
-        "Stop using Grep/grep/rg/read for code discovery. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context first (they reset grep/read burst counters); mcp__astrolabe__search_code is for literal/regex text search but only clears the slice-read counter, not n_grep/n_read. Call a symbolic Astrolabe tool now (read-only, safe).";
+        "Stop using Grep/grep/rg/read for code discovery. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_contx first (they reset grep/read burst counters); mcp__astrolabe__search_code is for literal/regex text search and also resets the full grep/read/slice burst. Call a symbolic Astrolabe tool now (read-only, safe).";
     let (reason, ctx) = match deny_kind {
         DenyKind::Grep => (
-            "Too many consecutive grep/rg calls without using symbolic tools. Stop using Grep/grep/rg (including Bash rg/grep -rn) for code discovery. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context first (full burst reset); mcp__astrolabe__search_code only clears the slice-read counter. Call a symbolic Astrolabe tool now (read-only, safe).",
+            "Too many consecutive grep/rg calls without using symbolic tools. Stop using Grep/grep/rg (including Bash rg/grep -rn) for code discovery. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_contx first (full burst reset); mcp__astrolabe__search_code also resets the full burst. Call a symbolic Astrolabe tool now (read-only, safe).",
             format!(
-                "You were using many Grep/grep/rg calls recently (host Grep or Bash text-search). Prefer Astrolabe symbolic tools: find_symbol / resolve_context reset the grep/read burst counters; find_references returns path:line anchors. search_code is fine for literal/regex but only clears the slice-read counter — it will not clear n_grep/n_read, so you may still hit Read deny afterward. {switch_instruction}{unindexed_lang_note}"
+                "You were using many Grep/grep/rg calls recently (host Grep or Bash text-search). Prefer Astrolabe symbolic tools: find_symbol / resolve_contx reset the grep/read burst counters; find_refs returns path:line anchors. search_code is for literal/regex and also resets the full grep/read/slice burst. {switch_instruction}{unindexed_lang_note}"
             ),
         ),
         DenyKind::TextSearch => (
-            "Text search with Grep/grep/rg/ag/ack/git grep is disabled (ASTROLABE_DENY_TEXT_SEARCH). Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context first (full burst reset); mcp__astrolabe__search_code for literal/regex (slice counter only); also find_references / goto_definition. Reading known files with Read/cat, ls, and build/test commands are still allowed.",
+            "Text search with Grep/grep/rg/ag/ack/git grep is disabled (ASTROLABE_DENY_TEXT_SEARCH). Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_contx first (full burst reset); mcp__astrolabe__search_code for literal/regex (full burst reset); also find_refs / goto_def. Reading known files with Read/cat, ls, and build/test commands are still allowed.",
             format!(
-                "Host text-search tools (Grep, grep, rg, ag, ack, git grep, zgrep) are hard-disabled for this Astrolabe process. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context first (they reset burst counters); use mcp__astrolabe__search_code for literal/regex enclosing bodies (clears slice-read counter only); also find_references / goto_definition (read-only, safe).{unindexed_lang_note}"
+                "Host text-search tools (Grep, grep, rg, ag, ack, git grep, zgrep) are hard-disabled for this Astrolabe process. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_contx first (they reset burst counters); use mcp__astrolabe__search_code for literal/regex enclosing bodies (resets the full grep/read/slice burst); also find_refs / goto_def (read-only, safe).{unindexed_lang_note}"
             ),
         ),
         DenyKind::Glob => (
-            "Glob / file_search is disabled (ASTROLABE_DENY_TEXT_SEARCH). Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context first; also search_code / find_references / goto_definition.",
-            "Host Glob / file_search is hard-disabled for this Astrolabe process. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context to locate symbols and paths (full burst reset); mcp__astrolabe__search_code is an alternative for text/path discovery (slice counter only).".to_string(),
+            "Glob / file_search is disabled (ASTROLABE_DENY_TEXT_SEARCH). Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_contx first; also search_code / find_refs / goto_def.",
+            "Host Glob / file_search is hard-disabled for this Astrolabe process. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_contx to locate symbols and paths (full burst reset); mcp__astrolabe__search_code is an alternative for text/path discovery (full burst reset).".to_string(),
         ),
         DenyKind::Read => (
-            "Too many consecutive read calls of files without using symbolic tools. Stop using read for code discovery. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context first (full burst reset); mcp__astrolabe__search_code only clears the slice-read counter. Call a symbolic Astrolabe tool now (read-only, safe).",
+            "Too many consecutive read calls of files without using symbolic tools. Stop using read for code discovery. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_contx first (full burst reset); mcp__astrolabe__search_code also resets the full burst. Call a symbolic Astrolabe tool now (read-only, safe).",
             format!(
-                "You were using many read calls on files recently. Prefer Astrolabe symbolic tools for targeted reads: find_symbol / resolve_context return exact bodies and path:line anchors and reset grep/read burst counters; search_code helps locate text but only clears the slice-read counter. {switch_instruction}"
+                "You were using many read calls on files recently. Prefer Astrolabe symbolic tools for targeted reads: find_symbol / resolve_contx return exact bodies and path:line anchors and reset grep/read burst counters; search_code helps locate text and also resets the full grep/read/slice burst. {switch_instruction}"
             ),
         ),
         DenyKind::Mixed => (
-            "Too many consecutive non-symbolic tool calls (mixed grep and read). Stop using Grep/grep/rg/read for code discovery. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context first (full burst reset); mcp__astrolabe__search_code only clears the slice-read counter. Call a symbolic Astrolabe tool now (read-only, safe).",
+            "Too many consecutive non-symbolic tool calls (mixed grep and read). Stop using Grep/grep/rg/read for code discovery. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_contx first (full burst reset); mcp__astrolabe__search_code also resets the full burst. Call a symbolic Astrolabe tool now (read-only, safe).",
             format!(
-                "You were alternating between grep/rg and read file calls recently without using Astrolabe's symbolic mcp tools. Prefer find_symbol / resolve_context (reset burst counters); search_code is for literal/regex and only clears the slice-read counter. {switch_instruction}{unindexed_lang_note}"
+                "You were alternating between grep/rg and read file calls recently without using Astrolabe's symbolic mcp tools. Prefer find_symbol / resolve_contx (reset burst counters); search_code is for literal/regex and also resets the full grep/read/slice burst. {switch_instruction}{unindexed_lang_note}"
             ),
         ),
         DenyKind::Slice => (
-            "Too many consecutive file-slice reads without using any Astrolabe tool. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context first; mcp__astrolabe__search_code also clears the slice-read counter — they are read-only and return exact bodies with path:line anchors.",
-            "You were using many slice reads (small limit-bounded Read calls) recently without calling any Astrolabe tool. Slice reads are still permitted for precision work, but locate the region first: prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_context; mcp__astrolabe__search_code also clears this slice-read counter (unlike grep/read counters). Call an Astrolabe tool now (read-only, safe).".to_string(),
+            "Too many consecutive file-slice reads without using any Astrolabe tool. Prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_contx first; mcp__astrolabe__search_code also clears the slice-read counter — they are read-only and return exact bodies with path:line anchors.",
+            "You were using many slice reads (small limit-bounded Read calls) recently without calling any Astrolabe tool. Slice reads are still permitted for precision work, but locate the region first: prefer mcp__astrolabe__find_symbol or mcp__astrolabe__resolve_contx; mcp__astrolabe__search_code also resets the full grep/read/slice burst. Call an Astrolabe tool now (read-only, safe).".to_string(),
         ),
     };
     let ctx = format!("{ctx}{readonly_note}");
@@ -2139,12 +2803,22 @@ pub(crate) fn run_remind_impl_with<R: Read, W: Write, E: Write>(
             // 静默窗内或中立工具：不写盘，无输出
             0
         }
-        Decision::ResetSymbolic => {
-            // 符号工具：已清零 burst 计数并保存，无输出
-            0
-        }
-        Decision::ResetSlice => {
-            // 非符号 astrolabe 工具：已全量清零 burst（含 grep/read）并结束静默窗
+        Decision::ResetSymbolic | Decision::ResetSlice => {
+            // Astrolabe MCP tool: burst cleared. When the host payload carries
+            // agent_id (subagent), inject it into tool_input so the MCP server
+            // can shard body dedup — Claude Code omits agent id on MCP `_meta`.
+            if let Some(agent) = agent_id.as_deref() {
+                if let Some(ti) = raw_tool_input {
+                    if let Some(out) = build_agent_id_inject_output(client, ti, agent) {
+                        tracing::debug!(
+                            agent_id = %agent,
+                            tool_name = %tool_name,
+                            "injecting agent_id into Astrolabe tool_input via updatedInput"
+                        );
+                        let _ = writeln!(stdout, "{out}");
+                    }
+                }
+            }
             0
         }
         Decision::Allow => {
@@ -2152,10 +2826,26 @@ pub(crate) fn run_remind_impl_with<R: Read, W: Write, E: Write>(
             0
         }
         Decision::Deny(deny_kind) => {
-            // 超阈值触发 deny：已清零并保存，输出 JSON
-            let output_str = build_output(client, deny_kind);
-            tracing::info!(?deny_kind, client = %client_name, "emitting anti-drift deny hint");
-            let _ = writeln!(stdout, "{output_str}");
+            // 超阈值触发 deny：已清零并保存，输出 JSON。
+            // Cursor 自动模式：仅当本项目已批准 astrolabe MCP 且对应进程存活时才维持
+            // 强制拦截；否则降级为 `permission: allow` + 温和提醒（退出码仍为 0）。
+            let enforce = if client == Client::Cursor {
+                cursor_enforcement_for_payload(cfg.cursor_mode, &input_data, home_override)
+            } else {
+                true
+            };
+            if enforce {
+                let output_str = build_output(client, deny_kind);
+                tracing::info!(?deny_kind, client = %client_name, "emitting anti-drift deny hint");
+                let _ = writeln!(stdout, "{output_str}");
+            } else {
+                tracing::info!(
+                    ?deny_kind,
+                    client = %client_name,
+                    "cursor astrolabe MCP unavailable; downgrading deny to advisory"
+                );
+                let _ = writeln!(stdout, "{}", build_cursor_advisory_output(deny_kind));
+            }
             0
         }
     }
@@ -2299,6 +2989,244 @@ pub fn run_cleanup() -> i32 {
 mod tests {
     use super::*;
 
+    const FORENSICS_COMMAND: &str = r#"ps aux | grep -c '[s]trings'; echo '--- lines ---'; wc -l /tmp/agcli-151-strings.txt; echo '--- tail ---'; tail -c 300 /tmp/agcli-151-strings.txt | cat -v | tail -5; echo; echo '--- version strings ---'; grep -oE '1\.5\.[0-9]' /tmp/agcli-151-strings.txt | sort -u | head"#;
+
+    fn classify_session_bash(command: &str, hard: bool) -> ToolKind {
+        let (name, args) = effective_shell_command(command).unwrap();
+        classify_tool_ex(
+            "bash",
+            Client::ClaudeCode,
+            None,
+            Some(&name),
+            args.as_deref(),
+            Some(command),
+            None,
+            None,
+            hard,
+        )
+    }
+
+    #[test]
+    fn session_diagnostics_classification_is_narrow() {
+        for command in [
+            FORENSICS_COMMAND,
+            "grep -n error /tmp/build.log",
+            "rg -e 'error words' '/private/tmp/build output.txt'",
+            "grep error /tmp/build.log | grep -v debug",
+        ] {
+            assert_eq!(
+                classify_session_bash(command, false),
+                ToolKind::Neutral,
+                "{command}"
+            );
+            assert_eq!(
+                classify_session_bash(command, true),
+                ToolKind::Grep,
+                "hard: {command}"
+            );
+        }
+        for command in [
+            "grep error /tmp/source.rs",
+            "rg error /tmp/source.rs.txt",
+            "grep error /tmp/build.log src/lib.rs",
+            "grep error /tmp/../repo/build.log",
+            "grep error /tmp/*.txt",
+            "grep error /tmp/$FILE.txt",
+            "grep error",
+            "grep -r error /tmp/build.log",
+            "grep -f /tmp/pattern.txt /tmp/build.log",
+            "grep --include=*.rs error /tmp/build.log",
+            "grep error /tmp/build.log; rg Handler src",
+            "grep error /tmp/build.log && cat src/lib.rs",
+            "grep error /tmp/build.log && cat src/Unknown.scala",
+            "grep error /tmp/build.log | cat src/lib.rs",
+            "grep error /tmp/build.log; sort src/lib.rs",
+            "grep '$(cat src/lib.rs)' /tmp/build.log",
+            "echo `rg Handler src`; grep error /tmp/build.log",
+            "grep error /tmp/build.log | grep Handler src/lib.rs",
+            "grep error /tmp/build.log; python inspect.py",
+            "bash -lc 'grep error /tmp/build.log; rg Handler src'",
+            "grep error /tmp/build.log; git grep Handler",
+        ] {
+            assert_eq!(
+                classify_session_bash(command, false),
+                ToolKind::Grep,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_resource_reads_do_not_clear_or_increment_code_burst() {
+        let mut counter = CounterState {
+            n_grep: 2,
+            n_non_symbolic: 3,
+            last_grep_ts: Some(1000.0),
+            last_non_symbolic_ts: Some(1000.0),
+            ..CounterState::default()
+        };
+        let before = counter.clone();
+        for path in [
+            "/repo/src/app/assets/agents/codex.svg",
+            "README.md",
+            "/tmp/build.log",
+        ] {
+            let kind = classify_tool(
+                "read",
+                Client::ClaudeCode,
+                Some(path),
+                None,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(kind, ToolKind::Neutral, "{path}");
+            assert_eq!(
+                decide_with(&mut counter, kind, 1001.0, &HooksConfig::default()),
+                Decision::NeutralAllow
+            );
+            assert_eq!(counter, before);
+        }
+        for path in [
+            "/tmp/source.rs",
+            "src/widget.tsx",
+            "src/Unknown.scala",
+            "src/Makefile",
+            "src/code.rs.txt",
+        ] {
+            let kind = classify_tool(
+                "read",
+                Client::ClaudeCode,
+                Some(path),
+                None,
+                None,
+                None,
+                None,
+            );
+            assert_ne!(kind, ToolKind::Neutral, "{path}");
+        }
+        assert_eq!(
+            decide_with(
+                &mut counter,
+                ToolKind::Grep,
+                1002.0,
+                &HooksConfig::default()
+            ),
+            Decision::Deny(DenyKind::Grep)
+        );
+        let symbolic = classify_tool(
+            "mcp__astrolabe__find_symbol",
+            Client::ClaudeCode,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            decide_with(&mut counter, symbolic, 1003.0, &HooksConfig::default()),
+            Decision::ResetSymbolic
+        );
+        assert_eq!(counter.last_deny_ts, None);
+        assert_eq!(
+            decide_with(
+                &mut counter,
+                ToolKind::Grep,
+                1004.0,
+                &HooksConfig::default()
+            ),
+            Decision::Allow
+        );
+        assert_eq!(counter.n_grep, 1);
+        let mut reads = CounterState {
+            n_read: 2,
+            n_non_symbolic: 2,
+            last_read_ts: Some(1000.0),
+            last_non_symbolic_ts: Some(1000.0),
+            ..CounterState::default()
+        };
+        let source = classify_tool(
+            "read",
+            Client::ClaudeCode,
+            Some("src/widget.tsx"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(source, ToolKind::Read { is_code_file: true });
+        assert_eq!(
+            decide_with(&mut reads, source, 1001.0, &HooksConfig::default()),
+            Decision::Deny(DenyKind::Read)
+        );
+    }
+
+    #[test]
+    fn session_forensics_and_svg_payloads_isolated_hook_regression() {
+        let home = std::env::temp_dir().join(format!(
+            "astrolabe_diagnostics_{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let session = "session-diagnostic-regression";
+        let path = get_hook_data_dir(&home, session, None)
+            .unwrap()
+            .join("counter.json");
+        let seed = CounterState {
+            n_grep: 2,
+            n_non_symbolic: 3,
+            last_grep_ts: Some(1000.0),
+            last_non_symbolic_ts: Some(1000.0),
+            ..CounterState::default()
+        };
+        let cfg = HooksConfig::default();
+        for (tool, input) in [
+            ("Bash", serde_json::json!({"command": FORENSICS_COMMAND})),
+            (
+                "Read",
+                serde_json::json!({"file_path": "/repo/src/app/assets/agents/codex.svg"}),
+            ),
+        ] {
+            save_counter(&path, &seed);
+            let payload =
+                serde_json::json!({"session_id": session, "tool_name": tool, "tool_input": input})
+                    .to_string();
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            assert_eq!(
+                run_remind_impl_with(
+                    "claude-code",
+                    payload.as_bytes(),
+                    &mut out,
+                    &mut err,
+                    Some(1001.0),
+                    Some(&home),
+                    &cfg
+                ),
+                0
+            );
+            assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+            assert!(err.is_empty());
+            assert_eq!(load_counter(&path), seed);
+        }
+        let payload = serde_json::json!({"session_id": session, "tool_name": "Bash",
+            "tool_input": {"command": "grep Handler src/lib.rs"}})
+        .to_string();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        run_remind_impl_with(
+            "claude-code",
+            payload.as_bytes(),
+            &mut out,
+            &mut err,
+            Some(1001.0),
+            Some(&home),
+            &cfg,
+        );
+        assert!(String::from_utf8_lossy(&out).contains("deny"));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
     #[test]
     fn test_1_consecutive_grep_deny_and_burst_reset() {
         let mut counter = CounterState::default();
@@ -2324,6 +3252,104 @@ mod tests {
         assert_eq!(counter.n_non_symbolic, 0);
         assert_eq!(counter.last_grep_ts, None);
         assert_eq!(counter.last_deny_ts, Some(t0 + 2.0));
+    }
+
+    #[test]
+    fn test_build_agent_id_inject_output_merges_and_skips_when_present() {
+        let input = serde_json::json!({"query": "Foo", "path_filter": "src"});
+        let out = build_agent_id_inject_output(Client::ClaudeCode, &input, "agent-x").unwrap();
+        let val: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(val["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert!(val["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none());
+        let updated = &val["hookSpecificOutput"]["updatedInput"];
+        assert_eq!(updated["query"], "Foo");
+        assert_eq!(updated["path_filter"], "src");
+        assert_eq!(updated["agent_id"], "agent-x");
+
+        // Already present → None
+        let with_id = serde_json::json!({"query": "Foo", "agent_id": "existing"});
+        assert!(build_agent_id_inject_output(Client::ClaudeCode, &with_id, "agent-x").is_none());
+
+        // Cursor does not get injection
+        assert!(build_agent_id_inject_output(Client::Cursor, &input, "agent-x").is_none());
+    }
+
+    #[test]
+    fn test_astrolabe_pretooluse_injects_agent_id_via_updated_input() {
+        let rand_id = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_home = std::env::temp_dir().join(format!("astrolabe_inject_agent_{rand_id}"));
+        let sess_id = "inject_agent_sess";
+        let payload = serde_json::json!({
+            "session_id": sess_id,
+            "agent_id": "sub-agent-42",
+            "tool_name": "mcp__astrolabe__find_symbol",
+            "tool_input": { "query": "FormatScript", "include_body": true }
+        })
+        .to_string();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run_remind_impl(
+            "claude-code",
+            payload.as_bytes(),
+            &mut out,
+            &mut err,
+            Some(100.0),
+            Some(&temp_home),
+        );
+        assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&err));
+        let out_str = String::from_utf8_lossy(&out);
+        assert!(
+            out_str.contains("updatedInput"),
+            "expected updatedInput inject: {out_str}"
+        );
+        let val: serde_json::Value = serde_json::from_str(&out_str).unwrap();
+        assert_eq!(
+            val["hookSpecificOutput"]["updatedInput"]["agent_id"],
+            "sub-agent-42"
+        );
+        assert_eq!(
+            val["hookSpecificOutput"]["updatedInput"]["query"],
+            "FormatScript"
+        );
+        assert_eq!(
+            val["hookSpecificOutput"]["updatedInput"]["include_body"],
+            true
+        );
+        // No permissionDecision — keep host default permission flow
+        assert!(val["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none());
+
+        // Parent (no agent_id) → silent reset, no inject
+        out.clear();
+        let parent = serde_json::json!({
+            "session_id": sess_id,
+            "tool_name": "mcp__astrolabe__find_symbol",
+            "tool_input": { "query": "FormatScript" }
+        })
+        .to_string();
+        let code = run_remind_impl(
+            "claude-code",
+            parent.as_bytes(),
+            &mut out,
+            &mut err,
+            Some(101.0),
+            Some(&temp_home),
+        );
+        assert_eq!(code, 0);
+        assert!(
+            out.is_empty(),
+            "parent Astrolabe call must stay silent: {}",
+            String::from_utf8_lossy(&out)
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_home);
     }
 
     #[test]
@@ -2361,21 +3387,13 @@ mod tests {
     fn test_3_search_code_resets_burst_counters() {
         // 分类仍区分非符号 vs 符号（观测/文案用），但 decide 一律 reset_burst
         assert!(!is_astrolabe_symbolic_tool("mcp__astrolabe__search_code"));
-        assert!(!is_astrolabe_symbolic_tool(
-            "mcp__astrolabe__get_diagnostics"
-        ));
-        assert!(!is_astrolabe_symbolic_tool("mcp__astrolabe__get_languages"));
+        assert!(!is_astrolabe_symbolic_tool("mcp__astrolabe__get_diag"));
+        assert!(!is_astrolabe_symbolic_tool("mcp__astrolabe__get_lang"));
 
         assert!(is_astrolabe_symbolic_tool("mcp__astrolabe__find_symbol"));
-        assert!(is_astrolabe_symbolic_tool(
-            "mcp__astrolabe__find_references"
-        ));
-        assert!(is_astrolabe_symbolic_tool(
-            "mcp__astrolabe__goto_definition"
-        ));
-        assert!(is_astrolabe_symbolic_tool(
-            "mcp__astrolabe__resolve_context"
-        ));
+        assert!(is_astrolabe_symbolic_tool("mcp__astrolabe__find_refs"));
+        assert!(is_astrolabe_symbolic_tool("mcp__astrolabe__goto_def"));
+        assert!(is_astrolabe_symbolic_tool("mcp__astrolabe__resolve_contx"));
 
         let kind = classify_tool(
             "mcp__astrolabe__search_code",
@@ -3895,9 +4913,28 @@ mod tests {
     }
 
     #[test]
+    fn all_deny_guidance_avoids_obsolete_partial_reset_claims() {
+        for kind in [
+            DenyKind::Grep,
+            DenyKind::Glob,
+            DenyKind::TextSearch,
+            DenyKind::Read,
+            DenyKind::Mixed,
+            DenyKind::Slice,
+        ] {
+            let output = build_output(Client::ClaudeCode, kind);
+            assert!(!output.contains("slice counter only"), "{kind:?}: {output}");
+            assert!(
+                !output.contains("only clears the slice"),
+                "{kind:?}: {output}"
+            );
+        }
+    }
+
+    #[test]
     fn test_deny_texts_direct_switch_instruction() {
-        // Grep/Read/Mixed：优先推 find_symbol / resolve_context（清零 burst），
-        // 诚实说明 search_code 只清 n_slice；不得残留软口径
+        // Grep/Read/Mixed：优先推 find_symbol / resolve_contx（清零 burst），
+        // Every Astrolabe tool resets the full burst; keep guidance consistent.
         for kind in [DenyKind::Grep, DenyKind::Read, DenyKind::Mixed] {
             let out = build_output(Client::ClaudeCode, kind);
             assert!(
@@ -3905,16 +4942,16 @@ mod tests {
                 "{kind:?} deny output should prefer find_symbol: {out}"
             );
             assert!(
-                out.contains("resolve_context"),
-                "{kind:?} deny output should prefer resolve_context: {out}"
+                out.contains("resolve_contx"),
+                "{kind:?} deny output should prefer resolve_contx: {out}"
             );
             assert!(
                 out.contains("search_code"),
                 "{kind:?} deny output should still mention search_code: {out}"
             );
             assert!(
-                out.contains("slice-read counter") || out.contains("slice counter"),
-                "{kind:?} deny should honestly say search_code only clears the slice counter: {out}"
+                out.contains("full grep/read/slice burst"),
+                "{kind:?} deny should describe the actual full reset: {out}"
             );
             assert!(
                 out.contains("Stop using"),
@@ -4970,6 +6007,11 @@ mod tests {
             .unwrap()
             .as_nanos();
         let temp_home = std::env::temp_dir().join(format!("astrolabe_cursor_path_{rand_id}"));
+        // 本用例验证旧的强制拦截输出；显式 enforce，避免受 auto 可用性探测影响。
+        let cfg = HooksConfig {
+            cursor_mode: CursorMode::Enforce,
+            ..Default::default()
+        };
         let mut err = Vec::new();
 
         let mk_read_payload = |sess: &str, path: &str| {
@@ -4985,13 +6027,14 @@ mod tests {
         let payload_readme = mk_read_payload("cursor-path-a", "README.md");
         for (i, now) in [100.0, 101.0, 102.0].iter().enumerate() {
             let mut out = Vec::new();
-            let code = run_remind_impl(
+            let code = run_remind_impl_with(
                 "cursor",
                 payload_readme.as_bytes(),
                 &mut out,
                 &mut err,
                 Some(*now),
                 Some(&temp_home),
+                &cfg,
             );
             assert_eq!(code, 0);
             assert!(
@@ -5006,13 +6049,14 @@ mod tests {
         let mut out = Vec::new();
         for (i, now) in [100.0, 101.0, 102.0].iter().enumerate() {
             out.clear();
-            let code = run_remind_impl(
+            let code = run_remind_impl_with(
                 "cursor",
                 payload_code.as_bytes(),
                 &mut out,
                 &mut err,
                 Some(*now),
                 Some(&temp_home),
+                &cfg,
             );
             assert_eq!(code, 0);
             if i < 2 {
@@ -5348,6 +6392,11 @@ mod tests {
             .unwrap()
             .as_nanos();
         let temp_home = std::env::temp_dir().join(format!("astrolabe_cursor_e2e_{rand_id}"));
+        // 该用例验证旧的强制拦截输出；显式选 enforce，避免受 auto 可用性探测影响。
+        let cfg = HooksConfig {
+            cursor_mode: CursorMode::Enforce,
+            ..Default::default()
+        };
 
         // Cursor 原生 payload：只带 conversation_id + Shell 工具 + command 含 grep
         let payload = serde_json::json!({
@@ -5362,13 +6411,14 @@ mod tests {
 
         for i in 0..2 {
             out.clear();
-            let code = run_remind_impl(
+            let code = run_remind_impl_with(
                 "cursor",
                 payload.as_bytes(),
                 &mut out,
                 &mut err,
                 Some(100.0 + i as f64),
                 Some(&temp_home),
+                &cfg,
             );
             assert_eq!(code, 0);
             assert!(out.is_empty());
@@ -5376,13 +6426,14 @@ mod tests {
 
         // 第 3 次 -> Cursor 扁平 deny：permission / user_message / agent_message
         out.clear();
-        let code3 = run_remind_impl(
+        let code3 = run_remind_impl_with(
             "cursor",
             payload.as_bytes(),
             &mut out,
             &mut err,
             Some(102.0),
             Some(&temp_home),
+            &cfg,
         );
         assert_eq!(code3, 0);
         let val: serde_json::Value =
@@ -5393,6 +6444,586 @@ mod tests {
         assert!(val.get("hookSpecificOutput").is_none());
 
         let _ = std::fs::remove_dir_all(&temp_home);
+    }
+
+    #[test]
+    fn cursor_auto_mode_downgrades_deny_when_mcp_not_approved() {
+        let rand_id = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_home = std::env::temp_dir().join(format!("astrolabe_cursor_auto_{rand_id}"));
+        let payload = serde_json::json!({
+            "conversation_id": "cursor_auto_sess",
+            "tool_name": "Shell",
+            "tool_input": { "command": "grep -rn foo src/" },
+            "cwd": "",
+            "workspace_roots": ["/Users/zhoulei/Project/not-approved-project"],
+        })
+        .to_string();
+        // auto 是默认值；临时 HOME 下没有 mcp-approvals.json → 未批准 → 降级放行。
+        let cfg = HooksConfig::default();
+        assert_eq!(cfg.cursor_mode, CursorMode::Auto);
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        for i in 0..2 {
+            out.clear();
+            assert_eq!(
+                run_remind_impl_with(
+                    "cursor",
+                    payload.as_bytes(),
+                    &mut out,
+                    &mut err,
+                    Some(100.0 + i as f64),
+                    Some(&temp_home),
+                    &cfg,
+                ),
+                0
+            );
+            assert!(out.is_empty(), "call {i} should be allowed silently");
+        }
+
+        out.clear();
+        assert_eq!(
+            run_remind_impl_with(
+                "cursor",
+                payload.as_bytes(),
+                &mut out,
+                &mut err,
+                Some(102.0),
+                Some(&temp_home),
+                &cfg,
+            ),
+            0
+        );
+        let val: serde_json::Value =
+            serde_json::from_str(String::from_utf8_lossy(&out).trim()).unwrap();
+        assert_eq!(val["permission"], "allow");
+        assert!(
+            val["agent_message"]
+                .as_str()
+                .is_some_and(|m| m.contains("not available")),
+            "{val}"
+        );
+        assert!(val.get("user_message").is_none());
+
+        let _ = std::fs::remove_dir_all(&temp_home);
+    }
+
+    #[test]
+    fn cursor_approved_without_server_allows_hard_auto_but_not_enforce() {
+        let rand_id = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("astrolabe_cursor_no_server_{rand_id}"));
+        let workspace = home.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        std::fs::write(
+            home.join(".cursor/mcp.json"),
+            r#"{"mcpServers":{"astrolabe":{"command":"astrolabe"}}}"#,
+        )
+        .unwrap();
+        assert!(cursor_mcp_approved(&home, &workspace));
+        assert!(!astrolabe_cursor_process_alive(Some(&workspace)));
+        let payload = serde_json::json!({
+            "conversation_id": "cursor_approved_no_server",
+            "tool_name": "Grep",
+            "tool_input": {"pattern": "foo"},
+            "workspace_roots": [workspace],
+        })
+        .to_string();
+        for (mode, permission) in [
+            (CursorMode::Auto, "allow"),
+            (CursorMode::Advisory, "allow"),
+            (CursorMode::Enforce, "deny"),
+        ] {
+            let cfg = HooksConfig {
+                cursor_mode: mode,
+                deny_text_search: true,
+                ..Default::default()
+            };
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            assert_eq!(
+                run_remind_impl_with(
+                    "cursor",
+                    payload.as_bytes(),
+                    &mut out,
+                    &mut err,
+                    Some(100.0),
+                    Some(&home),
+                    &cfg,
+                ),
+                0
+            );
+            let output: serde_json::Value = serde_json::from_slice(&out).unwrap();
+            assert_eq!(output["permission"], permission);
+        }
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn cursor_advisory_mode_never_blocks() {
+        let rand_id = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_home = std::env::temp_dir().join(format!("astrolabe_cursor_adv_{rand_id}"));
+        let cfg = HooksConfig {
+            cursor_mode: CursorMode::Advisory,
+            ..Default::default()
+        };
+        let payload = serde_json::json!({
+            "conversation_id": "cursor_adv_sess",
+            "tool_name": "Shell",
+            "tool_input": { "command": "rg foo src" },
+        })
+        .to_string();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        for i in 0..2 {
+            out.clear();
+            let _ = run_remind_impl_with(
+                "cursor",
+                payload.as_bytes(),
+                &mut out,
+                &mut err,
+                Some(200.0 + i as f64),
+                Some(&temp_home),
+                &cfg,
+            );
+            assert!(out.is_empty());
+        }
+        out.clear();
+        let _ = run_remind_impl_with(
+            "cursor",
+            payload.as_bytes(),
+            &mut out,
+            &mut err,
+            Some(202.0),
+            Some(&temp_home),
+            &cfg,
+        );
+        let val: serde_json::Value =
+            serde_json::from_str(String::from_utf8_lossy(&out).trim()).unwrap();
+        assert_eq!(val["permission"], "allow");
+
+        let _ = std::fs::remove_dir_all(&temp_home);
+    }
+
+    #[test]
+    fn cursor_modes_do_not_affect_claude_code() {
+        let rand_id = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_home = std::env::temp_dir().join(format!("astrolabe_cc_cursor_mode_{rand_id}"));
+        let cfg = HooksConfig {
+            cursor_mode: CursorMode::Advisory,
+            ..Default::default()
+        };
+        let payload = serde_json::json!({
+            "session_id": "cc_mode_sess",
+            "tool_name": "Grep",
+            "tool_input": { "pattern": "foo" },
+        })
+        .to_string();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        for i in 0..2 {
+            out.clear();
+            let _ = run_remind_impl_with(
+                "claude-code",
+                payload.as_bytes(),
+                &mut out,
+                &mut err,
+                Some(300.0 + i as f64),
+                Some(&temp_home),
+                &cfg,
+            );
+            assert!(out.is_empty());
+        }
+        out.clear();
+        let _ = run_remind_impl_with(
+            "claude-code",
+            payload.as_bytes(),
+            &mut out,
+            &mut err,
+            Some(302.0),
+            Some(&temp_home),
+            &cfg,
+        );
+        let val: serde_json::Value =
+            serde_json::from_str(String::from_utf8_lossy(&out).trim()).unwrap();
+        assert_eq!(
+            val["hookSpecificOutput"]["permissionDecision"], "deny",
+            "claude-code must keep enforcing regardless of cursor mode"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_home);
+    }
+
+    #[test]
+    fn cursor_mode_from_env_parsing() {
+        assert_eq!(CursorMode::from_env(None), CursorMode::Auto);
+        assert_eq!(CursorMode::from_env(Some("")), CursorMode::Auto);
+        assert_eq!(CursorMode::from_env(Some("  ")), CursorMode::Auto);
+        assert_eq!(CursorMode::from_env(Some("auto")), CursorMode::Auto);
+        assert_eq!(CursorMode::from_env(Some("AUTO")), CursorMode::Auto);
+        assert_eq!(CursorMode::from_env(Some("enforce")), CursorMode::Enforce);
+        assert_eq!(CursorMode::from_env(Some("Advisory")), CursorMode::Advisory);
+        assert_eq!(CursorMode::from_env(Some("bogus")), CursorMode::Auto);
+    }
+
+    #[test]
+    fn cursor_project_slug_matches_cursor_js() {
+        // 与 npm/setup/cursor.js:188-193 完全一致：非字母数字 → `-`，
+        // 折叠连续 `-`，去首尾 `-`；Windows verbatim 前缀先剥离。
+        let cases = [
+            (
+                "/Users/zhoulei/Project/newapi",
+                "Users-zhoulei-Project-newapi",
+            ),
+            (r"C:\Users\a\repo", "C-Users-a-repo"),
+            (r"\\?\C:\Users\a\repo", "C-Users-a-repo"),
+            ("/Users/a/.worktree", "Users-a-worktree"),
+            (
+                "/private/tmp/aicon-cursor-hook-probe/work/G12a-mcp-empty",
+                "private-tmp-aicon-cursor-hook-probe-work-G12a-mcp-empty",
+            ),
+            (
+                "/Users/zhoulei/Documents/24.4.1.25",
+                "Users-zhoulei-Documents-24-4-1-25",
+            ),
+            (
+                "/var/folders/jz/yf0_9kld/T/tmp.HTraaHLbN4",
+                "var-folders-jz-yf0-9kld-T-tmp-HTraaHLbN4",
+            ),
+            ("/tmp/中文 项目", "tmp"),
+            ("///", ""),
+            ("", ""),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(cursor_project_slug(input), expected, "input={input:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cursor_project_dir_name_canonicalizes() {
+        let rand_id = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("astrolabe_cursor_slug_{rand_id}"));
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+
+        let canonical = std::fs::canonicalize(&real).unwrap();
+        let expected = cursor_project_slug(canonical.to_str().unwrap());
+        assert!(!expected.is_empty());
+        assert_eq!(
+            cursor_project_dir_name(&real).as_deref(),
+            Some(expected.as_str())
+        );
+
+        // 软链必须解析到目标路径后再算 slug（macOS /tmp → /private/tmp 同理）。
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(
+            cursor_project_dir_name(&link).as_deref(),
+            Some(expected.as_str())
+        );
+
+        assert_eq!(cursor_project_dir_name(Path::new("relative/path")), None);
+        assert_eq!(cursor_project_dir_name(Path::new("/")), None);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cursor_mcp_approval_file_edge_cases() {
+        let rand_id = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("astrolabe_cursor_approval_{rand_id}"));
+        let workspace = home.join("work tree");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let project_dir = cursor_project_dir_name(&workspace).unwrap();
+        let base = home.join(".cursor").join("projects").join(project_dir);
+        std::fs::create_dir_all(&base).unwrap();
+        let approvals = base.join("mcp-approvals.json");
+        let disabled = base.join("mcp-disabled.json");
+        let global_mcp = home.join(".cursor").join("mcp.json");
+        let project_mcp = workspace.join(".cursor").join("mcp.json");
+        let real_approval = r#"["astrolabe-def52bf6dc098bc5"]"#;
+
+        // 1. 无全局/项目级 mcp.json → 未启用
+        assert!(!cursor_mcp_approved(&home, &workspace));
+
+        // 2. 全局 mcp.json 含 astrolabe、无 approvals → 已启用（全局 server 不走审批）
+        std::fs::write(
+            &global_mcp,
+            r#"{"mcpServers":{"astrolabe":{"command":"x"}}}"#,
+        )
+        .unwrap();
+        assert!(cursor_mcp_approved(&home, &workspace));
+
+        // 3. 全局配置 + mcp-disabled 命中真实格式 → 未启用
+        std::fs::write(&disabled, real_approval).unwrap();
+        assert!(!cursor_mcp_approved(&home, &workspace));
+        std::fs::write(&disabled, "[]").unwrap();
+
+        // 4. 真实审批格式 `astrolabe-<hex>` + 全局配置 → 已启用
+        std::fs::write(&approvals, real_approval).unwrap();
+        assert!(cursor_mcp_approved(&home, &workspace));
+
+        // 5. 项目级 mcp.json 含 astrolabe 时必须审批；审批缺失 → 未启用
+        std::fs::create_dir_all(project_mcp.parent().unwrap()).unwrap();
+        std::fs::write(
+            &project_mcp,
+            r#"{"mcpServers":{"astrolabe":{"command":"x"}}}"#,
+        )
+        .unwrap();
+        std::fs::remove_file(&approvals).unwrap();
+        assert!(!cursor_mcp_approved(&home, &workspace));
+
+        // 6. 项目级 + 真实审批格式 → 已启用
+        std::fs::write(&approvals, real_approval).unwrap();
+        assert!(cursor_mcp_approved(&home, &workspace));
+
+        // 7. 兼容历史精确名
+        std::fs::write(&approvals, r#"["astrolabe"]"#).unwrap();
+        assert!(cursor_mcp_approved(&home, &workspace));
+
+        // 8. 项目级 + 审批 JSON 损坏 → 未启用
+        std::fs::write(&approvals, "{not json").unwrap();
+        assert!(!cursor_mcp_approved(&home, &workspace));
+
+        // 9. 项目级 + 审批根节点不是数组 → 未启用
+        std::fs::write(&approvals, r#"{"astrolabe":true}"#).unwrap();
+        assert!(!cursor_mcp_approved(&home, &workspace));
+
+        // 10. 禁用文件损坏 → 视为未禁用
+        std::fs::write(&approvals, real_approval).unwrap();
+        std::fs::write(&disabled, "[[[").unwrap();
+        assert!(cursor_mcp_approved(&home, &workspace));
+
+        // 11. 移除项目级配置后回落到全局配置（disabled 不命中 → 已启用）
+        std::fs::write(&disabled, "[]").unwrap();
+        std::fs::remove_file(&project_mcp).unwrap();
+        assert!(cursor_mcp_approved(&home, &workspace));
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_root_from_hook_input_prefers_and_filters() {
+        let v = serde_json::json!({"cwd": "", "workspace_roots": ["/p/one", "/p/two"]});
+        assert_eq!(
+            workspace_root_from_hook_input(&v).as_deref(),
+            Some(Path::new("/p/one"))
+        );
+
+        let v = serde_json::json!({"cwd": "/explicit", "workspace_roots": ["/p/one"]});
+        assert_eq!(
+            workspace_root_from_hook_input(&v).as_deref(),
+            Some(Path::new("/explicit"))
+        );
+
+        // workspace_roots 优先于 tool_input.cwd（后者只是 Shell 单次命令的子目录）
+        let v = serde_json::json!({
+            "cwd": "",
+            "workspace_roots": ["/p/one"],
+            "tool_input": {"cwd": "/tool/subdir"},
+        });
+        assert_eq!(
+            workspace_root_from_hook_input(&v).as_deref(),
+            Some(Path::new("/p/one"))
+        );
+
+        // workspace_roots 不可用时才回退 tool_input.cwd
+        let v = serde_json::json!({
+            "cwd": "",
+            "workspace_roots": ["relative"],
+            "tool_input": {"cwd": "/tool/subdir"},
+        });
+        assert_eq!(
+            workspace_root_from_hook_input(&v).as_deref(),
+            Some(Path::new("/tool/subdir"))
+        );
+
+        let v = serde_json::json!({"cwd": "", "workspace_roots": ["relative", "/p/good"]});
+        assert_eq!(
+            workspace_root_from_hook_input(&v).as_deref(),
+            Some(Path::new("/p/good"))
+        );
+
+        let v = serde_json::json!({"cwd": "", "workspace_roots": ["relative"]});
+        assert_eq!(workspace_root_from_hook_input(&v), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_cursor_workspace_root_env_fallback() {
+        let no_payload = serde_json::json!({"cwd": ""});
+        let both_env = |k: &str| match k {
+            "CURSOR_PROJECT_DIR" => Some("/from/cursor".to_string()),
+            "CLAUDE_PROJECT_DIR" => Some("/from/claude".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            resolve_cursor_workspace_root_with(
+                &no_payload,
+                both_env,
+                Some(PathBuf::from("/process/cwd"))
+            )
+            .as_deref(),
+            Some(Path::new("/from/cursor"))
+        );
+
+        let claude_only = |k: &str| (k == "CLAUDE_PROJECT_DIR").then(|| "/from/claude".to_string());
+        assert_eq!(
+            resolve_cursor_workspace_root_with(
+                &no_payload,
+                claude_only,
+                Some(PathBuf::from("/process/cwd"))
+            )
+            .as_deref(),
+            Some(Path::new("/from/claude"))
+        );
+
+        // payload 的 workspace_roots 优先于环境变量
+        let payload = serde_json::json!({"workspace_roots": ["/payload/root"]});
+        assert_eq!(
+            resolve_cursor_workspace_root_with(
+                &payload,
+                both_env,
+                Some(PathBuf::from("/process/cwd"))
+            )
+            .as_deref(),
+            Some(Path::new("/payload/root"))
+        );
+
+        // 环境变量缺失时才回退进程 cwd
+        let none_env = |_: &str| None;
+        assert_eq!(
+            resolve_cursor_workspace_root_with(
+                &no_payload,
+                none_env,
+                Some(PathBuf::from("/process/cwd"))
+            )
+            .as_deref(),
+            Some(Path::new("/process/cwd"))
+        );
+        assert_eq!(
+            resolve_cursor_workspace_root_with(&no_payload, |_: &str| None, None),
+            None
+        );
+    }
+
+    #[test]
+    fn process_match_detects_cursor_astrolabe_and_cwd() {
+        let ws = Path::new("/Users/zhoulei/Project/newapi");
+        assert!(process_matches_cursor_astrolabe(
+            "node /x/astrolabe . --context=cursor",
+            Some(ws),
+            Some(ws)
+        ));
+        assert!(process_matches_cursor_astrolabe(
+            "/usr/local/bin/astrolabe . --context cursor",
+            Some(ws),
+            Some(ws)
+        ));
+        // 缺少 cursor 上下文
+        assert!(!process_matches_cursor_astrolabe(
+            "astrolabe . --context=claude-code",
+            Some(ws),
+            Some(ws)
+        ));
+        // 非 astrolabe 进程
+        assert!(!process_matches_cursor_astrolabe(
+            "node /x/other . --context=cursor",
+            Some(ws),
+            Some(ws)
+        ));
+        // cwd 属于别的项目
+        assert!(!process_matches_cursor_astrolabe(
+            "astrolabe . --context=cursor",
+            Some(Path::new("/Users/zhoulei/Project/other")),
+            Some(ws)
+        ));
+        // 无法读取 cwd → 不视为该项目的存活进程
+        assert!(!process_matches_cursor_astrolabe(
+            "astrolabe . --context=cursor",
+            None,
+            Some(ws)
+        ));
+        // 不限定项目时只看命令行
+        assert!(process_matches_cursor_astrolabe(
+            "astrolabe . --context=cursor",
+            None,
+            None
+        ));
+    }
+
+    #[test]
+    fn process_match_excludes_hooks_and_current_pid() {
+        let ws = Path::new("/test/project");
+        for command in [
+            "astrolabe hooks remind --client=cursor --context=cursor",
+            "astrolabe --context=cursor hooks remind --client=cursor",
+            "node /x/astrolabe hooks cleanup --context cursor",
+            "astrolabe 'hooks' remind --context=cursor",
+        ] {
+            assert!(!process_matches_cursor_astrolabe(
+                command,
+                Some(ws),
+                Some(ws)
+            ));
+            // An approved project with only hooks must remain advisory in auto.
+            assert!(!cursor_should_enforce(
+                CursorMode::Auto,
+                true,
+                process_matches_cursor_astrolabe(command, Some(ws), Some(ws)),
+            ));
+        }
+        assert!(!process_is_cursor_astrolabe_server(
+            std::process::id(),
+            "astrolabe . --context=cursor",
+            Some(ws),
+            Some(ws),
+        ));
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn unavailable_platform_probe_allows_auto_but_preserves_enforce() {
+        let alive = astrolabe_cursor_process_alive(Some(Path::new("C:/test/project")));
+        assert!(
+            !alive,
+            "an unsupported probe must not claim the MCP is alive"
+        );
+        assert!(!cursor_should_enforce(CursorMode::Auto, true, alive));
+        assert!(cursor_should_enforce(CursorMode::Enforce, true, alive));
+    }
+
+    #[test]
+    fn cursor_should_enforce_matrix() {
+        assert!(cursor_should_enforce(CursorMode::Enforce, false, false));
+        assert!(cursor_should_enforce(CursorMode::Enforce, true, false));
+        assert!(!cursor_should_enforce(CursorMode::Advisory, true, true));
+        assert!(!cursor_should_enforce(CursorMode::Auto, false, true));
+        assert!(!cursor_should_enforce(CursorMode::Auto, true, false));
+        assert!(cursor_should_enforce(CursorMode::Auto, true, true));
     }
 
     #[test]
@@ -5802,7 +7433,7 @@ mod tests {
         let out = build_output(Client::ClaudeCode, DenyKind::TextSearch);
         assert!(out.contains("ASTROLABE_DENY_TEXT_SEARCH"), "{out}");
         assert!(out.contains("find_symbol"), "{out}");
-        assert!(out.contains("resolve_context"), "{out}");
+        assert!(out.contains("resolve_contx"), "{out}");
         assert!(out.contains("search_code"), "{out}");
         assert!(out.contains("\"permissionDecision\":\"deny\""));
         let glob = build_output(Client::ClaudeCode, DenyKind::Glob);
@@ -6167,9 +7798,7 @@ mod tests {
             "mcp__astrolabe_docs__fetch_page"
         ));
         assert!(is_astrolabe_tool("mcp__astrolabe__find_symbol"));
-        assert!(is_astrolabe_symbolic_tool(
-            "mcp__astrolabe-ai__find_references"
-        ));
+        assert!(is_astrolabe_symbolic_tool("mcp__astrolabe-ai__find_refs"));
         assert!(is_astrolabe_tool("mcp__astrolabe__search_code"));
         assert!(!is_astrolabe_symbolic_tool("mcp__astrolabe__search_code"));
     }
@@ -6232,7 +7861,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_context_resets_all_burst_counters_by_design() {
+    fn resolve_contx_resets_all_burst_counters_by_design() {
         // resolve_context 是入口导航工具：它的回答取代了之前 grep/read 的探索，
         // 因此与 find_symbol 等一样清零全部 burst 计数。
         let cfg = HooksConfig::default();
@@ -6244,7 +7873,7 @@ mod tests {
             ..Default::default()
         };
         let kind = classify_tool(
-            "mcp__astrolabe__resolve_context",
+            "mcp__astrolabe__resolve_contx",
             Client::ClaudeCode,
             None,
             None,

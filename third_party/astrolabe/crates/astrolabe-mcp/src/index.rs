@@ -8,16 +8,69 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::{Arc, OnceLock, RwLock},
     time::UNIX_EPOCH,
 };
 
-use astrolabe_core::cache::FileCache;
+use astrolabe_core::cache::{CachedLines, FileCache};
 use astrolabe_core::graph::CodeGraph;
 use astrolabe_core::index::IncrementalIndex;
 use astrolabe_core::{CodeFile, FileId, IndexReport, RelPath};
 
 use crate::reindex::mcp_index_options;
+
+/// Lazily built auxiliary index that [`RepoIndex::shed_derived`] can drop
+/// during soft idle eviction; the next access rebuilds it from the still
+/// resident graph snapshot.
+///
+/// A `OnceLock` cannot be reset through `&self`, so the value sits behind a
+/// read/write lock instead. Readers clone the `Arc` and keep it alive even if
+/// a concurrent shed takes the cell's copy.
+pub(crate) struct Derived<T> {
+    cell: RwLock<Option<Arc<T>>>,
+}
+
+impl<T> Derived<T> {
+    const fn new() -> Self {
+        Self {
+            cell: RwLock::new(None),
+        }
+    }
+
+    /// The built value, building it now when absent. As with
+    /// `OnceLock::get_or_init`, one builder runs; a builder that loses the
+    /// race returns the winner's value.
+    fn get_or_build(&self, build: impl FnOnce() -> T) -> Arc<T> {
+        if let Some(value) = self.cell.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            return Arc::clone(value);
+        }
+        let mut slot = self.cell.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(value) = slot.as_ref() {
+            return Arc::clone(value);
+        }
+        let value = Arc::new(build());
+        *slot = Some(Arc::clone(&value));
+        value
+    }
+
+    /// Drop the built value, if any. Returns whether one was dropped.
+    #[allow(dead_code)] // only reachable through `RepoIndex::shed_derived`
+    fn take(&self) -> bool {
+        self.cell
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .is_some()
+    }
+
+    #[cfg(test)]
+    fn is_unset(&self) -> bool {
+        self.cell
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
+    }
+}
 
 /// Serving snapshot. Production holds an [`IncrementalIndex`] so the watch
 /// thread can `apply_changeset` without a full rescan. Unit tests that inject a
@@ -25,12 +78,12 @@ use crate::reindex::mcp_index_options;
 pub(crate) struct RepoIndex {
     pub root: PathBuf,
     inner: InnerIndex,
-    in_graph_paths: OnceLock<HashSet<String>>,
-    names: OnceLock<NameIndex>,
+    in_graph_paths: Derived<HashSet<String>>,
+    names: Derived<NameIndex>,
     /// Path → file and file → symbols tables (built on first lookup).
-    files_lookup: OnceLock<FileLookup>,
+    files_lookup: Derived<FileLookup>,
     /// Sub-word index for `find_symbol`'s zero-hit fallback, built on first use.
-    words: OnceLock<crate::word_index::WordIndex>,
+    words: Derived<crate::word_index::WordIndex>,
     /// Markdown coverage report path, written lazily once per snapshot.
     coverage_report: OnceLock<Option<PathBuf>>,
     /// Per partial-parse file: language, first error and error kind.
@@ -111,6 +164,17 @@ impl FileLookup {
                 .or_default()
                 .push(i as u32);
         }
+        // These tables live for the whole snapshot (until shed): drop the
+        // growth slack each `Vec` / map accumulated while being filled.
+        for files in by_basename.values_mut() {
+            files.shrink_to_fit();
+        }
+        for positions in symbols_by_file.values_mut() {
+            positions.shrink_to_fit();
+        }
+        exact.shrink_to_fit();
+        by_basename.shrink_to_fit();
+        symbols_by_file.shrink_to_fit();
         Self {
             exact,
             by_basename,
@@ -153,10 +217,10 @@ impl RepoIndex {
         Self {
             root,
             inner: InnerIndex::Incremental(incremental),
-            in_graph_paths: OnceLock::new(),
-            names: OnceLock::new(),
-            files_lookup: OnceLock::new(),
-            words: OnceLock::new(),
+            in_graph_paths: Derived::new(),
+            names: Derived::new(),
+            files_lookup: Derived::new(),
+            words: Derived::new(),
             coverage_report: OnceLock::new(),
             partial_diagnoses: OnceLock::new(),
             generation: next_generation(),
@@ -168,18 +232,18 @@ impl RepoIndex {
         Self {
             root,
             inner: InnerIndex::Static { graph, report },
-            in_graph_paths: OnceLock::new(),
-            names: OnceLock::new(),
-            files_lookup: OnceLock::new(),
-            words: OnceLock::new(),
+            in_graph_paths: Derived::new(),
+            names: Derived::new(),
+            files_lookup: Derived::new(),
+            words: Derived::new(),
             coverage_report: OnceLock::new(),
             partial_diagnoses: OnceLock::new(),
             generation: next_generation(),
         }
     }
 
-    pub(crate) fn names(&self) -> &NameIndex {
-        self.names.get_or_init(|| {
+    pub(crate) fn names(&self) -> Arc<NameIndex> {
+        self.names.get_or_build(|| {
             let graph = self.graph();
             let symbols = &graph.symbols;
             let (name_path, (by_id, file_pos)) = rayon::join(
@@ -207,16 +271,37 @@ impl RepoIndex {
         })
     }
 
-    /// The sub-word index over this snapshot's symbols (built once, lazily:
-    /// only zero-hit multi-word `find_symbol` queries need it).
-    pub(crate) fn words(&self) -> &crate::word_index::WordIndex {
+    /// The sub-word index over this snapshot's symbols (built lazily: only
+    /// zero-hit multi-word `find_symbol` queries need it).
+    pub(crate) fn words(&self) -> Arc<crate::word_index::WordIndex> {
         self.words
-            .get_or_init(|| crate::word_index::WordIndex::build(self.graph()))
+            .get_or_build(|| crate::word_index::WordIndex::build(self.graph()))
+    }
+
+    /// Shed lazily-derived in-memory auxiliary indices (NameIndex, FileLookup,
+    /// WordIndex, in_graph_paths) during soft idle eviction. Returns the number
+    /// of large derived structures dropped.
+    #[allow(dead_code)] // called by the session's soft idle eviction
+    pub(crate) fn shed_derived(&self) -> usize {
+        let mut dropped = 0;
+        if self.names.take() {
+            dropped += 1;
+        }
+        if self.files_lookup.take() {
+            dropped += 1;
+        }
+        if self.words.take() {
+            dropped += 1;
+        }
+        if self.in_graph_paths.take() {
+            dropped += 1;
+        }
+        dropped
     }
 
     /// Build the per-snapshot lookup tables on a background thread, so the
     /// first `find_symbol` after a publish does not pay for them. A query
-    /// that arrives first simply builds (or waits for) the same `OnceLock`.
+    /// that arrives first simply builds (or waits for) the same derived cell.
     ///
     /// With `coverage`, the syntax-error diagnoses `get_languages` needs (one
     /// re-parse per partial-parse file) and the coverage report are prepared
@@ -299,13 +384,7 @@ impl RepoIndex {
     ) -> std::collections::BTreeMap<String, u32> {
         match &self.inner {
             InnerIndex::Incremental(inc) => {
-                let in_graph_set = self.in_graph_paths.get_or_init(|| {
-                    self.graph()
-                        .files
-                        .iter()
-                        .map(|file| file.path.as_str().to_owned())
-                        .collect()
-                });
+                let in_graph_set = self.in_graph_paths();
                 astrolabe_core::index::unindexed_code_exts(
                     inc.admitted_paths(),
                     &|path| in_graph_set.contains(path),
@@ -325,13 +404,7 @@ impl RepoIndex {
     pub(crate) fn text_only_paths(&self, filter: Option<&str>) -> Vec<&RelPath> {
         match &self.inner {
             InnerIndex::Incremental(inc) => {
-                let in_graph_set = self.in_graph_paths.get_or_init(|| {
-                    self.graph()
-                        .files
-                        .iter()
-                        .map(|file| file.path.as_str().to_owned())
-                        .collect()
-                });
+                let in_graph_set = self.in_graph_paths();
                 inc.admitted_paths()
                     .iter()
                     .filter(|path| {
@@ -368,7 +441,7 @@ impl RepoIndex {
         &self,
         cache: &FileCache,
         rel_path: &str,
-    ) -> Option<(Arc<Vec<String>>, bool)> {
+    ) -> Option<(Arc<CachedLines>, bool)> {
         load_source_lines(cache, &self.root, rel_path)
     }
 
@@ -401,22 +474,45 @@ impl RepoIndex {
             .map(|file| file.id)
     }
 
-    fn file_lookup(&self) -> &FileLookup {
+    fn file_lookup(&self) -> Arc<FileLookup> {
         self.files_lookup
-            .get_or_init(|| FileLookup::build(self.graph()))
+            .get_or_build(|| FileLookup::build(self.graph()))
+    }
+
+    /// Paths present in the code graph, as a set (built on first use).
+    fn in_graph_paths(&self) -> Arc<HashSet<String>> {
+        self.in_graph_paths.get_or_build(|| {
+            self.graph()
+                .files
+                .iter()
+                .map(|file| file.path.as_str().to_owned())
+                .collect()
+        })
     }
 
     /// Symbols of `file`, in `graph().symbols` order.
     pub fn file_symbols(&self, file: FileId) -> impl Iterator<Item = &astrolabe_core::CodeSymbol> {
         let symbols = &self.graph().symbols;
-        self.file_lookup()
+        // The lookup is evictable, so the iterator cannot borrow it; the
+        // positions are cloned (small, one per symbol in the file) instead.
+        let positions: Vec<u32> = self
+            .file_lookup()
             .symbols_by_file
             .get(&file)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
-            .iter()
-            .map(move |&i| &symbols[i as usize])
+            .cloned()
+            .unwrap_or_default();
+        positions.into_iter().map(move |i| &symbols[i as usize])
     }
+}
+
+/// VCS ignore files hold path patterns, not source. Ripgrep skips them as
+/// hidden files, so returning them from `search_code` would make the two
+/// search tools disagree on the same literal.
+fn is_vcs_ignore_file(path: &str) -> bool {
+    matches!(
+        path.rsplit('/').next().unwrap_or(path),
+        ".gitignore" | ".ignore"
+    )
 }
 
 /// Generated dependency lock files excluded from text-only search.
@@ -442,16 +538,6 @@ fn is_lock_file(path: &str) -> bool {
     LOCKS.contains(&name)
 }
 
-/// VCS ignore files hold path patterns, not source. Ripgrep skips them as
-/// hidden files, so returning them from `search_code` would make the two
-/// search tools disagree on the same literal.
-fn is_vcs_ignore_file(path: &str) -> bool {
-    matches!(
-        path.rsplit('/').next().unwrap_or(path),
-        ".gitignore" | ".ignore"
-    )
-}
-
 /// Read a source file through [`FileCache`], keyed by repo-relative path.
 ///
 /// Returns `(lines, hit)`. A changed mtime is a miss; the cache already
@@ -462,7 +548,7 @@ pub(crate) fn load_source_lines(
     cache: &FileCache,
     root: &Path,
     rel_path: &str,
-) -> Option<(Arc<Vec<String>>, bool)> {
+) -> Option<(Arc<CachedLines>, bool)> {
     let disk = root.join(rel_path);
     // Stat before reading: a write after this point changes mtime/len, so
     // the entry inserted below is never served for the newer content.
@@ -475,7 +561,8 @@ pub(crate) fn load_source_lines(
         }
     }
     let source = astrolabe_core::text::read_source(&disk).ok()?;
-    let lines = Arc::new(source.lines().map(str::to_owned).collect::<Vec<String>>());
+    // One String plus one offset table; no per-line `String` allocation.
+    let lines = Arc::new(CachedLines::from_text(source));
     if let Some(len) = len {
         cache.insert_checked(rel_path, Arc::clone(&lines), mtime_ms, len);
     }
@@ -688,10 +775,10 @@ mod tests {
             graph,
             IndexReport::default(),
         ));
-        assert!(index.names.get().is_none());
+        assert!(index.names.is_unset());
         index.prewarm(true);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while index.names.get().is_none() {
+        while index.names.is_unset() {
             assert!(std::time::Instant::now() < deadline, "prewarm never ran");
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
@@ -773,17 +860,20 @@ mod tests {
 
         let (lines, hit) = load_source_lines(&cache, &dir, "hello.py").unwrap();
         assert!(!hit, "first read must be a miss");
-        assert_eq!(&*lines, &["line-one".to_string()]);
+        assert_eq!(&lines[0], "line-one");
+        assert_eq!(lines.len(), 1);
 
         let (lines, hit) = load_source_lines(&cache, &dir, "hello.py").unwrap();
         assert!(hit, "unchanged mtime must be a hit");
-        assert_eq!(&*lines, &["line-one".to_string()]);
+        assert_eq!(&lines[0], "line-one");
+        assert_eq!(lines.len(), 1);
 
         std::thread::sleep(Duration::from_millis(20));
         std::fs::write(&file, "line-two\n").unwrap();
         let (lines, hit) = load_source_lines(&cache, &dir, "hello.py").unwrap();
         assert!(!hit, "changed mtime must be a miss");
-        assert_eq!(&*lines, &["line-two".to_string()]);
+        assert_eq!(&lines[0], "line-two");
+        assert_eq!(lines.len(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -839,18 +929,43 @@ mod tests {
         std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
         std::fs::write(dir.join("script.ex"), "puts 'hello'\n").unwrap();
         let index = build(&dir).expect("index build");
-        assert!(index.in_graph_paths.get().is_none());
+        assert!(index.in_graph_paths.is_unset());
 
         let counts1 = index.unindexed_code_exts(None);
         assert_eq!(counts1.get("ex"), Some(&1));
-        assert!(index.in_graph_paths.get().is_some());
+        assert!(!index.in_graph_paths.is_unset());
 
-        let cached_ptr = index.in_graph_paths.get().unwrap() as *const _;
+        let cached_ptr = Arc::as_ptr(&index.in_graph_paths());
         let counts2 = index.unindexed_code_exts(None);
         assert_eq!(counts2.get("ex"), Some(&1));
-        let cached_ptr2 = index.in_graph_paths.get().unwrap() as *const _;
+        let cached_ptr2 = Arc::as_ptr(&index.in_graph_paths());
         assert_eq!(cached_ptr, cached_ptr2);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Soft idle eviction drops the lazily built auxiliary tables; the next
+    /// access rebuilds them from the still resident graph snapshot.
+    #[test]
+    fn shed_derived_drops_and_rebuilds_auxiliary_indices() {
+        let index = synthetic(&["a.rs"], &[(0, 1, 1)]);
+        assert_eq!(index.shed_derived(), 0, "nothing built yet");
+
+        let names = index.names();
+        assert_eq!(names.by_lower("s0"), &[0]);
+        let _ = index.file_lookup();
+        let _ = index.words();
+        let _ = index.in_graph_paths();
+        assert_eq!(index.shed_derived(), 4);
+        assert!(index.names.is_unset());
+        assert!(index.files_lookup.is_unset());
+        assert!(index.words.is_unset());
+        assert!(index.in_graph_paths.is_unset());
+
+        // Rebuilt on demand, with the same content.
+        let again = index.names();
+        assert_eq!(again.by_lower("s0"), &[0]);
+        assert_eq!(index.file_symbols(FileId(0)).count(), 1);
+        assert_eq!(index.shed_derived(), 2, "names and file lookup rebuilt");
     }
 }

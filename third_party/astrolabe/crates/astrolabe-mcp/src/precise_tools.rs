@@ -1,8 +1,8 @@
 //! Precise (LSP-backed) query tools: references, definitions, diagnostics.
 //!
 //! Rendering lives here; `server.rs` mounts `#[tool]` methods that call
-//! [`run_find_references`], [`run_goto_definition`], and
-//! [`run_get_diagnostics`] through `LiveBackend`.
+//! [`run_find_refs`], [`run_goto_def`], and
+//! [`run_get_diag`] through `LiveBackend`.
 //! [`crate::TOOL_COUNT`] includes [`crate::PRECISE_TOOL_COUNT`] (3).
 #![cfg_attr(not(test), allow(dead_code))]
 
@@ -76,7 +76,7 @@ fn omitted_line(omitted: usize, next_offset: usize) -> String {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub(crate) struct FindReferencesParams {
+pub(crate) struct FindRefsParams {
     #[serde(default)]
     #[schemars(description = "Sub-repo name or abs path.")]
     pub root: Option<String>,
@@ -89,12 +89,12 @@ pub(crate) struct FindReferencesParams {
     pub symbol: String,
     // Optional on purpose: models often omit it. Prefer an explicit path for
     // ambiguous names. When omitted, the server first reuses this session's
-    // last find_symbol / goto_definition hit for the same symbol, else the
+    // last find_symbol / goto_def hit for the same symbol, else the
     // unique index definition, else lists ranked candidates (no silent guess
     // among many).
     #[serde(default)]
     #[schemars(
-        description = "Repo-relative file of the definition or a use site. Strongly preferred for ambiguous names (Init, Run, …). If omitted: this session's last find_symbol/goto_definition hit for the same symbol, else unique index definition, else ranked candidates."
+        description = "index_root-relative definition/use-site file. Strongly preferred for ambiguous names (Init, Run, …). If omitted: this session's last find_symbol/goto_def hit for the same symbol, else unique index definition, else ranked candidates."
     )]
     pub path: Option<String>,
     #[serde(default)]
@@ -115,7 +115,7 @@ pub(crate) struct FindReferencesParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub(crate) struct GotoDefinitionParams {
+pub(crate) struct GotoDefParams {
     #[serde(default)]
     #[schemars(description = "Sub-repo name or abs path.")]
     pub root: Option<String>,
@@ -124,7 +124,7 @@ pub(crate) struct GotoDefinitionParams {
         description = "Absolute or cwd-relative directory to index for this call; omit for the startup root."
     )]
     pub index_root: Option<String>,
-    #[schemars(description = "File containing the use site.")]
+    #[schemars(description = "Use-site file relative to index_root.")]
     pub path: String,
     #[serde(default)]
     #[schemars(description = "Symbol name.")]
@@ -144,7 +144,7 @@ pub(crate) struct GotoDefinitionParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub(crate) struct GetDiagnosticsParams {
+pub(crate) struct GetDiagParams {
     #[serde(default)]
     #[schemars(description = "Sub-repo name or abs path.")]
     pub root: Option<String>,
@@ -153,7 +153,7 @@ pub(crate) struct GetDiagnosticsParams {
         description = "Absolute or cwd-relative directory to index for this call; omit for the startup root."
     )]
     pub index_root: Option<String>,
-    #[schemars(description = "Repo-relative file.")]
+    #[schemars(description = "index_root-relative file.")]
     pub path: String,
     #[serde(default)]
     #[schemars(description = "Minimum severity: error, warning, information, or hint.")]
@@ -178,10 +178,10 @@ fn default_toolchain() -> bool {
 
 /// Tool descriptions shared by `PreciseTools` and `AstrolabeServer`, so the
 /// two catalogs cannot drift apart.
-pub(crate) const FIND_REFERENCES_DESC: &str = "Precise references (index first, language-server fallback): call sites and usages — use for rename and caller analysis. Pass path (definition or use site) to disambiguate; when omitted, reuse this session's latest find_symbol/goto_definition hit, else the unique index definition or a candidate list. Hits show source line, enclosing func, [declaration]; interface → implementors. dry_run_rename=NewName: read-only per-file rename checklist.";
-pub(crate) const GOTO_DEFINITION_DESC: &str =
+pub(crate) const FIND_REFS_DESC: &str = "Precise references (index first, language-server fallback): call sites and usages — use for rename and caller analysis. Pass path (definition or use site) to disambiguate; when omitted, reuse this session's latest find_symbol/goto_def hit, else the unique index definition or a candidate list. Hits show source line, enclosing func, [declaration]; interface → implementors. dry_run_rename=NewName: read-only per-file rename checklist.";
+pub(crate) const GOTO_DEF_DESC: &str =
     "Jump to definition: return the definition anchor from the use-site file + symbol name.";
-pub(crate) const GET_DIAGNOSTICS_DESC: &str =
+pub(crate) const GET_DIAG_DESC: &str =
     "File diagnostics (syntax and type errors) for checking after edits; skip if build/tests already pass.";
 
 /// Backend for the precise MCP query tools.
@@ -309,41 +309,38 @@ impl PreciseTools {
 #[tool_router]
 impl PreciseTools {
     #[tool(
-        description = FIND_REFERENCES_DESC,
+        name = "find_refs",
+        description = FIND_REFS_DESC,
         annotations(title = "Precise references", read_only_hint = true)
     )]
-    pub(crate) fn find_references(
+    pub(crate) fn find_refs(
         &self,
-        Parameters(params): Parameters<FindReferencesParams>,
+        Parameters(params): Parameters<FindRefsParams>,
     ) -> CallToolResult {
-        run_find_references(params, self.backend.as_ref())
+        run_find_refs(params, self.backend.as_ref())
     }
 
     #[tool(
-        description = GOTO_DEFINITION_DESC,
+        name = "goto_def",
+        description = GOTO_DEF_DESC,
         annotations(title = "Precise definition", read_only_hint = true)
     )]
-    pub(crate) fn goto_definition(
-        &self,
-        Parameters(params): Parameters<GotoDefinitionParams>,
-    ) -> CallToolResult {
-        run_goto_definition(params, self.backend.as_ref())
+    pub(crate) fn goto_def(&self, Parameters(params): Parameters<GotoDefParams>) -> CallToolResult {
+        run_goto_def(params, self.backend.as_ref())
     }
 
     #[tool(
-        description = GET_DIAGNOSTICS_DESC,
+        name = "get_diag",
+        description = GET_DIAG_DESC,
         annotations(title = "File diagnostics", read_only_hint = true)
     )]
-    pub(crate) fn get_diagnostics(
-        &self,
-        Parameters(params): Parameters<GetDiagnosticsParams>,
-    ) -> CallToolResult {
-        run_get_diagnostics(params, self.backend.as_ref())
+    pub(crate) fn get_diag(&self, Parameters(params): Parameters<GetDiagParams>) -> CallToolResult {
+        run_get_diag(params, self.backend.as_ref())
     }
 }
 
-pub(crate) fn run_find_references(
-    mut params: FindReferencesParams,
+pub(crate) fn run_find_refs(
+    mut params: FindRefsParams,
     backend: &dyn PreciseCapability,
 ) -> CallToolResult {
     params.budget_tokens = effective_budget(params.budget_tokens);
@@ -548,7 +545,7 @@ pub(crate) fn run_find_references(
     )
 }
 
-/// Above this many hits (and no explicit `offset`), `find_references`
+/// Above this many hits (and no explicit `offset`), `find_refs`
 /// answers with per-file counts first, like search_code's wide mode.
 const WIDE_REFERENCES: usize = 150;
 
@@ -804,7 +801,7 @@ impl<'a> RefHits<'a> {
 /// Read-only rename preview: per-file checklist of the sites that hold the
 /// old name (1-based line and column, UTF-16 units, as in the reference list). Nothing
 /// is written; the caller edits file by file and verifies with
-/// get_diagnostics.
+/// get_diag.
 fn render_rename_preview(
     symbol: &str,
     new_name: &str,
@@ -885,15 +882,15 @@ fn render_rename_preview(
         ));
     }
     if confidence == Confidence::Exact {
-        out.push_str("Checklist from the language server (precise); after replacements run build/tests to verify (use get_diagnostics per file only if you cannot).\n");
+        out.push_str("Checklist from the language server (precise); after replacements run build/tests to verify (use get_diag per file only if you cannot).\n");
     } else {
         out.push_str("Note: reference confidence is below exact; the checklist may miss or false-positive — verify before replacing.\n");
     }
     (out, by_file.len())
 }
 
-pub(crate) fn run_goto_definition(
-    mut params: GotoDefinitionParams,
+pub(crate) fn run_goto_def(
+    mut params: GotoDefParams,
     backend: &dyn PreciseCapability,
 ) -> CallToolResult {
     params.budget_tokens = effective_budget(params.budget_tokens);
@@ -1000,16 +997,16 @@ pub(crate) fn run_goto_definition(
     )
 }
 
-pub(crate) fn run_get_diagnostics(
-    params: GetDiagnosticsParams,
+pub(crate) fn run_get_diag(
+    params: GetDiagParams,
     backend: &dyn PreciseCapability,
 ) -> CallToolResult {
-    run_get_diagnostics_with(params, backend, true)
+    run_get_diag_with(params, backend, true)
 }
 
-/// [`run_get_diagnostics`] with an explicit toolchain policy.
-pub(crate) fn run_get_diagnostics_with(
-    params: GetDiagnosticsParams,
+/// [`run_get_diag`] with an explicit toolchain policy.
+pub(crate) fn run_get_diag_with(
+    params: GetDiagParams,
     backend: &dyn PreciseCapability,
     toolchain: bool,
 ) -> CallToolResult {
@@ -1106,7 +1103,7 @@ pub(crate) fn run_get_diagnostics_with(
 /// cascade noise. Say so in a few lines: the root-cause line, how many were
 /// dropped, and any parser errors (those do not depend on the environment).
 fn env_fault_result(
-    params: &GetDiagnosticsParams,
+    params: &GetDiagParams,
     diags: &[Diagnostic],
     fault: &crate::diag_env::EnvFault,
 ) -> CallToolResult {
@@ -1268,7 +1265,7 @@ fn note_has_install_command(note: Option<&str>) -> bool {
 }
 
 /// Prompt contract when a precise tool hits Unavailable: tell the model to
-/// install the language server locally, or inspect `get_languages`.
+/// install the language server locally, or inspect `get_lang`.
 fn unavailable_ensure_gate(language: Option<Language>) -> String {
     let (server, _lang_name) = match language {
         Some(lang) => (
@@ -1278,7 +1275,7 @@ fn unavailable_ensure_gate(language: Option<Language>) -> String {
         None => ("the language server", "<language>"),
     };
     format!(
-        "Language server unavailable ({server}). Install it on this machine and retry, or use get_languages for Ready / needs_install / AST-only.\n"
+        "Language server unavailable ({server}). Install it on this machine and retry, or use get_lang for Ready / needs_install / AST-only.\n"
     )
 }
 
@@ -1537,10 +1534,7 @@ mod tests {
         assert_eq!(tools.len(), crate::PRECISE_TOOL_COUNT);
         let mut names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
         names.sort();
-        assert_eq!(
-            names,
-            vec!["find_references", "get_diagnostics", "goto_definition"]
-        );
+        assert_eq!(names, vec!["find_refs", "get_diag", "goto_def"]);
         assert!(
             !names.iter().any(|n| n == "rename_symbol"),
             "rename_symbol is not a catalog name"
@@ -1549,7 +1543,7 @@ mod tests {
 
     #[test]
     fn schemas_required_and_optional_fields() {
-        let refs = schema_for_tool("find_references");
+        let refs = schema_for_tool("find_refs");
         assert!(refs.pointer("/properties/symbol").is_some());
         assert!(refs.pointer("/properties/path").is_some());
         assert!(refs.pointer("/properties/budget_tokens").is_some());
@@ -1568,7 +1562,7 @@ mod tests {
             "path description should steer models: {path_desc}"
         );
 
-        let diags = schema_for_tool("get_diagnostics");
+        let diags = schema_for_tool("get_diag");
         assert!(diags.pointer("/properties/path").is_some());
         assert!(diags.pointer("/properties/severity").is_some());
         assert!(diags.pointer("/properties/budget_tokens").is_some());
@@ -1579,7 +1573,7 @@ mod tests {
             "severity must be optional: {required:?}"
         );
 
-        let defs = schema_for_tool("goto_definition");
+        let defs = schema_for_tool("goto_def");
         assert!(defs.pointer("/properties/path").is_some());
         assert!(defs.pointer("/properties/symbol").is_some());
         assert!(defs.pointer("/properties/line").is_some());
@@ -1604,7 +1598,7 @@ mod tests {
     #[test]
     fn every_tool_returns_nonempty_first_text_when_unwired() {
         let tools = PreciseTools::new();
-        assert_first_text(tools.find_references(Parameters(FindReferencesParams {
+        assert_first_text(tools.find_refs(Parameters(FindRefsParams {
             root: None,
             index_root: None,
             symbol: "Handler".into(),
@@ -1615,7 +1609,7 @@ mod tests {
             offset: None,
             dry_run_rename: None,
         })));
-        assert_first_text(tools.goto_definition(Parameters(GotoDefinitionParams {
+        assert_first_text(tools.goto_def(Parameters(GotoDefParams {
             root: None,
             index_root: None,
             path: "src/main.go".into(),
@@ -1625,7 +1619,7 @@ mod tests {
             budget_tokens: 800,
             offset: None,
         })));
-        assert_first_text(tools.get_diagnostics(Parameters(GetDiagnosticsParams {
+        assert_first_text(tools.get_diag(Parameters(GetDiagParams {
             root: None,
             index_root: None,
             path: "src/main.go".into(),
@@ -1644,7 +1638,7 @@ mod tests {
             diagnostics: Precise::unknown(Vec::new(), "gopls is not installed"),
         });
 
-        let refs = assert_first_text(tools.find_references(Parameters(FindReferencesParams {
+        let refs = assert_first_text(tools.find_refs(Parameters(FindRefsParams {
             root: None,
             index_root: None,
             symbol: "Handler".into(),
@@ -1663,7 +1657,7 @@ mod tests {
         );
         assert!(text.contains("gopls"), "{text}");
         assert!(text.contains("go install"), "{text}");
-        assert!(text.contains("get_languages"), "{text}");
+        assert!(text.contains("get_lang"), "{text}");
         assert!(text.contains("search_code"), "{text}");
         assert!(text.contains("false positive"), "{text}");
         assert!(
@@ -1671,7 +1665,7 @@ mod tests {
             "{text}"
         );
 
-        let diags = assert_first_text(tools.get_diagnostics(Parameters(GetDiagnosticsParams {
+        let diags = assert_first_text(tools.get_diag(Parameters(GetDiagParams {
             root: None,
             index_root: None,
             path: "pkg/server.go".into(),
@@ -1683,10 +1677,10 @@ mod tests {
         let text = first_text(&diags);
         assert!(text.contains("confidence: Unknown"), "{text}");
         assert!(text.contains("go install"), "{text}");
-        assert!(text.contains("get_languages"), "{text}");
+        assert!(text.contains("get_lang"), "{text}");
         assert!(!text.contains("search_code"), "{text}");
 
-        let defs = assert_first_text(tools.goto_definition(Parameters(GotoDefinitionParams {
+        let defs = assert_first_text(tools.goto_def(Parameters(GotoDefParams {
             root: None,
             index_root: None,
             path: "pkg/server.go".into(),
@@ -1718,7 +1712,7 @@ mod tests {
             ),
         });
 
-        let refs = assert_first_text(tools.find_references(Parameters(FindReferencesParams {
+        let refs = assert_first_text(tools.find_refs(Parameters(FindRefsParams {
             root: None,
             index_root: None,
             symbol: "x".into(),
@@ -1740,7 +1734,7 @@ mod tests {
             structured["matches"].as_u64().unwrap()
         );
 
-        let diags = assert_first_text(tools.get_diagnostics(Parameters(GetDiagnosticsParams {
+        let diags = assert_first_text(tools.get_diag(Parameters(GetDiagParams {
             root: None,
             index_root: None,
             path: "src/lib.rs".into(),
@@ -1760,7 +1754,7 @@ mod tests {
             definition: Precise::exact(vec![loc("src/a.rs", 2, 0)]),
             diagnostics: Precise::exact(Vec::new()),
         });
-        let result = assert_first_text(tools.find_references(Parameters(FindReferencesParams {
+        let result = assert_first_text(tools.find_refs(Parameters(FindRefsParams {
             root: None,
             index_root: None,
             symbol: "x".into(),
@@ -1791,7 +1785,7 @@ mod tests {
                 diag("src/a.rs", 2, Severity::Hint, "style"),
             ]),
         });
-        let filtered = assert_first_text(tools.get_diagnostics(Parameters(GetDiagnosticsParams {
+        let filtered = assert_first_text(tools.get_diag(Parameters(GetDiagParams {
             root: None,
             index_root: None,
             path: "src/a.rs".into(),
@@ -1805,7 +1799,7 @@ mod tests {
         assert!(!text.contains("[hint]"), "{text}");
         assert!(text.contains("@src/a.rs:2"), "{text}");
 
-        let invalid = assert_first_text(tools.get_diagnostics(Parameters(GetDiagnosticsParams {
+        let invalid = assert_first_text(tools.get_diag(Parameters(GetDiagParams {
             root: None,
             index_root: None,
             path: "src/a.rs".into(),
@@ -1830,7 +1824,7 @@ mod tests {
             definition: Precise::exact(Vec::new()),
             diagnostics: Precise::exact(Vec::new()),
         });
-        let result = assert_first_text(tools.find_references(Parameters(FindReferencesParams {
+        let result = assert_first_text(tools.find_refs(Parameters(FindRefsParams {
             root: None,
             index_root: None,
             symbol: "old_name".into(),
@@ -1852,9 +1846,9 @@ mod tests {
         );
         assert!(text.contains("  src/a.rs ×2: L4:5 L10:9"), "{text}");
         assert!(text.contains("  src/b.rs ×1: L1:13"), "{text}");
-        assert!(text.contains("get_diagnostics"), "{text}");
+        assert!(text.contains("get_diag"), "{text}");
         // No preview without the parameter.
-        let plain = assert_first_text(tools.find_references(Parameters(FindReferencesParams {
+        let plain = assert_first_text(tools.find_refs(Parameters(FindRefsParams {
             root: None,
             index_root: None,
             symbol: "old_name".into(),
@@ -1908,7 +1902,7 @@ mod tests {
             definition: Precise::exact(Vec::new()),
             diagnostics: Precise::exact(Vec::new()),
         });
-        let result = assert_first_text(tools.find_references(Parameters(FindReferencesParams {
+        let result = assert_first_text(tools.find_refs(Parameters(FindRefsParams {
             root: None,
             index_root: None,
             symbol: "neverDefined".into(),
@@ -1927,13 +1921,13 @@ mod tests {
     }
 
     #[test]
-    fn goto_definition_exact_hits_use_anchors() {
+    fn goto_def_exact_hits_use_anchors() {
         let tools = tools_with(Fake {
             references: Precise::exact(Vec::new()),
             definition: Precise::exact(vec![loc("src/lib.rs", 11, 4)]),
             diagnostics: Precise::exact(Vec::new()),
         });
-        let result = assert_first_text(tools.goto_definition(Parameters(GotoDefinitionParams {
+        let result = assert_first_text(tools.goto_def(Parameters(GotoDefParams {
             root: None,
             index_root: None,
             path: "src/main.rs".into(),
@@ -1960,7 +1954,7 @@ mod tests {
             definition: Precise::exact(Vec::new()),
             diagnostics: Precise::exact(Vec::new()),
         });
-        let result = assert_first_text(tools.goto_definition(Parameters(GotoDefinitionParams {
+        let result = assert_first_text(tools.goto_def(Parameters(GotoDefParams {
             root: None,
             index_root: None,
             path: "src/main.rs".into(),
@@ -1978,34 +1972,32 @@ mod tests {
     }
 
     #[test]
-    fn goto_definition_missing_path_or_locator_is_unknown() {
+    fn goto_def_missing_path_or_locator_is_unknown() {
         let tools = PreciseTools::new();
-        let missing_path =
-            assert_first_text(tools.goto_definition(Parameters(GotoDefinitionParams {
-                root: None,
-                index_root: None,
-                path: "".into(),
-                symbol: Some("x".into()),
-                line: None,
-                character: None,
-                budget_tokens: 100,
-                offset: None,
-            })));
+        let missing_path = assert_first_text(tools.goto_def(Parameters(GotoDefParams {
+            root: None,
+            index_root: None,
+            path: "".into(),
+            symbol: Some("x".into()),
+            line: None,
+            character: None,
+            budget_tokens: 100,
+            offset: None,
+        })));
         let text = first_text(&missing_path);
         assert!(text.contains("confidence: Unknown"), "{text}");
         assert!(text.contains("path"), "{text}");
 
-        let missing_locator =
-            assert_first_text(tools.goto_definition(Parameters(GotoDefinitionParams {
-                root: None,
-                index_root: None,
-                path: "src/main.rs".into(),
-                symbol: None,
-                line: None,
-                character: None,
-                budget_tokens: 100,
-                offset: None,
-            })));
+        let missing_locator = assert_first_text(tools.goto_def(Parameters(GotoDefParams {
+            root: None,
+            index_root: None,
+            path: "src/main.rs".into(),
+            symbol: None,
+            line: None,
+            character: None,
+            budget_tokens: 100,
+            offset: None,
+        })));
         let text = first_text(&missing_locator);
         assert!(text.contains("confidence: Unknown"), "{text}");
         assert!(text.contains("symbol"), "{text}");
@@ -2016,14 +2008,14 @@ mod tests {
     }
 
     #[test]
-    fn goto_definition_budget_zero_keeps_nonempty_text() {
+    fn goto_def_budget_zero_keeps_nonempty_text() {
         let many: Vec<Location> = (0..20).map(|i| loc("src/lib.rs", i, 0)).collect();
         let tools = tools_with(Fake {
             references: Precise::exact(Vec::new()),
             definition: Precise::exact(many),
             diagnostics: Precise::exact(Vec::new()),
         });
-        let result = assert_first_text(tools.goto_definition(Parameters(GotoDefinitionParams {
+        let result = assert_first_text(tools.goto_def(Parameters(GotoDefParams {
             root: None,
             index_root: None,
             path: "src/lib.rs".into(),
@@ -2047,12 +2039,8 @@ mod tests {
         assert!(hint.contains("dart language-server"));
     }
 
-    fn refs_params(
-        budget: usize,
-        offset: Option<usize>,
-        rename: Option<&str>,
-    ) -> FindReferencesParams {
-        FindReferencesParams {
+    fn refs_params(budget: usize, offset: Option<usize>, rename: Option<&str>) -> FindRefsParams {
+        FindRefsParams {
             root: None,
             index_root: None,
             symbol: "Run".into(),
@@ -2076,7 +2064,7 @@ mod tests {
     #[test]
     fn rename_preview_refused_when_references_unknown() {
         let tools = fake_refs(Precise::unknown(Vec::new(), "gopls is not installed"));
-        let r = tools.find_references(Parameters(refs_params(800, None, Some("Go"))));
+        let r = tools.find_refs(Parameters(refs_params(800, None, Some("Go"))));
         let text = first_text(&r);
         assert!(text.contains("Rename preview not generated"), "{text}");
         assert!(!text.contains("no changes needed"), "{text}");
@@ -2090,7 +2078,7 @@ mod tests {
             confidence: Confidence::Scoped,
             note: Some(note),
         });
-        let r = tools.find_references(Parameters(refs_params(800, None, Some("Go"))));
+        let r = tools.find_refs(Parameters(refs_params(800, None, Some("Go"))));
         let text = first_text(&r);
         assert!(text.contains("multiple same-name definitions"), "{text}");
         assert!(
@@ -2107,7 +2095,7 @@ mod tests {
         let mut v = vec![loc("zzz.go", 0, 0)];
         v.extend((0..16).map(|i| loc("aaa.go", i, 0)));
         let tools = fake_refs(Precise::exact(v));
-        let r = tools.find_references(Parameters(refs_params(8, None, None)));
+        let r = tools.find_refs(Parameters(refs_params(8, None, None)));
         let text = first_text(&r);
         assert!(text.contains("zzz.go (1)\n  L1:1"), "{text}");
     }
@@ -2116,7 +2104,7 @@ mod tests {
     fn budget_is_capped_and_preview_shares_it() {
         let many: Vec<Location> = (0..30_000).map(|i| loc("src/lib.rs", i, 0)).collect();
         let tools = fake_refs(Precise::exact(many));
-        let r = tools.find_references(Parameters(refs_params(100_000_000, None, None)));
+        let r = tools.find_refs(Parameters(refs_params(100_000_000, None, None)));
         let s = r.structured_content.clone().unwrap();
         assert_eq!(s["budget_tokens"], json!(MAX_BUDGET_TOKENS));
         assert!(s["truncated"].as_bool().unwrap());
@@ -2128,7 +2116,7 @@ mod tests {
         );
 
         // Preview: list + preview together stay within one budget.
-        let r = tools.find_references(Parameters(refs_params(400, None, Some("Go"))));
+        let r = tools.find_refs(Parameters(refs_params(400, None, Some("Go"))));
         let text = first_text(&r);
         assert!(
             estimate_tokens(text) <= 400 + 120,
@@ -2138,11 +2126,11 @@ mod tests {
     }
 
     #[test]
-    fn find_references_output_including_header_fits_budget() {
+    fn find_refs_output_including_header_fits_budget() {
         let many: Vec<Location> = (0..2_000).map(|i| loc("src/lib.rs", i, 0)).collect();
         let tools = fake_refs(Precise::exact(many));
         for budget in [60usize, 150, 400, 1000] {
-            let r = tools.find_references(Parameters(refs_params(budget, None, None)));
+            let r = tools.find_refs(Parameters(refs_params(budget, None, None)));
             let tokens = estimate_tokens(first_text(&r));
             assert!(
                 tokens <= budget,
@@ -2152,29 +2140,29 @@ mod tests {
     }
 
     #[test]
-    fn find_references_pages_with_offset() {
+    fn find_refs_pages_with_offset() {
         let many: Vec<Location> = (0..40).map(|i| loc("src/lib.rs", i, 0)).collect();
         let tools = fake_refs(Precise::exact(many));
-        let first = tools.find_references(Parameters(refs_params(60, None, None)));
+        let first = tools.find_refs(Parameters(refs_params(60, None, None)));
         let s1 = first.structured_content.clone().unwrap();
         assert_eq!(s1["truncated"], json!(true));
         let next = s1["next_offset"].as_u64().unwrap() as usize;
         assert!(next > 0);
         let t1 = first_text(&first).to_string();
         assert!(t1.contains(&format!("offset={next}")), "{t1}");
-        let second = tools.find_references(Parameters(refs_params(60, Some(next), None)));
+        let second = tools.find_refs(Parameters(refs_params(60, Some(next), None)));
         let t2 = first_text(&second);
         assert!(t2.contains(&format!("\n  L{}:1", next + 1)), "{t2}");
         assert!(!t2.contains("\n  L1:1\n"), "{t2}");
         // A page that starts mid-file repeats the file header.
         assert!(t2.contains("src/lib.rs (40)\n"), "{t2}");
         // Zero budget still advances.
-        let z = tools.find_references(Parameters(refs_params(0, Some(3), None)));
+        let z = tools.find_refs(Parameters(refs_params(0, Some(3), None)));
         assert_eq!(z.structured_content.unwrap()["next_offset"], json!(4));
     }
 
     #[test]
-    fn goto_definition_pages_and_lists_all_definitions() {
+    fn goto_def_pages_and_lists_all_definitions() {
         let defs: Vec<Location> = (0..3).map(|i| loc("a.go", i * 10, 5)).collect();
         let tools = tools_with(Fake {
             references: Precise::exact(Vec::new()),
@@ -2187,7 +2175,7 @@ mod tests {
             },
             diagnostics: Precise::exact(Vec::new()),
         });
-        let r = tools.goto_definition(Parameters(GotoDefinitionParams {
+        let r = tools.goto_def(Parameters(GotoDefParams {
             root: None,
             index_root: None,
             path: "a.go".into(),
@@ -2209,7 +2197,7 @@ mod tests {
     #[test]
     fn coordinates_are_one_based_and_stated() {
         let tools = fake_refs(Precise::exact(vec![loc("a.go", 5, 11)]));
-        let r = tools.find_references(Parameters(refs_params(800, None, Some("Go"))));
+        let r = tools.find_refs(Parameters(refs_params(800, None, Some("Go"))));
         let text = first_text(&r);
         assert!(text.contains("a.go (1)\n  L6:12"), "{text}");
         assert!(text.contains("L6:12"), "{text}");
@@ -2222,7 +2210,7 @@ mod tests {
             Vec::new(),
             "symbol `NoSuchThing` not found in a.go; cannot provide precise references.",
         ));
-        let r = tools.find_references(Parameters(refs_params(800, None, None)));
+        let r = tools.find_refs(Parameters(refs_params(800, None, None)));
         let text = first_text(&r);
         assert!(text.contains("not found in a.go"), "{text}");
         assert!(!text.contains("go install"), "{text}");
@@ -2312,7 +2300,7 @@ mod tests {
                 info("// Execute runs it", None, false, HitKind::Comment, false),
             ],
         }));
-        let r = tools.find_references(Parameters(refs_params(2_000, None, None)));
+        let r = tools.find_refs(Parameters(refs_params(2_000, None, None)));
         let text = first_text(&r);
         assert!(text.contains("4 hits / 2 files total (non-test 3 hits / 1 file, test 1 hit / 1 file; [declaration] 1 hit; comment/string 1 hit, tagged)"), "{text}");
         assert!(
@@ -2358,7 +2346,7 @@ mod tests {
             infos.push(info("Run()", None, false, HitKind::Code, false));
         }
         let tools = PreciseTools::with_backend(Arc::new(Annotated { refs, infos }));
-        let r = tools.find_references(Parameters(refs_params(2_500, None, None)));
+        let r = tools.find_refs(Parameters(refs_params(2_500, None, None)));
         let text = first_text(&r);
         assert!(text.contains("181 hits / 3 files total"), "{text}");
         assert!(text.contains("Pass offset=0 for row listing"), "{text}");
@@ -2382,7 +2370,7 @@ mod tests {
             refs: (0..200).map(|i| loc("b.go", i, 1)).collect(),
             infos: vec![HitInfo::default(); 200],
         }));
-        let r = tools2.find_references(Parameters(refs_params(500, Some(0), None)));
+        let r = tools2.find_refs(Parameters(refs_params(500, Some(0), None)));
         let text = first_text(&r);
         assert!(text.contains("b.go (200)\n  L1:2\n"), "{text}");
     }

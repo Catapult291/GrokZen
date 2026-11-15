@@ -54,15 +54,6 @@ fn timeout_for(default_secs: u64) -> Duration {
     Duration::from_secs(secs)
 }
 
-/// Syntax-only diagnostics: the tree-sitter parse, no toolchain process.
-pub(crate) fn check_syntax_only(
-    root: &Path,
-    rel: &RelPath,
-    language: Language,
-) -> Precise<Vec<Diagnostic>> {
-    syntax_only(root, rel, language, "宿主设置只允许语法诊断")
-}
-
 /// Diagnostics for `rel` from the toolchain or the parser. Never starts a
 /// language server.
 pub(crate) fn check(root: &Path, rel: &RelPath, language: Language) -> Precise<Vec<Diagnostic>> {
@@ -79,6 +70,15 @@ pub(crate) fn check(root: &Path, rel: &RelPath, language: Language) -> Precise<V
         Outcome::Ran { tool, scope, diags } => finish(rel, tool, &scope, diags, elapsed),
         Outcome::Skipped(why) => syntax_only(root, rel, language, &why),
     }
+}
+
+/// Syntax-only diagnostics: the tree-sitter parse, no toolchain process.
+pub(crate) fn check_syntax_only(
+    root: &Path,
+    rel: &RelPath,
+    language: Language,
+) -> Precise<Vec<Diagnostic>> {
+    syntax_only(root, rel, language, "宿主设置只允许语法诊断")
 }
 
 enum Outcome {

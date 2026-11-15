@@ -107,11 +107,17 @@ pub(crate) fn nest(
 
 /// Inverted index from sub-word to the symbols whose name (or innermost
 /// container's name) contains it, plus each file's path words.
+///
+/// Posting lists are one flat CSR array (`offsets` + `data`): term `w`'s list
+/// is `&data[offsets[w]..offsets[w + 1]]`, so a vocabulary of hundreds of
+/// thousands of terms costs two allocations instead of one `Vec` per term.
 #[derive(Debug, Default)]
 pub(crate) struct WordIndex {
     vocab: HashMap<String, u32>,
-    /// term → (symbol position, field mask).
-    postings: Vec<Vec<(u32, u8)>>,
+    /// Row offsets into `data`, length `vocab.len() + 1`.
+    offsets: Vec<u32>,
+    /// All posting lists concatenated: `(symbol position, field mask)`.
+    data: Vec<(u32, u8)>,
     /// Number of sub-words in each symbol's name.
     name_len: Vec<u8>,
     /// Innermost container of each symbol (`u32::MAX` = none).
@@ -119,6 +125,42 @@ pub(crate) struct WordIndex {
     avg_name_len: f32,
     /// File → term ids of its stem and parent directory.
     path_terms: HashMap<FileId, Vec<u32>>,
+}
+
+/// Term id of `word`, interning it (and its still-empty posting list) on
+/// first sight. `counts[t]` later accumulates term `t`'s posting frequency.
+fn intern(vocab: &mut HashMap<String, u32>, counts: &mut Vec<u32>, word: &str) -> u32 {
+    if let Some(&id) = vocab.get(word) {
+        return id;
+    }
+    let id = counts.len() as u32;
+    vocab.insert(word.to_string(), id);
+    counts.push(0);
+    id
+}
+
+/// Fill `out` with the distinct `(term, field mask)` postings of symbol
+/// `pos`: the terms of its own name, then those of its innermost container's
+/// name merged in with the container bit set.
+fn collect_fields(
+    pos: usize,
+    name_terms: &[Vec<u32>],
+    sym_name: &[u32],
+    container: &[u32],
+    out: &mut Vec<(u32, u8)>,
+) {
+    out.clear();
+    let own = &name_terms[sym_name[pos] as usize];
+    out.extend(own.iter().map(|&term| (term, FIELD_NAME)));
+    let parent = container[pos];
+    if parent != u32::MAX {
+        for &term in &name_terms[sym_name[parent as usize] as usize] {
+            match out.iter_mut().find(|(field, _)| *field == term) {
+                Some(entry) => entry.1 |= FIELD_CONTAINER,
+                None => out.push((term, FIELD_CONTAINER)),
+            }
+        }
+    }
 }
 
 /// One ranked fallback candidate.
@@ -158,21 +200,22 @@ impl WordIndex {
             })
             .collect();
         let split: Vec<Vec<String>> = distinct.par_iter().map(|n| words_of(n)).collect();
-        let mut index = WordIndex::default();
-        let mut intern = |w: &str| -> u32 {
-            if let Some(&id) = index.vocab.get(w) {
-                return id;
-            }
-            let id = index.postings.len() as u32;
-            index.vocab.insert(w.to_string(), id);
-            index.postings.push(Vec::new());
-            id
-        };
+
+        // Term ids are assigned on first sight; `counts[t]` accumulates how
+        // many postings term `t` will hold. That lets the posting lists below
+        // become one flat CSR array with a single allocation.
+        let mut vocab: HashMap<String, u32> = HashMap::new();
+        let mut counts: Vec<u32> = Vec::new();
         let name_terms: Vec<Vec<u32>> = split
             .iter()
-            .map(|words| words.iter().map(|w| intern(w)).collect())
+            .map(|words| {
+                words
+                    .iter()
+                    .map(|w| intern(&mut vocab, &mut counts, w))
+                    .collect()
+            })
             .collect();
-        let path_terms: Vec<(FileId, Vec<u32>)> = graph
+        let mut path_terms: Vec<(FileId, Vec<u32>)> = graph
             .files
             .iter()
             .map(|file| {
@@ -184,42 +227,79 @@ impl WordIndex {
                 let dir = parts.next().unwrap_or_default();
                 let mut ids: Vec<u32> = words_of(&format!("{stem} {dir}"))
                     .iter()
-                    .map(|w| intern(w))
+                    .map(|w| intern(&mut vocab, &mut counts, w))
                     .collect();
                 ids.sort_unstable();
                 ids.dedup();
+                ids.shrink_to_fit();
                 (file.id, ids)
             })
             .collect();
-        index.path_terms = path_terms.into_iter().collect();
-        let mut total_len = 0usize;
-        index.name_len = Vec::with_capacity(symbols.len());
+        debug_assert_eq!(counts.len(), vocab.len());
+
+        // Pass 1: name lengths and per-term posting counts, reusing one
+        // field buffer (so no per-symbol allocation either).
         let mut fields: Vec<(u32, u8)> = Vec::new();
+        let mut name_len: Vec<u8> = Vec::with_capacity(symbols.len());
+        let mut total_len = 0usize;
         for pos in 0..symbols.len() {
-            let own = &name_terms[sym_name[pos] as usize];
-            index.name_len.push(own.len().min(255) as u8);
-            total_len += own.len();
-            fields.clear();
-            fields.extend(own.iter().map(|&t| (t, FIELD_NAME)));
-            if let Some(&parent) = sym_name.get(container[pos] as usize) {
-                for &t in &name_terms[parent as usize] {
-                    match fields.iter_mut().find(|(f, _)| *f == t) {
-                        Some(entry) => entry.1 |= FIELD_CONTAINER,
-                        None => fields.push((t, FIELD_CONTAINER)),
-                    }
-                }
-            }
-            for &(t, mask) in &fields {
-                index.postings[t as usize].push((pos as u32, mask));
+            let own_len = name_terms[sym_name[pos] as usize].len();
+            name_len.push(own_len.min(255) as u8);
+            total_len += own_len;
+            collect_fields(pos, &name_terms, &sym_name, &container, &mut fields);
+            for &(term, _) in &fields {
+                counts[term as usize] += 1;
             }
         }
-        index.container = container;
-        index.avg_name_len = if symbols.is_empty() {
-            1.0
-        } else {
-            (total_len as f32 / symbols.len() as f32).max(1.0)
-        };
-        index
+
+        // Prefix sums give each term's row; pass 2 fills the flat data array
+        // by advancing one cursor per term.
+        let mut offsets: Vec<u32> = Vec::with_capacity(counts.len() + 1);
+        offsets.push(0);
+        for &count in &counts {
+            let next = offsets.last().copied().unwrap_or(0) + count;
+            offsets.push(next);
+        }
+        let total_postings = offsets.last().copied().unwrap_or(0) as usize;
+        let mut cursor = offsets[..counts.len()].to_vec();
+        let mut data: Vec<(u32, u8)> = vec![(0, 0); total_postings];
+        for pos in 0..symbols.len() {
+            collect_fields(pos, &name_terms, &sym_name, &container, &mut fields);
+            for &(term, mask) in &fields {
+                let slot = &mut cursor[term as usize];
+                data[*slot as usize] = (pos as u32, mask);
+                *slot += 1;
+            }
+        }
+        offsets.shrink_to_fit();
+        data.shrink_to_fit();
+        vocab.shrink_to_fit();
+        path_terms.shrink_to_fit();
+
+        let mut path_terms: HashMap<FileId, Vec<u32>> = path_terms.into_iter().collect();
+        path_terms.shrink_to_fit();
+        WordIndex {
+            vocab,
+            offsets,
+            data,
+            name_len,
+            container,
+            avg_name_len: if symbols.is_empty() {
+                1.0
+            } else {
+                (total_len as f32 / symbols.len() as f32).max(1.0)
+            },
+            path_terms,
+        }
+    }
+
+    /// The invocation list of term `id`: `(symbol position, field mask)`
+    /// pairs, a slice of the flat CSR data (no allocation).
+    #[inline]
+    fn postings(&self, id: u32) -> &[(u32, u8)] {
+        let start = self.offsets[id as usize] as usize;
+        let end = self.offsets[id as usize + 1] as usize;
+        &self.data[start..end]
     }
 
     /// Symbols ranked by sub-word relevance to `query_words` (already passed
@@ -248,7 +328,7 @@ impl WordIndex {
         let mut acc: HashMap<u32, (f32, u64)> = HashMap::new();
         for (qi, id) in term_ids.iter().enumerate().take(64) {
             let Some(id) = id else { continue };
-            let list = &self.postings[*id as usize];
+            let list = self.postings(*id);
             let w_idf = idf(list.len());
             for &(pos, mask) in list {
                 // BM25 length normalisation (tf = 1, k1 = 1.2, b = 0.75) of
@@ -279,7 +359,7 @@ impl WordIndex {
                     }
                     if let Some(id) = id {
                         if path_ids.binary_search(id).is_ok() {
-                            score += idf(self.postings[*id as usize].len()) * 0.35;
+                            score += idf(self.postings(*id).len()) * 0.35;
                             matched |= 1 << qi;
                         }
                     }
@@ -421,6 +501,30 @@ mod tests {
         );
         assert_eq!(only_fns.len(), 1);
         assert_eq!(g.symbols[only_fns[0].pos].name, "CloudClient");
+    }
+
+    #[test]
+    fn postings_are_csr_flat_and_consistent() {
+        let g = graph();
+        let index = WordIndex::build(&g);
+        assert_eq!(index.offsets.len(), index.vocab.len() + 1);
+        assert_eq!(
+            *index.offsets.last().unwrap() as usize,
+            index.data.len(),
+            "offsets must partition data exactly"
+        );
+        assert!(index.offsets.windows(2).all(|w| w[0] <= w[1]));
+        let cloud = index.vocab["cloud"];
+        assert!(index
+            .postings(cloud)
+            .iter()
+            .any(|&(pos, _)| g.symbols[pos as usize].name == "CloudClient"));
+        // Every term's list is exactly its CSR row of the shared flat array.
+        for &term in index.vocab.values() {
+            let start = index.offsets[term as usize] as usize;
+            let end = index.offsets[term as usize + 1] as usize;
+            assert_eq!(index.postings(term).len(), end - start);
+        }
     }
 
     #[test]

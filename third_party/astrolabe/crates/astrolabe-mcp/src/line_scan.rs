@@ -1,4 +1,9 @@
-//! Whole-buffer candidate search for `search_code`.
+#![cfg(test)]
+
+//! Test-only reference for whole-buffer candidate search.
+//!
+//! Production `search_code` scans borrowed CachedLines directly (literal buffer
+//! prefilter plus per-line regex matching); this oracle keeps its equivalence tests.
 //!
 //! Calling `Regex::is_match` once per line pays the regex start-up cost and a
 //! cache-pool round trip for every line (the dominant cost on large repos,
@@ -48,7 +53,7 @@ impl LineScanner {
 
     /// Line indices (0-based, ascending, unique) that may match. A superset
     /// of the lines the per-line matcher accepts.
-    pub(crate) fn candidates(&self, lines: &[String]) -> Vec<usize> {
+    pub(crate) fn candidates(&self, lines: &[&str]) -> Vec<usize> {
         let Some(re) = &self.buffer else {
             return (0..lines.len()).collect();
         };
@@ -118,14 +123,14 @@ fn buffer_safe(pattern: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn per_line(re: &regex::Regex, lines: &[String]) -> Vec<usize> {
+    fn per_line(re: &regex::Regex, lines: &[&str]) -> Vec<usize> {
         (0..lines.len())
-            .filter(|&i| re.is_match(&lines[i]))
+            .filter(|&i| re.is_match(lines[i]))
             .collect()
     }
 
     fn check(pattern: &str, ci: bool, text: &str) {
-        let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+        let lines: Vec<&str> = text.lines().collect();
         let re = regex::RegexBuilder::new(pattern)
             .case_insensitive(ci)
             .build()
@@ -136,7 +141,7 @@ mod tests {
         let got: Vec<usize> = cands
             .iter()
             .copied()
-            .filter(|&i| re.is_match(&lines[i]))
+            .filter(|&i| re.is_match(lines[i]))
             .collect();
         assert_eq!(got, want, "pattern {pattern:?} on {text:?}");
         assert!(cands.windows(2).all(|w| w[0] < w[1]), "{cands:?}");
@@ -237,7 +242,7 @@ mod tests {
 
     #[test]
     fn literal_candidates_are_only_matching_lines() {
-        let lines: Vec<String> = TEXT.lines().map(str::to_owned).collect();
+        let lines: Vec<&str> = TEXT.lines().collect();
         let scanner = LineScanner::new(&regex::escape("foo"), false);
         assert_eq!(scanner.candidates(&lines), vec![1, 4, 6, 10]);
     }
