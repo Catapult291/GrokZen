@@ -222,6 +222,7 @@ fn actor(
         None,
         shell_env_policy,
         None,
+        std::sync::Arc::new(super::ActorWatch::default()),
     )
 }
 
