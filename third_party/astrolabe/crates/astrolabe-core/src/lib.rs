@@ -23,6 +23,7 @@ pub mod index;
 pub mod lsp;
 pub mod name_path;
 pub mod parse;
+pub mod paths;
 pub mod render;
 pub mod resolvers;
 pub mod scan;

@@ -81,11 +81,6 @@ fn enqueue_permission(
     perm: xai_acp_lib::AcpArgs<acp::RequestPermissionRequest>,
     agent: &mut AgentView,
 ) -> bool {
-    // Mandatory ingress wins: evict an open feedback modal before the permission stashes the composer.
-    agent.displace_feedback_modal(
-        crate::views::feedback_modal::FeedbackModalDisplacement::Permission,
-    );
-
     let bash_highlights: Option<BashCommandHighlights> = perm
         .request
         .meta

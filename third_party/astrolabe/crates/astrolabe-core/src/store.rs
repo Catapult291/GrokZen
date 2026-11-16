@@ -25,6 +25,7 @@ use redb::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -42,6 +43,13 @@ pub enum StoreError {
 }
 
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// A `.bad-*` copy quarantined longer ago than this is deleted on the next open.
+/// A copy a heal has just produced is younger, so it survives for inspection.
+const BAD_STORE_STALE_AFTER: Duration = Duration::from_secs(24 * 3600);
+/// Any `.bad-*` copy larger than this is deleted even when recent: the store
+/// is a rebuildable cache, and a 258 MB corpse is never worth keeping.
+const BAD_STORE_STALE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Entries buffered before a transaction is committed.
 pub const WRITE_BATCH: usize = 2048;
@@ -114,6 +122,90 @@ impl FileStamp {
 /// how it is encoded.
 pub fn parse_cache_key_prefix() -> String {
     format!("x{EXTRACTOR_VERSION}-f{CACHE_FORMAT_VERSION}:")
+}
+
+/// Every `{file_name}.bad-*` sibling of `db_path`, newest or oldest.
+///
+/// A missing/unreadable directory yields an empty list: pruning is
+/// best-effort and must never fail an open.
+fn bad_store_siblings(db_path: &Path) -> Vec<std::path::PathBuf> {
+    let Some(file_name) = db_path.file_name() else {
+        return Vec::new();
+    };
+    let dir = match db_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let prefix = format!("{}.bad-", file_name.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+                && entry.file_name().to_string_lossy().starts_with(&prefix)
+        })
+        .map(|entry| entry.path())
+        .collect()
+}
+
+/// Delete stale `<db>.bad-*` copies: older than [`BAD_STORE_STALE_AFTER`] or
+/// larger than [`BAD_STORE_STALE_BYTES`]. Recent small copies — including the
+/// one a heal just produced — are kept for inspection.
+fn prune_old_bad_stores(db_path: &Path) {
+    let now = SystemTime::now();
+    for path in bad_store_siblings(db_path) {
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        // Renaming preserves the source mtime, which may long predate the
+        // corruption. Numeric suffixes record when the copy was quarantined.
+        // Older/non-numeric names retain the historical mtime fallback.
+        let quarantined_at = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.rsplit_once(".bad-"))
+            .and_then(|(_, stamp)| stamp.parse::<u64>().ok())
+            .and_then(|stamp| SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(stamp)))
+            .or_else(|| metadata.modified().ok());
+        let too_old = quarantined_at
+            .and_then(|quarantined| now.duration_since(quarantined).ok())
+            .is_some_and(|age| age > BAD_STORE_STALE_AFTER);
+        if !too_old && metadata.len() <= BAD_STORE_STALE_BYTES {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => tracing::info!(
+                path = %path.display(),
+                bytes = metadata.len(),
+                "removed stale .bad store copy"
+            ),
+            Err(error) => tracing::debug!(
+                path = %path.display(),
+                %error,
+                "could not remove stale .bad store copy"
+            ),
+        }
+    }
+}
+
+/// Delete every existing `<db>.bad-*` copy. Called right before a corrupt
+/// database is moved aside, so repeated corruption leaves exactly one copy
+/// instead of piling up hundreds of megabytes.
+fn prune_all_bad_stores(db_path: &Path) {
+    for path in bad_store_siblings(db_path) {
+        if let Err(error) = std::fs::remove_file(&path) {
+            tracing::debug!(
+                path = %path.display(),
+                %error,
+                "could not remove old .bad store copy"
+            );
+        }
+    }
 }
 
 impl Store {
@@ -280,6 +372,10 @@ impl Store {
     /// down. Other open failures (permissions, a corrupt file) are returned
     /// unchanged — those are not safe to repair by deleting the database.
     pub fn open_or_heal(path: &Path) -> Result<Self, StoreError> {
+        // Reclaim disk from corpses left by earlier heals. This runs before
+        // the open so a healthy start also sweeps old copies; anything a heal
+        // is about to create does not exist yet.
+        prune_old_bad_stores(path);
         match Self::open(path) {
             Ok(store) => Ok(store),
             Err(StoreError::Version { found, expected }) => {
@@ -305,6 +401,9 @@ impl Store {
                     .unwrap_or(0);
                 let mut aside = path.as_os_str().to_owned();
                 aside.push(format!(".bad-{stamp}"));
+                // Old corpses go first so repeated corruption keeps only the
+                // copy created below, not one per incident.
+                prune_all_bad_stores(path);
                 tracing::warn!(
                     reason = %reason,
                     path = %path.display(),
@@ -1613,6 +1712,111 @@ mod tests {
             .filter_map(|e| e.ok())
             .any(|e| e.file_name().to_string_lossy().contains(".bad-"));
         assert!(aside, "the broken file is kept for inspection");
+    }
+
+    #[test]
+    fn prune_old_bad_stores_keeps_recent_small_copies() {
+        let dir = TestDir::new("bad-prune");
+        let db = dir.db();
+        std::fs::write(&db, b"live").unwrap();
+        let sibling = |suffix: &str| dir.0.join(format!("index.redb.bad-{suffix}"));
+
+        let fresh = sibling("fresh");
+        std::fs::write(&fresh, vec![1u8; 16]).unwrap();
+
+        let old = sibling("old");
+        std::fs::write(&old, vec![2u8; 16]).unwrap();
+        let old_time = SystemTime::now() - Duration::from_secs(25 * 3600);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let fresh_quarantine = sibling(&stamp.to_string());
+        std::fs::write(&fresh_quarantine, b"old source, fresh quarantine").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&fresh_quarantine)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+
+        let big = sibling("big");
+        // Sparse on purpose: only the logical size matters to the pruner.
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(BAD_STORE_STALE_BYTES + 1)
+            .unwrap();
+
+        let unrelated = dir.0.join("index.redb.not-a-bad-copy");
+        std::fs::write(&unrelated, b"keep").unwrap();
+
+        prune_old_bad_stores(&db);
+
+        assert!(fresh.exists(), "recent small copy is kept for inspection");
+        assert!(
+            fresh_quarantine.exists(),
+            "numeric quarantine time takes precedence over old source mtime"
+        );
+        assert!(!old.exists(), "copy older than 24h is pruned");
+        assert!(!big.exists(), "copy larger than 32MB is pruned");
+        assert!(unrelated.exists(), "unrelated siblings are untouched");
+    }
+
+    #[test]
+    fn newly_quarantined_old_corrupt_store_survives_reopen() {
+        let dir = TestDir::new("bad-old-source");
+        let db = dir.db();
+        std::fs::write(&db, vec![0xABu8; 4096]).unwrap();
+        let old_time = SystemTime::now() - Duration::from_secs(25 * 3600);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&db)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+
+        drop(Store::open_or_heal(&db).expect("heals an old corrupt cache"));
+        let copies = bad_store_siblings(&db);
+        assert_eq!(copies.len(), 1);
+        let fresh = &copies[0];
+        assert!(fresh.exists(), "new quarantine is kept for inspection");
+
+        // A genuinely old quarantine is removed even if its mtime is fresh.
+        let old_stamp = old_time
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let stale = dir.0.join(format!("index.redb.bad-{old_stamp}"));
+        std::fs::write(&stale, b"old diagnostic copy").unwrap();
+        drop(Store::open_or_heal(&db).expect("reopens healed cache"));
+        assert!(fresh.exists(), "source mtime must not age a new quarantine");
+        assert!(!stale.exists(), "quarantines older than 24h are removed");
+    }
+
+    #[test]
+    fn repeated_corruption_keeps_only_the_latest_bad_copy() {
+        let dir = TestDir::new("bad-repeat");
+        let stale = dir.0.join("index.redb.bad-1700000000");
+        std::fs::write(&stale, vec![0xCDu8; 4096]).unwrap();
+        std::fs::write(dir.db(), vec![0xABu8; 4096]).unwrap();
+
+        let store = Store::open_or_heal(&dir.db()).expect("heals the corrupt cache");
+        drop(store);
+
+        let bad: Vec<_> = std::fs::read_dir(&dir.0)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".bad-"))
+            .collect();
+        assert_eq!(bad.len(), 1, "only the newest bad copy survives: {bad:?}");
     }
 
     #[test]

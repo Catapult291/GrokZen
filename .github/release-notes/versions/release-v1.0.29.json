@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "tag": "release-v1.0.29",
+  "prerelease": false,
+  "previous_tag": "release-v1.0.28",
+  "community": [
+    {
+      "text": "Astrolabe 引擎 vendor 升级至 0.17.9，工具执行恢复直接调度。",
+      "commits": [
+        "77e894ffc6bbb8aa0178fea6137055ce4aefa4cc",
+        "42f389908de18efa2eb6a1309cbfe881c32e603e"
+      ]
+    },
+    {
+      "text": "移除内置 web_search 工具，联网检索改由 MCP 服务器承担。",
+      "commits": [
+        "67add17253caf4736ea25bb88b14605e2aff82de"
+      ]
+    },
+    {
+      "text": "移除 send_feedback 工具与 /feedback 反馈命令。",
+      "commits": [
+        "5525956548a7db78774df3ba48ac577ac8e54a76",
+        "e30981b862e89bb4f1a9ae253ecebd87a281b38f",
+        "e9f9ca9d37cd72ba7bfc02fcc41aa93039dc043a",
+        "76f2e70a2a08baa048e0a9ee894a270418a801c5"
+      ]
+    },
+    {
+      "text": "新增 Imagine 媒体工具构建策略开关（IMAGINE_TOOL_IDS 清单），静态工具集与 AgentBuilder 按构建策略编译剔除。",
+      "commits": [
+        "c3edc31073c4eff8cbcc859598962b292901dd5e",
+        "c39dc51e01f355f1e5b18065b34e071b2112d3a8",
+        "41c196217fed825290b85dd6c6b97909c5627465"
+      ]
+    },
+    {
+      "text": "pager/shell/update/tools 等链路索引访问安全化（indexing_slicing 清零），clippy 警告清零。",
+      "commits": [
+        "e28d2ea76fa8d014408a83f868029f4977608a25",
+        "8dc74fe4e22dc2449dea9812dab9123f778e9094",
+        "ec274518aea3c7506c59e21ddd310683b261d2f0"
+      ]
+    }
+  ],
+  "upstream": [],
+  "notices": [
+    "内置 web_search 工具与 /feedback 反馈命令已移除：联网检索请改用 MCP 服务器（如 exa、tavily）。"
+  ]
+}

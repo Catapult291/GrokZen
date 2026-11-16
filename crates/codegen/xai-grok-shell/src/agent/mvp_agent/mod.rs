@@ -728,8 +728,6 @@ pub struct MvpAgent {
     /// `cfg` is `!Send`; the gates run on the tokio pool.
     /// Kept current by [`Self::sync_collection_config_gate`] on every mid-session `remote_settings` rewrite.
     pub(crate) trace_upload_live: Arc<std::sync::atomic::AtomicBool>,
-    /// Shell-issued one-shot upload capabilities. Each token is bound to one session and consumed before archive I/O.
-    feedback_trace_upload_grants: RefCell<VecDeque<(String, acp::SessionId)>>,
     /// Memory system configuration for future session spawns.
     /// Replaced after runtime config is re-resolved; running sessions retain their cloned snapshot.
     memory_config: RefCell<Option<crate::config::MemoryConfig>>,

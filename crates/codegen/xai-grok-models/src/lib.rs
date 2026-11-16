@@ -15,8 +15,6 @@ pub const DEFAULT_MODELS_JSON: &str = include_str!("../default_models.json");
 struct DefaultModels {
     default: String,
     /// Falls back to `default` if not specified in JSON.
-    web_search: Option<String>,
-    /// Falls back to `default` if not specified in JSON.
     image_description: Option<String>,
     /// Falls back to `default` if not specified in JSON.
     session_summary: Option<String>,
@@ -49,11 +47,6 @@ static DEFAULTS: LazyLock<DefaultModels> = LazyLock::new(|| {
 /// Primary model for coding tasks and general fallback.
 pub fn default_model() -> &'static str {
     &DEFAULTS.default
-}
-
-/// Model for web search tool synthesis. Falls back to default model.
-pub fn default_web_search_model() -> &'static str {
-    DEFAULTS.web_search.as_deref().unwrap_or(&DEFAULTS.default)
 }
 
 /// Model for image describe. Falls back to default model.

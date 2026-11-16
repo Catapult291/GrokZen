@@ -123,7 +123,6 @@ pub use crate::views::agent::{ActivePane, AgentViewLayout, InputMode, PaneAreas}
 use crate::views::block_viewer::{BlockViewerPane, ViewerKind};
 use crate::views::elicitation_view::ElicitationViewState;
 use crate::views::extensions_modal::ExtensionsModalState;
-use crate::views::feedback_modal::FeedbackModalState;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::modal::{self, ActiveModal, ModalButtonHit};
 use crate::views::permission_view::{PermissionViewState, SubagentInfo};
@@ -1235,17 +1234,6 @@ pub struct AgentView {
     /// Active hooks/plugins modal popup. When `Some`, blocks all input and renders as a centered overlay. Opened by `/hooks`, `/plugins`, or `/mcps`.
     /// renders as a centered overlay. Opened by `/hooks`, `/plugins`, or `/mcps`.
     pub(crate) extensions_modal: Option<ExtensionsModalState>,
-    /// Active feedback composer modal. When `Some`, blocks all input and renders as a centered overlay with its own composer.
-    /// renders as a centered overlay with its own composer.
-    pub(crate) feedback_modal: Option<FeedbackModalState>,
-    /// One-shot trace uploads in flight, keyed by the submission id of the POST that earned them.
-    pub(crate) pending_feedback_trace_uploads:
-        std::collections::VecDeque<crate::views::feedback_modal::FeedbackSubmissionId>,
-    /// Consent parked at modal submit time (the modal closes at submit), keyed by the POST attempt.
-    pub(crate) parked_feedback_trace_consents: std::collections::VecDeque<(
-        crate::views::feedback_modal::FeedbackSubmissionId,
-        crate::views::feedback_modal::ParkedFeedbackTraceConsent,
-    )>,
     /// Active agents modal popup. When `Some`, blocks all input and renders as a centered overlay. Opened by `/config-agents` or `/agents`.
     /// renders as a centered overlay. Opened by `/config-agents` or `/agents`.
     pub(crate) agents_modal: Option<crate::views::agents_modal::AgentsModalState>,

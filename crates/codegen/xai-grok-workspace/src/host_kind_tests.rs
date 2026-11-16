@@ -14,14 +14,18 @@ use std::sync::Arc;
 use xai_computer_hub_sdk::{AuthCredential, SharedAuthProvider};
 use xai_grok_tools::implementations::grok_build::image_gen::ImageGenClient;
 use xai_grok_tools::implementations::grok_build::video_gen::VideoGenClient;
-use xai_grok_tools::implementations::web_search::WebSearchConfig;
-use xai_grok_tools::implementations::web_search::client::WebSearchClient;
 use xai_grok_tools::registry::types::{FinalizedToolset, ToolServerConfig};
 use xai_tool_protocol::SessionId;
 /// The tools a hub-only host must not offer: each one calls the API with the server's own credential.
-const API_BACKED_TOOLS: &[&str] = &[
-    "web_search",
+/// The Imagine three are additionally cut from BOTH catalogs by the product build policy
+/// (`xai_grok_product::IMAGINE_TOOLS_ALLOWED == false`: the community distribution has no
+/// Imagine credentials); the API-backed `web_search` tool has been removed outright, so no
+/// API-backed tool appears in any catalog anymore.
+const API_BACKED_TOOLS: &[&str] = &[];
+/// The Imagine tools the build policy removes everywhere; both catalogs must lack them.
+const IMAGINE_TOOLS: &[&str] = &[
     "image_gen",
+    "image_edit",
     "image_to_video",
     "reference_to_video",
 ];
@@ -68,6 +72,16 @@ fn daemon_catalog_is_the_sandbox_catalog_minus_the_api_backed_tools() {
             "the sandbox catalog must still ship `{tool}`: {full_ids:?}"
         );
     }
+    for tool in IMAGINE_TOOLS {
+        assert!(
+            !full_ids.contains(tool),
+            "the Imagine build policy must cut `{tool}` from the sandbox catalog: {full_ids:?}"
+        );
+        assert!(
+            !unqualified_ids(&daemon).contains(tool),
+            "the Imagine build policy must cut `{tool}` from the daemon catalog"
+        );
+    }
     assert_eq!(full_ids, unqualified_ids(&sandbox));
     let expected: Vec<&str> = full_ids
         .iter()
@@ -101,45 +115,42 @@ async fn session_for(host: WorkspaceHostKind) -> Arc<FinalizedToolset> {
 /// or API client in `Resources`. The sandbox still hands them all the credential.
 #[tokio::test]
 async fn only_a_sandbox_session_carries_the_credential() {
-    for (host, expected) in [
-        (WorkspaceHostKind::Daemon, false),
-        (WorkspaceHostKind::Sandbox, true),
-    ] {
-        let factory = host.session_context_factory(bearer(), API_BASE_URL.to_owned());
-        let ctx = factory.build_session_context(
-            &format!("host-kind-{host:?}-ctx"),
-            PathBuf::from("/tmp"),
-            Arc::new(HashMap::new()),
-            factory.build_terminal_backend().backend().clone(),
-        );
-        assert_eq!(expected, ctx.auth_provider.is_some(), "{host:?}");
-        assert_eq!(expected, ctx.image_gen_config.has_credentials(), "{host:?}");
-        assert_eq!(expected, ctx.video_gen_config.is_enabled(), "{host:?}");
-        assert_eq!(
-            expected,
-            matches!(ctx.web_search_config, WebSearchConfig::Enabled { .. }),
-            "{host:?}"
-        );
-        let toolset = session_for(host).await;
-        let resources = toolset.resources.lock().await;
-        assert_eq!(
-            expected,
-            resources.contains::<SharedAuthProvider>(),
-            "{host:?}"
-        );
-        assert_eq!(expected, resources.contains::<ImageGenClient>(), "{host:?}");
-        assert_eq!(expected, resources.contains::<VideoGenClient>(), "{host:?}");
-        assert_eq!(
-            expected,
-            resources.contains::<WebSearchClient>(),
-            "{host:?}"
-        );
-    }
+    // The finalize path builds a terminal backend whose actor is spawned with
+    // `spawn_local` on a current-thread runtime, so the body must run inside
+    // a `LocalSet` (a bare `#[tokio::test]` panics in `spawn_local`).
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for (host, expected) in [
+                (WorkspaceHostKind::Daemon, false),
+                (WorkspaceHostKind::Sandbox, true),
+            ] {
+                let factory = host.session_context_factory(bearer(), API_BASE_URL.to_owned());
+                let ctx = factory.build_session_context(
+                    &format!("host-kind-{host:?}-ctx"),
+                    PathBuf::from("/tmp"),
+                    Arc::new(HashMap::new()),
+                    factory.build_terminal_backend().backend().clone(),
+                );
+                assert_eq!(expected, ctx.auth_provider.is_some(), "{host:?}");
+                assert_eq!(expected, ctx.image_gen_config.has_credentials(), "{host:?}");
+                assert_eq!(expected, ctx.video_gen_config.is_enabled(), "{host:?}");
+                let toolset = session_for(host).await;
+                let resources = toolset.resources.lock().await;
+                assert_eq!(
+                    expected,
+                    resources.contains::<SharedAuthProvider>(),
+                    "{host:?}"
+                );
+                assert_eq!(expected, resources.contains::<ImageGenClient>(), "{host:?}");
+                assert_eq!(expected, resources.contains::<VideoGenClient>(), "{host:?}");
+            }
+        })
+        .await;
 }
 /// Run `test` against everything `connect_local_workspace` builds for `host` short of the hub
-/// connection, under a private workspace home and with data collection switched on: the
+/// connection, under a private workspace home and with the data-collection env opt-in set: the
 /// production seams decide the catalog, bind policy, credential reach and uploads, not a copy of
-/// the rule.
+/// the rule. The privacy build policy keeps the opt-in from re-enabling uploads.
 fn with_workspace<F: Future<Output = ()>>(
     host: WorkspaceHostKind,
     test: impl FnOnce(WorkspaceHandle) -> F,
@@ -150,7 +161,11 @@ fn with_workspace<F: Future<Output = ()>>(
         .set(
             "GROK_WORKSPACE_DATA_COLLECTION_DISABLED",
             Path::new("false"),
-        );
+        )
+        // `grok_home()` falls back to `~/.grok`, which a live Grok session on the
+        // same machine holds open; the daemon path blocks on it and the test hangs.
+        // Point it at the private root so the fixture is hermetic.
+        .set("GROK_HOME", root.path());
     tokio::runtime::Runtime::new()
         .expect("runtime")
         .block_on(async {
@@ -181,8 +196,9 @@ fn pinned(tool_ids: &[&str]) -> serde_json::Value {
 }
 /// A daemon host, as `connect_local_workspace` builds it: binds must pin their toolset (one
 /// without fails closed with `missing_tool_config`), a pinned API-backed tool comes back unserved
-/// rather than registering without its client, no upload machinery exists even with data
-/// collection switched on, and the deployer RPCs have no credential to carry off-host.
+/// rather than registering without its client, no upload machinery exists (the host kind alone
+/// also forbids one; the privacy build policy forbids it for every host), and the deployer RPCs
+/// have no credential to carry off-host.
 #[test]
 fn a_daemon_host_serves_pinned_toolsets_only_and_can_neither_upload_nor_deploy() {
     with_workspace(WorkspaceHostKind::Daemon, |handle| async move {
@@ -193,25 +209,15 @@ fn a_daemon_host_serves_pinned_toolsets_only_and_can_neither_upload_nor_deploy()
         let resolver = bind_resolver_fixture(&handle);
         let served = resolver(
             SessionId::new("daemon-pinned").unwrap(),
-            Some(pinned(&[
-                "GrokBuild:read_file",
-                "GrokBuild:web_search",
-                "GrokBuild:image_gen",
-            ])),
+            Some(pinned(&["GrokBuild:read_file", "GrokBuild:image_gen"])),
         )
         .await
         .expect("a pinned bind is served");
         let names = handler_names(&served);
         assert!(names.iter().any(|n| n == "read_file"), "{names:?}");
-        assert!(
-            !names.iter().any(|n| n == "web_search" || n == "image_gen"),
-            "{names:?}"
-        );
+        assert!(!names.iter().any(|n| n == "image_gen"), "{names:?}");
         assert_eq!(
-            vec![
-                "GrokBuild:image_gen".to_owned(),
-                "GrokBuild:web_search".to_owned()
-            ],
+            vec!["GrokBuild:image_gen".to_owned()],
             served.unserved_tool_ids
         );
         assert_eq!(None, served.resolve_error);
@@ -229,35 +235,34 @@ fn a_daemon_host_serves_pinned_toolsets_only_and_can_neither_upload_nor_deploy()
         assert!(reason.starts_with("missing_tool_config:"), "{reason}");
     });
 }
-/// The sandbox is unchanged: uploads and the deployer credential are in place, a pinned API-backed
-/// tool is served, and a bind without a toolset still widens to the full catalog unless the
-/// launcher asked for strict mode itself.
+/// The sandbox is unchanged where the build policy allows: the deployer credential is in place, a
+/// pinned API-backed tool is served, and a bind without a toolset still widens to the full catalog
+/// unless the launcher asked for strict mode itself. The privacy build policy locks session-data
+/// uploads off, so the sandbox has no upload machinery here either; the env opt-in cannot
+/// resurrect it (only a `test-uploads` build can).
 #[test]
-fn a_sandbox_host_keeps_uploads_the_credential_and_lax_binds() {
+fn a_sandbox_host_keeps_the_credential_and_lax_binds() {
     with_workspace(WorkspaceHostKind::Sandbox, |handle| async move {
         let shared = handle.shared();
         assert!(!shared.require_explicit_toolset);
-        assert!(shared.upload_queue().is_some());
+        assert!(shared.upload_queue().is_none());
         assert!(shared.auth_provider().is_some());
         let resolver = bind_resolver_fixture(&handle);
         let served = resolver(
             SessionId::new("sandbox-pinned").unwrap(),
-            Some(pinned(&["GrokBuild:read_file", "GrokBuild:web_search"])),
+            Some(pinned(&["GrokBuild:read_file", "GrokBuild:image_gen"])),
         )
         .await
         .expect("bind");
         let names = handler_names(&served);
-        assert!(names.iter().any(|n| n == "web_search"), "{names:?}");
+        assert!(names.iter().any(|n| n == "image_gen"), "{names:?}");
         assert!(served.unserved_tool_ids.is_empty());
         assert_eq!(None, served.resolve_error);
         let widened = resolver(SessionId::new("sandbox-unpinned").unwrap(), None)
             .await
             .expect("bind");
         let names = handler_names(&widened);
-        assert!(
-            names.iter().any(|n| n == "web_search") && names.iter().any(|n| n == "read_file"),
-            "{names:?}"
-        );
+        assert!(names.iter().any(|n| n == "read_file"), "{names:?}");
         assert_eq!(None, widened.resolve_error);
     });
 }

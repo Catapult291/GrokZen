@@ -35,7 +35,6 @@ use crate::scrollback::state::ScrollbackState;
 use crate::theme::Theme;
 use crate::views::elicitation_view::ElicitationViewState;
 use crate::views::extensions_modal::{ExtensionsModalState, StatusFilter};
-use crate::views::feedback_modal::FeedbackModalState;
 use crate::views::mcps_modal::{McpServerDisplayStatus, McpServerInfo};
 use crate::views::modal::CancelTurnViewState;
 use crate::views::picker::{PickerEntry, PickerField, PickerState};
@@ -305,17 +304,6 @@ pub fn extensions_modal_mut(v: &mut AgentView) -> Option<&mut ExtensionsModalSta
     v.extensions_modal.as_mut()
 }
 
-/// `AgentView::feedback_modal`.
-pub fn feedback_modal(v: &AgentView) -> Option<&FeedbackModalState> {
-    v.feedback_modal.as_ref()
-}
-
-/// `AgentView::feedback_modal` (mutable).
-/// Minimal reuses the full-TUI modal renderer; it takes `&mut FeedbackModalState` and updates tab/label-row state stored during render.
-pub fn feedback_modal_mut(v: &mut AgentView) -> Option<&mut FeedbackModalState> {
-    v.feedback_modal.as_mut()
-}
-
 /// `AgentView::question_view`.
 pub fn question_view(v: &AgentView) -> Option<&QuestionViewState> {
     v.question_view.as_ref()
@@ -381,7 +369,6 @@ pub fn minimal_btw_surface_available(v: &AgentView) -> bool {
         && !(v.show_goal_detail && v.goal_state.is_some())
         && v.line_viewer.is_none()
         && v.extensions_modal.is_none()
-        && v.feedback_modal.is_none()
         && v.persona_detail.is_none()
         && v.agents_modal.is_none()
         && v.block_viewer.is_none()
@@ -874,12 +861,6 @@ pub fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf) -> Age
 #[cfg(any(test, feature = "test-support"))]
 pub fn set_extensions_modal(v: &mut AgentView, val: Option<ExtensionsModalState>) {
     v.extensions_modal = val;
-}
-
-/// Test-only setter for `AgentView::feedback_modal`.
-#[cfg(any(test, feature = "test-support"))]
-pub fn set_feedback_modal(v: &mut AgentView, val: Option<FeedbackModalState>) {
-    v.feedback_modal = val;
 }
 
 /// Test-only setter for `AgentView::question_view`.

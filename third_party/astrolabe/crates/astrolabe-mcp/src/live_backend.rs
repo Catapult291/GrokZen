@@ -623,9 +623,11 @@ impl PreciseCapability for LiveBackend {
         })
     }
 
+    // Legacy PreciseCapability boundary used only for opt-in inline caller context.
+    // Search, annotation, and graph resolution use compact borrowed views instead.
     fn source_lines(&self, path: &str) -> Option<Arc<Vec<String>>> {
         refs_graph::with_file_cache(self.file_cache.as_ref(), || {
-            refs_graph::read_lines(&self.root, path)
+            refs_graph::read_line_view(&self.root, path).map(|lines| Arc::new(lines.to_vec()))
         })
     }
 
@@ -938,7 +940,8 @@ impl LiveBackend {
             return None;
         }
         let index = self.syntax.as_ref().and_then(|f| f())?;
-        let lines = read_lines(&self.root, rel.as_str())?;
+        let lines = refs_graph::read_line_view(&self.root, rel.as_str())?;
+        let lines = lines.borrowed_lines();
         let (name, line, byte) = match target {
             SymbolAt::Position(pos) => {
                 let text = lines.get(pos.line as usize)?;
@@ -1148,16 +1151,6 @@ fn missing_server_line(language: Language, error: &LspError) -> String {
     }
 }
 
-fn read_lines(root: &Path, path: &str) -> Option<Vec<String>> {
-    let source = astrolabe_core::text::read_source(&root.join(path)).ok()?;
-    Some(
-        source
-            .split('\n')
-            .map(|l| l.strip_suffix('\r').unwrap_or(l).to_owned())
-            .collect(),
-    )
-}
-
 fn dir_of(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(d, _)| d)
 }
@@ -1240,7 +1233,7 @@ fn utf16_col(line: &str, byte: usize) -> u32 {
 }
 
 /// First whole-word occurrence of `name` outside an obvious comment line.
-fn first_code_occurrence(lines: &[String], name: &str) -> Option<(usize, usize)> {
+fn first_code_occurrence(lines: &[&str], name: &str) -> Option<(usize, usize)> {
     lines.iter().enumerate().find_map(|(i, l)| {
         let t = l.trim_start();
         if ["//", "#", "/*", "*", "--"]
@@ -1295,7 +1288,7 @@ fn index_answer(
             continue;
         };
         let line = s.start_line.saturating_sub(1);
-        let col = read_lines(root, file.path.as_str()).and_then(|ls| {
+        let col = refs_graph::read_line_view(root, file.path.as_str()).and_then(|ls| {
             let l = ls.get(line as usize)?;
             refs_graph::word_offsets(l, name)
                 .first()
@@ -1371,7 +1364,7 @@ const BINDERS: &[&str] = &[
 /// `name` may be bound locally in the function starting at line `from`
 /// (0-based) before or at line `to`: a parameter, `:=`, `var x`, `T x =`, …
 /// Errs on the side of "yes" (the server then decides).
-fn maybe_local(lines: &[String], from: usize, to: usize, name: &str, go: bool) -> bool {
+fn maybe_local(lines: &[&str], from: usize, to: usize, name: &str, go: bool) -> bool {
     for (i, line) in lines.iter().enumerate().take(to + 1).skip(from) {
         for b in refs_graph::word_offsets(line, name) {
             let before = line[..b].trim_end();
@@ -1439,7 +1432,7 @@ fn go_package_dir<'a>(
     index: &'a RepoIndex,
     root: &Path,
     origin: &RelPath,
-    lines: &[String],
+    lines: &[&str],
     base: &str,
 ) -> Option<&'a str> {
     let g = index.graph();
@@ -1477,7 +1470,7 @@ fn go_package_dir<'a>(
 }
 
 /// `(alias, path)` of every import spec in a Go file.
-fn go_imports(lines: &[String]) -> Vec<(Option<String>, String)> {
+fn go_imports(lines: &[&str]) -> Vec<(Option<String>, String)> {
     let mut out = Vec::new();
     let mut in_block = false;
     for line in lines {
@@ -1518,12 +1511,13 @@ fn go_package_name(index: &RepoIndex, root: &Path, dir: &str) -> Option<String> 
             && dir_of(f.path.as_str()) == dir
             && !f.path.as_str().ends_with("_test.go")
     })?;
-    let lines = read_lines(root, file.path.as_str())?;
-    lines.iter().find_map(|l| {
+    let lines = refs_graph::read_line_view(root, file.path.as_str())?;
+    let package = lines.iter().find_map(|l| {
         l.trim()
             .strip_prefix("package ")
             .map(|p| p.split_whitespace().next().unwrap_or("").to_string())
-    })
+    });
+    package
 }
 
 #[cfg(test)]
@@ -2047,9 +2041,10 @@ mod recall_harness {
             grouped += 1;
             for (path, line1, hits) in &groups {
                 let rel = RelPath::new(path);
-                let Some(lines) = refs_graph::read_lines(&root, path) else {
+                let Some(lines) = refs_graph::read_line_view(&root, path) else {
                     continue;
                 };
+                let lines = lines.borrowed_lines();
                 let text = &lines[*line1 as usize - 1];
                 let Some(&b) = refs_graph::word_offsets(text, name).first() else {
                     continue;
@@ -2456,7 +2451,9 @@ mod index_first_tests {
         assert!(matches!(qualifier("p->b", 3), Qualifier::Member));
         assert!(matches!(qualifier("A::b", 3), Qualifier::Member));
         assert!(matches!(qualifier("f(b)", 2), Qualifier::None));
-        let l = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        fn l<'a>(s: &[&'a str]) -> Vec<&'a str> {
+            s.to_vec()
+        }
         // Java local, C param, Python param, TS let.
         assert!(maybe_local(
             &l(&["void f() {", "  Config cfg = x;", "  use(cfg);"]),
@@ -2648,7 +2645,7 @@ mod def_index_harness {
             if !p.ends_with(&ext) || p.ends_with("_test.go") {
                 continue;
             }
-            let Some(lines) = read_lines(&root, p) else {
+            let Some(lines) = refs_graph::read_line_view(&root, p) else {
                 continue;
             };
             for li in s.start_line..s.end_line.min(s.start_line + 40) {
@@ -2738,8 +2735,8 @@ mod def_index_harness {
                                 character: *character,
                             },
                         );
-                        let text = read_lines(&root, path.as_str())
-                            .and_then(|l| l.get(*line as usize).cloned())
+                        let text = refs_graph::read_line_view(&root, path.as_str())
+                            .and_then(|l| l.get(*line as usize).map(str::to_owned))
                             .unwrap_or_default();
                         println!(
                             "DEFER\t{}:{} {:?}\t{}",

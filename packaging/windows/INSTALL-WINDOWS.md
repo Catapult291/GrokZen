@@ -223,8 +223,7 @@ npm install -g @xai-official/grok
   无法识别 `release-v*`，因此不会跳过桥接版本。
 
 停止公开独立 `.sha256` 后，旧现代客户端会先升级到永久保留的最后一个六资产过渡版，
-再由其新更新器升级到三资产 Release。包内声明协议与维护步骤见
-[单包更新协议](https://github.com/Catapult291/GrokZen/blob/zh-dev/docs/COMMUNITY-UPDATE-PROTOCOL.md)。
+再由其新更新器升级到三资产 Release。
 
 自动激活仍沿用原版的单 EXE 替换语义，但传输与验证只使用完整 ZIP；不会在运行中的安装
 目录内逐个改写 `agent-zh.cmd`、`rg.exe`、安装文档、Path 或官方 `grok`/`agent`。若某个版本

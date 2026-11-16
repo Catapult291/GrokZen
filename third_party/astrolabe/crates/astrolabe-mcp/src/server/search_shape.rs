@@ -372,6 +372,7 @@ mod behaviour {
             page: false,
             group: None,
             dedup: Some(false),
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -392,6 +393,8 @@ mod behaviour {
             depth: 0,
             budget_tokens: 2500,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         }
     }
 
@@ -528,10 +531,11 @@ mod behaviour {
             task_description: "which types implement the Provider interface?".into(),
             budget_tokens: 2500,
             dedup: Some(false),
+            agent_id: None,
             offset: 0,
             path_filter: None,
         };
-        let out = text(&server.resolve_context(Parameters(rc)));
+        let out = text(&server.resolve_contx(Parameters(rc)));
         assert!(out.contains("Go implicit implementors"), "{out}");
         assert!(out.contains("DiscordProvider @oauth/discord.go:3"), "{out}");
         let _ = std::fs::remove_dir_all(&dir);

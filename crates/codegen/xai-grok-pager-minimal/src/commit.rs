@@ -359,7 +359,7 @@ pub fn commit_active(app: &mut AppView, terminal: &mut PagerTerminal) {
     let Some(agent) = app.agents.get_mut(&id) else {
         return;
     };
-    // Hold commits while a band-owning modal (settings, palette, feedback form) is open
+    // Hold commits while a band-owning modal (settings, palette) is open
     // It takes the whole live region, so an `insert_before` underneath it would scroll the popup
     // Deferred commits flush on the next frame after it closes
     if super::overlay::is_live_region_modal_active(agent) {
@@ -447,7 +447,7 @@ pub fn expand_pending(app: &mut AppView, terminal: &mut PagerTerminal) {
     let locale = app.locale.clone();
     // Guards: a missing active agent must leave the IDs queued, so confirm it exists before consuming the queue below.
     // The queue take needs `&mut app`, which can't overlap the agent borrow, hence the check-then-reborrow. An
-    // `insert_before` would scroll the popup or the feedback form and the user wouldn't see the re-print.
+    // `insert_before` would scroll the popup and the user wouldn't see the re-print.
     match app.agents.get(&id) {
         Some(agent) if !super::overlay::is_live_region_modal_active(agent) => {}
         _ => return,

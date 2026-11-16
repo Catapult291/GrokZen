@@ -636,7 +636,12 @@ async fn fork_then_open(
     let mut payload = fork_session_params(parent_id, &write_cwd, new_id, parent_is_worktree, None);
     // Shared helper stamps `fork` for interactive `/fork`
     // `-p` children must stay headless: the load path below never restamps
-    payload["sessionKind"] = serde_json::Value::String("headless".into());
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            "sessionKind".into(),
+            serde_json::Value::String("headless".into()),
+        );
+    }
     let fork_params = serde_json::value::to_raw_value(&payload)
         .map_err(|e| anyhow::anyhow!("serialize fork params: {e}"))?;
     let req = acp::ExtRequest::new("x.ai/session/fork", fork_params.into());
@@ -880,7 +885,6 @@ pub async fn run_single_turn(
         remote_settings: None,
         is_headless: true,
         cli_subagents: None,
-        cli_web_search_model: None,
         cli_session_summary_model: None,
         memory_enabled_override: options.memory_enabled_override,
         disable_web_search: options.disable_web_search,

@@ -396,8 +396,6 @@ pub enum PaletteCommand {
     OpenSettings,
     /// Open the Agents modal (listing all agent definitions).
     OpenAgentsModal,
-    /// Open the feedback modal directly (every screen mode).
-    OpenFeedbackModal,
 }
 /// Build the default set of palette entries with section grouping.
 pub(crate) fn default_palette_entries(
@@ -455,11 +453,6 @@ pub(crate) fn default_palette_entries(
             label: "Session Info".into(),
             shortcut: "/session-info".into(),
             command: PaletteCommand::SlashCommand("/session-info".into()),
-        },
-        PaletteEntry {
-            label: "Send Feedback".into(),
-            shortcut: "/feedback".into(),
-            command: PaletteCommand::OpenFeedbackModal,
         },
         PaletteEntry {
             label: "Context".into(),
@@ -649,7 +642,6 @@ pub(crate) fn localize_palette_entries_for_display(
             "Share Session" => "palette.share_session",
             "Rename Session" => "palette.rename_session",
             "Session Info" => "palette.session_info",
-            "Send Feedback" => "palette.send_feedback",
             "Context" => "palette.section.context",
             "Compact History" => "palette.compact_history",
             "Context Usage" => "palette.context_usage",
@@ -706,10 +698,10 @@ pub(crate) fn filter_palette_entries_with_locale(
     let mut section_has_match = false;
     for entry in all {
         if matches!(entry.command, PaletteCommand::SectionHeader(_)) {
-            if let Some(h) = pending_header.take() {
-                if section_has_match {
-                    result.push(h);
-                }
+            if let Some(h) = pending_header.take()
+                && section_has_match
+            {
+                result.push(h);
             }
             pending_header = Some(entry);
             section_has_match = false;
@@ -730,10 +722,10 @@ pub(crate) fn filter_palette_entries_with_locale(
             }
         }
     }
-    if let Some(h) = pending_header {
-        if section_has_match {
-            result.push(h);
-        }
+    if let Some(h) = pending_header
+        && section_has_match
+    {
+        result.push(h);
     }
     result
 }

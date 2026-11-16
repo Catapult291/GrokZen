@@ -190,7 +190,7 @@ pub fn render_fork_picker_overlay_with_locale(
         .unwrap_or("(no preview)");
 
     state.list().render(buf, area, title, focused, |i, ctx| {
-        let entry = &state.rows[i];
+        let entry = state.rows.get(i);
         let text_style = Style::default()
             .fg(theme.text_primary)
             .bg(ctx.row_bg)
@@ -201,14 +201,14 @@ pub fn render_fork_picker_overlay_with_locale(
             });
         let gut_style = Style::default().fg(theme.gray).bg(ctx.row_bg);
         let (gutter, body) = match entry {
-            ForkPointRow::Current => ("\u{2192} ", current_label),
-            ForkPointRow::Before { .. } => (
+            Some(ForkPointRow::Current) => ("\u{2192} ", current_label),
+            Some(row @ ForkPointRow::Before { .. }) => (
                 "\u{00B7} ",
-                entry
-                    .preview()
+                row.preview()
                     .filter(|p| !p.is_empty())
                     .unwrap_or(no_preview),
             ),
+            None => ("", ""),
         };
         Line::from(vec![
             Span::styled(gutter, gut_style),

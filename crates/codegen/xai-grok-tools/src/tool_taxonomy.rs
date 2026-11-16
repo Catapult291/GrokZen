@@ -135,7 +135,6 @@ pub const WRITING_TOOL_WIRE_NAMES: &[(&str, ToolKind)] = &[
     ("todo_write", ToolKind::Plan),
     ("todowrite", ToolKind::Plan),
     ("workflow", ToolKind::Workflow),
-    ("send_feedback", ToolKind::Feedback),
     ("image_gen", ToolKind::ImageGen),
     ("image_edit", ToolKind::ImageGen),
     ("image_to_video", ToolKind::ImageToVideo),

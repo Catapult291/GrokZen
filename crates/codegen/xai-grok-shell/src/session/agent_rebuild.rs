@@ -52,7 +52,6 @@ use xai_grok_tools::implementations::grok_build::task::types::{
 use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
 use xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig;
 use xai_grok_tools::implementations::lsp::LspBackend;
-use xai_grok_tools::implementations::web_search::WebSearchConfig;
 use xai_grok_tools::notification::ToolNotificationHandle;
 use xai_grok_tools::types::SharedApiKeyProvider;
 use xai_grok_tools::types::compat::CompatConfig;
@@ -112,9 +111,8 @@ pub(crate) struct AgentRebuildSpec {
     /// replaces it so a later zero-turn rebuild renders the same prompt as a fresh spawn.
     pub memory_v2_access: MemoryV2AccessSlot,
     pub memory_v2_exposed: bool,
-    pub web_search_config: WebSearchConfig,
     /// `[toolset.web_search]` domain policy, resolved once at spawn.
-    /// It is applied to both search paths (the hosted `tool_overrides` merge and the client-side `WebSearchConfig`) so they never diverge.
+    /// It is applied to the hosted `tool_overrides` merge so backend search matches the configured policy.
     pub web_search_domains: Option<xai_grok_sampling_types::WebSearchOptions>,
     pub backend_search: bool,
     pub web_fetch_config: WebFetchConfig,
@@ -225,7 +223,6 @@ impl AgentRebuildSpec {
             memory_backend,
             memory_v2_access,
             memory_v2_exposed,
-            web_search_config,
             web_search_domains,
             backend_search,
             web_fetch_config,
@@ -317,7 +314,6 @@ impl AgentRebuildSpec {
         .with_system_prompt_label(system_prompt_label)
         .with_session_env(session_env.clone())
         .with_state_path(bridge_state_path.clone())
-        .with_web_search_config(web_search_config.clone())
         .with_backend_search(*backend_search)
         .with_image_gen_config(image_gen_config.clone())
         .with_video_gen_config(video_gen_config.clone())
@@ -512,7 +508,6 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         memory_backend: None,
         memory_v2_access: MemoryV2AccessSlot::new(None),
         memory_v2_exposed: false,
-        web_search_config: WebSearchConfig::default(),
         web_search_domains: None,
         backend_search: false,
         web_fetch_config: WebFetchConfig::Disabled,
@@ -606,15 +601,6 @@ mod legacy_tests {
                 Arc::get_mut(&mut spec).expect("test rebuild spec should be uniquely owned");
             spec_mut.web_search_domains = domains;
             spec_mut.backend_search = true;
-            spec_mut.web_search_config = WebSearchConfig::Enabled {
-                api_key: "test-key".to_string(),
-                base_url: "https://api.x.ai/v1".to_string(),
-                model: "grok-4".to_string(),
-                extra_headers: Default::default(),
-                alpha_test_key: None,
-                allowed_domains: None,
-                excluded_domains: None,
-            };
             spec
         };
         tokio::task::LocalSet::new()

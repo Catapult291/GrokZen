@@ -30,7 +30,6 @@ pub mod monitor;
 pub mod read_file;
 pub mod scheduler;
 pub mod search_replace;
-pub mod send_feedback;
 pub mod send_subagent_message;
 pub(crate) mod storage;
 pub mod task;
@@ -39,7 +38,6 @@ pub mod todo;
 pub mod update_goal;
 pub mod video_gen;
 pub mod web_fetch;
-pub mod web_search;
 pub mod workflow;
 pub use app_builder::AppBuilderDeployerConfig;
 pub use ask_user_question::AskUserQuestionTool;
@@ -53,6 +51,18 @@ pub use image_gen::{
     IMAGE_GEN_TOOL_NAME, IMAGINE_COMMAND_NAME, ImageGenTool, imagine_instruction,
     imagine_usage_message,
 };
+
+/// Fully qualified ids of every xAI Imagine media tool, in toolset order.
+/// The `AgentBuilder` build-policy filter retains against this list, so a new
+/// Imagine tool must be added here (and to [`image_gen`] toolset helpers) or it
+/// would survive the cut.
+pub const IMAGINE_TOOL_IDS: &[&str] = &[
+    "GrokBuild:image_gen",
+    "GrokBuild:image_edit",
+    "GrokBuild:image_to_video",
+    "GrokBuild:reference_to_video",
+];
+
 pub use init_or_update_app::INIT_OR_UPDATE_APP_TOOL_NAME;
 pub use kill_task::{KillTaskTool, KillTerminalCommandTool};
 pub use list_agents::{LIST_AGENTS_TOOL_NAME, ListAgentsTool};
@@ -66,7 +76,6 @@ pub use scheduler::create::{
 pub use scheduler::delete::{SCHEDULER_DELETE_TOOL_NAME, SchedulerDeleteTool};
 pub use scheduler::list::SchedulerListTool;
 pub use search_replace::SearchReplaceTool;
-pub use send_feedback::{SEND_FEEDBACK_TOOL_NAME, SendFeedbackTool};
 pub use send_subagent_message::{
     SEND_SUBAGENT_MESSAGE_TOOL_NAME, SendSubagentMessageDisposition, SendSubagentMessageTool,
 };
@@ -80,7 +89,6 @@ pub use video_gen::{
     imagine_video_usage_message,
 };
 pub use web_fetch::{WebFetchClient, WebFetchConfig, WebFetchParams, WebFetchTool};
-pub use web_search::WebSearchTool;
 pub use workflow::{
     WORKFLOW_TOOL_NAME, WorkflowTool, is_workflow_tool, is_workflow_tool_id,
     workflow_tool_short_name,

@@ -329,8 +329,6 @@ fn test_app() -> AppView {
         session_picker_grouped: false,
         cancel_rewind_enabled: true,
         session_recap_available: false,
-        shell_feedback_trace_offer: false,
-        feedback_trace_choice_latched: false,
         tutorial: None,
         dashboard: None,
         dashboard_return: None,

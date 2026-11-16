@@ -157,16 +157,6 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal, ctx: &Terminal
                 super::overlay::render_app_modal(frame.buffer_mut(), area, agent, compact, &locale);
                 return (None, None);
             }
-            if let Some(modal) = minimal_api::feedback_modal_mut(agent) {
-                return super::feedback::render(
-                    frame.buffer_mut(),
-                    area,
-                    modal,
-                    &theme,
-                    compact,
-                    Some(locale.as_ref()),
-                );
-            }
             if minimal_api::extensions_modal(agent).is_some() {
                 let tick = (now_millis() / 100) as u64;
                 if let Some(state) = minimal_api::extensions_modal_mut(agent) {
@@ -817,7 +807,7 @@ fn minimal_pending_hint(
             .unwrap_or_else(|| format!("press {shortcut} again to {label}")),
     )
 }
-/// One-row warning-color hint (double-press confirmation, too-small feedback band).
+/// One-row warning-color hint (double-press confirmation, too-small band).
 pub(super) fn render_warning_hint(buf: &mut Buffer, area: Rect, theme: &Theme, hint: &str) {
     let style = Style::default().fg(theme.warning).bg(Color::Reset);
     buf.set_style(area, style);

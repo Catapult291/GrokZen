@@ -60,6 +60,22 @@ pub const FEEDBACK_UPLOADS_ALLOWED: bool = false;
 #[cfg(feature = "test-uploads")]
 pub const FEEDBACK_UPLOADS_ALLOWED: bool = true;
 
+/// Build policy: the xAI Imagine media tools (`image_gen`, `image_edit`,
+/// `image_to_video`, `reference_to_video`) ship only when this is true.
+///
+/// The community distribution carries no Imagine credentials and upstream
+/// gatekeeping (`GROK_IMAGE_GEN` / `[features]` / remote flags) cannot provide
+/// one, so the tools are compiled out entirely: static toolsets and the
+/// `AgentBuilder` drop them, no config, env, or remote setting can re-enable
+/// them, and the `/imagine` / `/imagine-video` slash commands hide because
+/// their `required_tools()` are no longer advertised.
+#[cfg(not(feature = "test-uploads"))]
+pub const IMAGINE_TOOLS_ALLOWED: bool = false;
+/// See [`IMAGINE_TOOLS_ALLOWED`]. Test builds may turn the tools back on so
+/// toolset-shape tests keep covering both branches.
+#[cfg(feature = "test-uploads")]
+pub const IMAGINE_TOOLS_ALLOWED: bool = true;
+
 /// Repository that owns every update accepted by the community distribution.
 pub const COMMUNITY_RELEASE_REPO: &str = "Catapult291/GrokZen";
 /// Canonical download page for the community distribution.
@@ -117,6 +133,25 @@ mod tests {
             !PRIVACY_BUILD || DISPLAY_NAME.contains("隐私构建"),
             "privacy builds must advertise the hardened posture"
         );
+    }
+
+    // A const assertion, not `assert!`: the policy value is compile-time, so
+    // check it at compile time too (avoids clippy::assertions_on_constants).
+    #[test]
+    fn imagine_tools_match_the_test_uploads_feature() {
+        const {
+            #[cfg(not(feature = "test-uploads"))]
+            assert!(
+                !IMAGINE_TOOLS_ALLOWED,
+                "release builds must compile the Imagine media tools out"
+            );
+
+            #[cfg(feature = "test-uploads")]
+            assert!(
+                IMAGINE_TOOLS_ALLOWED,
+                "test builds keep the Imagine media tools for toolset-shape coverage"
+            );
+        }
     }
 
     #[test]

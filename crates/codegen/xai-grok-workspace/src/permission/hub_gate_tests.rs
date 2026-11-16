@@ -105,11 +105,6 @@ fn daemon_tool_table() -> Vec<(&'static str, Value, Class)> {
             json!({"source": {"type": "name", "name": "review"}}),
             Class::Tool,
         ),
-        (
-            "send_feedback",
-            json!({"title": "t", "details": "d", "type": "bug"}),
-            Class::Tool,
-        ),
         ("enter_plan_mode", json!({}), Class::Read),
         ("exit_plan_mode", json!({}), Class::Read),
         ("ask_user_question", json!({"questions": []}), Class::Read),

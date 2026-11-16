@@ -526,7 +526,7 @@ fn regex_allowed(b: &[u8], i: usize) -> bool {
 /// without a lexer. With `strings_are_code`, only comments are masked.
 pub(crate) fn code_mask(
     path: &str,
-    lines: &[String],
+    lines: &[&str],
     strings_are_code: bool,
 ) -> Option<Vec<Vec<bool>>> {
     let lg = lang(path)?;
@@ -1179,8 +1179,34 @@ fn regex_end(b: &[u8], i: usize) -> Option<usize> {
 mod tests {
     use super::*;
 
-    fn ls(src: &str) -> Vec<String> {
-        src.lines().map(str::to_string).collect()
+    fn ls(src: &str) -> Vec<&str> {
+        src.lines().collect()
+    }
+
+    #[test]
+    fn borrowed_cached_lines_preserve_mask_offsets_and_multiline_state() {
+        use astrolabe_core::cache::CachedLines;
+        let cached = CachedLines::from_text(
+            "package p\r\n/* 雪 Needle\r\nNeedle */ call(Needle)\r\nvar s = `Needle`\r\n// Needle\r",
+        );
+        let lines = cached.borrowed_lines();
+        let base = cached.as_text().as_ptr() as usize;
+        for line in &lines {
+            let ptr = line.as_ptr() as usize;
+            assert!(ptr >= base && ptr + line.len() <= base + cached.as_text().len());
+        }
+        let bare = code_mask("a.go", &lines, false).unwrap();
+        let comments = code_mask("a.go", &lines, true).unwrap();
+        assert!(!bare[1][lines[1].find("Needle").unwrap()]);
+        assert!(!bare[2][0]);
+        assert!(bare[2][lines[2].rfind("Needle").unwrap()]);
+        let string_byte = lines[3].find("Needle").unwrap();
+        assert!(!bare[3][string_byte]);
+        assert!(comments[3][string_byte]);
+        assert!(!comments[4][lines[4].find("Needle").unwrap()]);
+        for (line, mask) in lines.iter().zip(&bare) {
+            assert_eq!(line.len(), mask.len());
+        }
     }
 
     /// Whether `needle` on line `l` sits on code bytes.
@@ -1802,7 +1828,7 @@ mod tests {
         ));
         assert!(!is_code("a.vb", "x = 1 ' foo_call()", 0, "foo_call", false));
         assert!(is_code("a.vb", "x = foo_call(\"a\")", 0, "foo_call", false));
-        let lines = vec!["foo_call() // c\r".to_string()];
+        let lines = vec!["foo_call() // c\r"];
         let m = code_mask("a.go", &lines, false).unwrap();
         assert!(!m[0][lines[0].len() - 1]);
     }

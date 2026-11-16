@@ -29,10 +29,6 @@ mod default_shell_settings_round_trip_pty;
 mod extensions_modal_copy_hints_pty;
 #[path = "pty_e2e/extensions_modal_workflows_tab_pty.rs"]
 mod extensions_modal_workflows_tab_pty;
-#[path = "pty_e2e/feedback_draft_send_pty.rs"]
-mod feedback_draft_send_pty;
-#[path = "pty_e2e/feedback_modal_pty.rs"]
-mod feedback_modal_pty;
 #[path = "pty_e2e/iterm_readline_editing.rs"]
 mod iterm_readline_editing;
 #[path = "pty_e2e/prompt_suggestion_ghost_tab_accepts.rs"]

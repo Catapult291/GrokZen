@@ -47,7 +47,7 @@ impl AstrolabeServer {
         view.search_digests = Arc::new(Mutex::new(Default::default()));
         view.symbol_page_generations = Arc::new(Mutex::new(Default::default()));
         view.context_page_generations = Arc::new(Mutex::new(Default::default()));
-        view.call_seq = Arc::new(AtomicU64::new(0));
+        view.call_seq = Arc::new(Mutex::new(Default::default()));
         view.shown_once = Arc::new(Mutex::new(Default::default()));
         view.coverage_note_override = Some(Arc::new(Mutex::new(None)));
         view.recent_symbols = Arc::new(crate::recent_symbol::RecentSymbols::new());
@@ -72,14 +72,17 @@ impl AstrolabeServer {
         name: &str,
         args: Args,
     ) -> Result<CallToolResult, ErrorData> {
+        // Old long names / `ast_*` spellings reach here on a follower session
+        // view, which bypasses `ServerHandler::call_tool`.
+        let name = crate::compat::canonical_tool_name(name).unwrap_or(name);
         Ok(match name {
             "search_code" => self.search_code(params(args)?),
             "find_symbol" => self.find_symbol(params(args)?),
-            "resolve_context" => self.resolve_context(params(args)?),
-            "get_languages" => self.get_languages(params(args)?),
-            "find_references" => self.find_references(params(args)?),
-            "goto_definition" => self.goto_definition(params(args)?),
-            "get_diagnostics" => self.get_diagnostics(params(args)?),
+            "resolve_contx" => self.resolve_contx(params(args)?),
+            "get_lang" => self.get_lang(params(args)?),
+            "find_refs" => self.find_refs(params(args)?),
+            "goto_def" => self.goto_def(params(args)?),
+            "get_diag" => self.get_diag(params(args)?),
             // Call-time alias: not in tools/list (catalog stays at 7).
             crate::compat::EXPLAIN_SYMBOL => self.explain_symbol_compat(args),
             other => {
@@ -107,6 +110,7 @@ impl AstrolabeServer {
         }
     }
 
+    #[cfg(unix)]
     /// Hash of the full (context-independent) tool catalog.
     fn tools_hash(&self) -> String {
         let tools = self.tool_router.list_all();
@@ -310,7 +314,10 @@ impl SessionView for View {
             .name("astrolabe-shared-tool".into())
             .spawn(move || {
                 let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    cancel::scope(worker_flag, || server.dispatch_tool(&tool, args))
+                    cancel::scope(worker_flag, || {
+                        let agent = super::dedup_agent::extract(None, args.as_ref());
+                        super::dedup_agent::scope(agent, || server.dispatch_tool(&tool, args))
+                    })
                 }));
                 let _ = tx.send(out);
             });

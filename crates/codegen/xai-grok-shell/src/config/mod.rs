@@ -570,7 +570,6 @@ impl ManagedMcpsConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub(crate) struct ModelOverrideConfig {
-    pub web_search: String,
     /// `None` = current model.
     pub session_summary: Option<String>,
     /// Compiled default (`grok-4.6`) when unset locally, remotely, and via env.
@@ -583,7 +582,6 @@ pub(crate) struct ModelOverrideConfig {
 impl Default for ModelOverrideConfig {
     fn default() -> Self {
         Self {
-            web_search: crate::models::default_web_search_model().to_owned(),
             session_summary: None,
             image_description: None,
             prompt_suggestion: PromptSuggestModelPin::Unpinned,
@@ -618,7 +616,6 @@ impl ModelOverrideConfig {
     /// CLI flag > env var > config.toml > remote settings > compiled default. `image_description` and `session_summary` always resolve to `Some(_)` (default `grok-4.6`), never the session model.
     /// `prompt_suggestion` resolves to a [`PromptSuggestModelPin`] instead of a model string. It has no CLI flag; the default and the catalog guard live at the consumer, `handle_suggest_prompt`.
     pub(crate) fn resolve(
-        cli_web_search_model: Option<&str>,
         cli_session_summary_model: Option<&str>,
         config: &toml::Value,
         remote: Option<&crate::util::config::RemoteSettings>,
@@ -628,16 +625,12 @@ impl ModelOverrideConfig {
             .and_then(|v| v.clone().try_into().ok())
             .unwrap_or_default();
         let mut result = Self {
-            web_search: parsed_models
-                .web_search
-                .unwrap_or_else(|| crate::models::default_web_search_model().to_owned()),
             session_summary: non_empty_model_override(parsed_models.session_summary.as_deref()),
             image_description: non_empty_model_override(parsed_models.image_description.as_deref()),
             prompt_suggestion: non_empty_model_override(parsed_models.prompt_suggestion.as_deref())
                 .map(PromptSuggestModelPin::Pinned)
                 .unwrap_or_default(),
         };
-        let has_local_ws = models_table.and_then(|m| m.get("web_search")).is_some();
         let has_local_ss = models_table
             .and_then(|m| m.get("session_summary"))
             .is_some();
@@ -645,9 +638,6 @@ impl ModelOverrideConfig {
             .and_then(|m| m.get("image_description"))
             .is_some();
         if let Some(remote) = remote {
-            if !has_local_ws && let Some(ref v) = remote.web_search_model {
-                result.web_search = v.clone();
-            }
             if !has_local_ss {
                 result.session_summary =
                     non_empty_model_override(remote.session_summary_model.as_deref());
@@ -662,12 +652,6 @@ impl ModelOverrideConfig {
                 result.prompt_suggestion = PromptSuggestModelPin::Pinned(v);
             }
         }
-        if let Ok(v) = std::env::var("GROK_WEB_SEARCH_MODEL") {
-            let v = v.trim();
-            if !v.is_empty() {
-                result.web_search = v.to_owned();
-            }
-        }
         if let Ok(v) = std::env::var("GROK_SESSION_SUMMARY_MODEL") {
             result.session_summary = non_empty_model_override(Some(v.as_str()));
         }
@@ -678,9 +662,6 @@ impl ModelOverrideConfig {
             && let Some(v) = non_empty_model_override(Some(v.as_str()))
         {
             result.prompt_suggestion = PromptSuggestModelPin::Env(v);
-        }
-        if let Some(v) = cli_web_search_model {
-            result.web_search = v.to_owned();
         }
         if let Some(v) = cli_session_summary_model {
             result.session_summary = non_empty_model_override(Some(v));
@@ -1301,7 +1282,6 @@ fn apply_requirements_inner(
         push("models.default", val.clone());
         config.models.default = Some(val);
     }
-    parsed.enforce_web_search(&mut config.models.web_search, &mut push);
     if let Some(pin) = allowed_models {
         use crate::agent::config::AllowlistPin;
         let reported = match &pin {

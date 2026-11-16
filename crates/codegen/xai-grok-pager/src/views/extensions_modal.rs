@@ -4466,14 +4466,15 @@ pub fn render_extensions_modal_with_locale(
         let i_is_action_key = extensions_action_keys(state.active_tab)
             .iter()
             .any(|&(ch, _)| ch == 'i');
-        if !i_is_action_key {
-            if !state.picker_state.search_active && crate::appearance::cache::load_vim_mode() {
-                shortcuts.push(Shortcut {
-                    label: extension_static(locale, "extensions.shortcut.search", "i search"),
-                    clickable: false,
-                    id: 0,
-                });
-            }
+        if !i_is_action_key
+            && !state.picker_state.search_active
+            && crate::appearance::cache::load_vim_mode()
+        {
+            shortcuts.push(Shortcut {
+                label: extension_static(locale, "extensions.shortcut.search", "i search"),
+                clickable: false,
+                id: 0,
+            });
         }
     }
 
@@ -4766,21 +4767,17 @@ pub fn render_extensions_modal_with_locale(
     if let Some(kind) = modal_msg_kind {
         let segments: &[(&str, &str)] = match kind {
             ModalMsgKind::Error => &[(
-                &*extension_static(locale, "extensions.shortcut.any_key", "any key"),
-                &*extension_static(locale, "extensions.shortcut.back_suffix", " back"),
+                extension_static(locale, "extensions.shortcut.any_key", "any key"),
+                extension_static(locale, "extensions.shortcut.back_suffix", " back"),
             )],
             ModalMsgKind::Confirm => &[
                 (
                     "y",
-                    &*extension_static(locale, "extensions.shortcut.confirm_suffix", " confirm"),
+                    extension_static(locale, "extensions.shortcut.confirm_suffix", " confirm"),
                 ),
                 (
-                    &*extension_static(
-                        locale,
-                        "extensions.shortcut.any_other_key",
-                        "any other key",
-                    ),
-                    &*extension_static(locale, "extensions.shortcut.cancel_suffix", " cancel"),
+                    extension_static(locale, "extensions.shortcut.any_other_key", "any other key"),
+                    extension_static(locale, "extensions.shortcut.cancel_suffix", " cancel"),
                 ),
             ],
             ModalMsgKind::ConnectorsWait => &[],

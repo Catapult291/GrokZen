@@ -110,9 +110,6 @@ enabled = true
 [managed_mcps]
 enabled = false
 
-[models]
-web_search = \"https://search.example\"
-
 [endpoints]
 models_base_url = \"https://models.example\"
 models_list_url = \"https://models.example/list\"
@@ -145,7 +142,6 @@ mixpanel_token = \"mix-secret\"
     let mut maximum_version = Some("other".to_owned());
     let mut required_minimum_version = Some("other".to_owned());
     let mut required_maximum_version = Some("other".to_owned());
-    let mut web_search = Some("other".to_owned());
     let mut models_base_url = Some("other".to_owned());
     let mut models_list_url = Some("other".to_owned());
     let mut trace_upload_url = Some("other".to_owned());
@@ -172,7 +168,6 @@ mixpanel_token = \"mix-secret\"
         },
         &mut push,
     );
-    parsed.enforce_web_search(&mut web_search, &mut push);
     parsed.enforce_cli_strings(
         &mut CliStringPins {
             channel: &mut channel,
@@ -209,7 +204,6 @@ mixpanel_token = \"mix-secret\"
         ("memory.enabled", "false"),
         ("subagents.enabled", "true"),
         ("managed_mcps.enabled", "false"),
-        ("models.web_search", "https://search.example"),
         ("cli.channel", "stable"),
         ("cli.minimum_version", "1.0.0"),
         ("cli.maximum_version", "2.0.0"),
@@ -264,7 +258,6 @@ mixpanel_token = \"mix-secret\"
             ("cli.maximum_version", Some("2.0.0")),
             ("cli.required_minimum_version", Some("1.2.0")),
             ("cli.required_maximum_version", Some("1.9.0")),
-            ("models.web_search", Some("https://search.example")),
             ("endpoints.models_base_url", Some("https://models.example")),
             (
                 "endpoints.models_list_url",
@@ -303,7 +296,6 @@ mixpanel_token = \"mix-secret\"
                 "cli.required_maximum_version",
                 required_maximum_version.as_deref(),
             ),
-            ("models.web_search", web_search.as_deref()),
             ("endpoints.models_base_url", models_base_url.as_deref()),
             ("endpoints.models_list_url", models_list_url.as_deref()),
             ("endpoints.trace_upload_url", trace_upload_url.as_deref()),

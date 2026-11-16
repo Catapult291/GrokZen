@@ -1919,7 +1919,7 @@ mod plan_approval_enter_tests {
     #[test]
     fn enter_with_builtin_slash_returns_send_prompt_and_keeps_review_open() {
         let (mut agent, mut rx) = agent_with_revise_prompt_and_response();
-        let text = "/feedback grok does not understand plan mode";
+        let text = "/btw grok does not understand plan mode";
         agent.prompt.set_text(text);
         let outcome = agent.handle_plan_feedback_key(&enter_key());
         match outcome {
@@ -1954,9 +1954,9 @@ mod plan_approval_enter_tests {
     fn enter_with_unedited_slash_prefill_empties_session_draft() {
         let mut agent = agent_with_revise_prompt();
         if let Some(ref mut pav) = agent.plan_approval_view {
-            pav.stashed_prompt = stashed_text("/feedback x");
+            pav.stashed_prompt = stashed_text("/btw x");
         }
-        agent.prompt.set_text("/feedback x");
+        agent.prompt.set_text("/btw x");
         let outcome = agent.handle_plan_feedback_key(&enter_key());
         assert!(matches!(
             outcome,
@@ -1996,7 +1996,7 @@ mod plan_approval_enter_tests {
     #[test]
     fn approve_with_builtin_slash_freeform_refuses() {
         let (mut agent, mut rx) = agent_with_revise_prompt_and_response();
-        agent.prompt.set_text("/feedback x");
+        agent.prompt.set_text("/btw x");
         if let Some(ref mut pav) = agent.plan_approval_view {
             pav.focus = PlanApprovalFocus::Preview;
         }
@@ -2016,7 +2016,7 @@ mod plan_approval_enter_tests {
             Err(tokio::sync::oneshot::error::TryRecvError::Empty)
         ));
         assert_eq!(Some(APPROVE_REFUSAL), toast_text(&agent));
-        assert_eq!("/feedback x", agent.prompt.text());
+        assert_eq!("/btw x", agent.prompt.text());
     }
     #[test]
     fn approve_in_commenting_focus_with_slash_comment_keeps_commenting() {
@@ -2026,7 +2026,7 @@ mod plan_approval_enter_tests {
             pav.commenting_range = Some(0..1);
             pav.stashed_feedback_prompt = Some(stashed_text("notes"));
         }
-        agent.prompt.set_text("/feedback x");
+        agent.prompt.set_text("/btw x");
         let outcome = agent.approve_plan();
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(

@@ -2,18 +2,17 @@
 use super::common::*;
 use xai_grok_pager_pty_harness::{inference_request_count, inference_requests};
 
-const REPORT: &str = "plan-overlay-report-xyz";
+const RENAME_TITLE: &str = "plan-overlay-rename-xyz";
 const APPROVE_REFUSAL: &str = "Run the slash command in the notes";
 
-/// A complete pager command typed into the plan-approval notes box runs as a command: `/feedback <text>` POSTs to
-/// the mock, the review stays parked, and neither the command nor a revision reaches the model. Approving over a
+/// A complete pager command typed into the plan-approval notes box runs as a command: `/rename <title>` renames the
+/// session, the review stays parked, and neither the command nor a revision reaches the model. Approving over a
 /// slash command is refused until the notes are cleared.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn plan_overlay_slash_runs_command() {
     let content = ContentController::start().await.expect("start content");
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} first turn done."));
-    let overrides = enable_feedback_posting(&content, "plan-overlay-slash");
 
     let binary = pager_binary().expect("resolve pager binary");
     let mut harness = PtyHarness::spawn_with_content_env_ops_in_dir(
@@ -22,7 +21,7 @@ async fn plan_overlay_slash_runs_command() {
         DEFAULT_COLS,
         &content,
         &["--yolo", "--trust", "--no-leader"],
-        &overrides,
+        &[],
         Some(content.home()),
     )
     .expect("spawn pager");
@@ -77,19 +76,18 @@ async fn plan_overlay_slash_runs_command() {
                 harness.screen_contents()
             )
         });
-    inject_keys_paced(&mut harness, format!("/feedback {REPORT}").as_bytes());
-    harness.inject_keys(b"\r").expect("submit inline /feedback");
+    let command = format!("/rename {RENAME_TITLE}");
+    inject_keys_paced(&mut harness, command.as_bytes());
+    harness.inject_keys(b"\r").expect("submit inline /rename");
 
-    let body = wait_for_feedback_post(&mut harness, &content, "write");
-    assert!(
-        body["feedbackText"]
-            .as_str()
-            .is_some_and(|text| text.contains(REPORT)),
-        "POST body: {body}"
-    );
-    assert_eq!(1, content.feedback_posts().len());
-
+    harness
+        .wait_for_text("Session renamed to", Duration::from_secs(15))
+        .expect("the command runs and the rename durable-write lands");
     let screen = harness.screen_contents();
+    assert!(
+        screen.contains(RENAME_TITLE),
+        "the rename title renders on the prompt border; screen:\n{screen}"
+    );
     assert!(
         screen.contains("request changes") && screen.contains("Waiting on plan approval"),
         "the command must leave plan approval open; screen:\n{screen}"
@@ -103,7 +101,7 @@ async fn plan_overlay_slash_runs_command() {
         .iter()
         .skip(turns_before)
         .filter_map(|entry| entry.body.as_ref().map(serde_json::Value::to_string))
-        .filter(|body| body.contains("/feedback") || body.contains(REPORT))
+        .filter(|body| body.contains("/rename") || body.contains(RENAME_TITLE))
         .collect();
     assert!(
         leaked.is_empty(),
@@ -117,12 +115,15 @@ async fn plan_overlay_slash_runs_command() {
         "the transcript must hold the turn that parked the review:\n{history}"
     );
     assert!(
-        !history.contains("The user wants to revise the plan") && !history.contains("/feedback"),
+        !history.contains("The user wants to revise the plan")
+            && !history.contains("/rename")
+            && !history.contains(RENAME_TITLE),
         "the command must not land in the transcript:\n{history}"
     );
 
     // Approve refuses while a runnable command sits in the notes, and moves focus back to them.
-    inject_keys_paced(&mut harness, b"/feedback again");
+    let retyped = format!("/rename {RENAME_TITLE}");
+    inject_keys_paced(&mut harness, retyped.as_bytes());
     harness.inject_keys(b"\t").expect("focus preview");
     harness.inject_keys(b"a").expect("approve over slash notes");
     harness
@@ -138,10 +139,14 @@ async fn plan_overlay_slash_runs_command() {
         "refused approve must leave plan approval open; screen:\n{}",
         harness.screen_contents()
     );
-    assert_eq!(1, content.feedback_posts().len(), "refusal must not send");
+    assert_eq!(
+        turns_before,
+        inference_request_count(&content),
+        "refusal must not send anything to the model"
+    );
 
     // The approve refusal moved focus to the notes box, so Backspace edits the command
-    let backspaces = vec![0x7f_u8; "/feedback again".len()];
+    let backspaces = vec![0x7f_u8; retyped.len()];
     inject_keys_paced(&mut harness, &backspaces);
     harness.inject_keys(b"\t").expect("focus preview");
     harness.inject_keys(b"a").expect("approve");

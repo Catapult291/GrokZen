@@ -499,7 +499,7 @@ mod tests {
 
     fn run_tool(path: &str, diags: Vec<Diagnostic>) -> (String, serde_json::Value) {
         let params = serde_json::from_value(serde_json::json!({ "path": path })).unwrap();
-        let result = crate::precise_tools::run_get_diagnostics(params, &Recorded(diags));
+        let result = crate::precise_tools::run_get_diag(params, &Recorded(diags));
         let text = result
             .content
             .first()

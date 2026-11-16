@@ -14,10 +14,10 @@
 //! A full [`index_repo`] always walks, reads, hashes, and (on cache miss)
 //! tree-sitter-parses every admitted file. On a 94k-file tree that is
 //! minutes of CPU even when almost nothing changed. [`IncrementalIndex`]
-//! keeps the last parse products in a byte-capped LRU and applies a watcher
-//! [`ChangeSet`]: only `added`/`modified` source files are read and parsed
-//! (plus LRU evictions, which fall back to a re-parse of that one file).
-//! The graph is then reassembled in memory.
+//! keeps the last parse products, wire-encoded, in a byte-capped LRU and
+//! applies a watcher [`ChangeSet`]: only `added`/`modified` source files are
+//! read and parsed (plus LRU evictions, which fall back to a re-parse of that
+//! one file). The graph is then reassembled in memory.
 //!
 //! Route (b) — retain per-file products and reassemble — rather than true
 //! graph-delta (route a): import resolution, FileId assignment, and
@@ -178,10 +178,14 @@ struct ParsedRow {
     language: Language,
     sha: String,
     loc: u32,
-    /// Shared with the in-memory product cache: an incremental apply reuses
-    /// an unchanged file's parse as-is (no decode, no copy of its imports
-    /// and calls); only its symbols are cloned into the new graph.
-    parsed: Arc<ParsedFile>,
+    /// Owned by this row: the product cache keeps a compact wire encoding
+    /// instead of a shared decoded parse, so assembly can move symbols into
+    /// the graph instead of deep-cloning every name and signature.
+    parsed: ParsedFile,
+    /// Wire encoding of `parsed`, when one already exists (read from the
+    /// store or written to it by this parse). Lets [`insert_product`] fill the
+    /// in-memory cache without encoding the same parse a second time.
+    encoded: Option<Arc<[u8]>>,
 }
 
 #[derive(Clone)]
@@ -189,35 +193,42 @@ struct CachedProduct {
     language: Language,
     sha: String,
     loc: u32,
-    parsed: Arc<ParsedFile>,
-    /// Estimated heap footprint of `parsed`, computed once for the weigher.
-    weight: u32,
+    /// Wire-encoded [`ParsedFile`] ([`store::encode_parsed`]). Keeping the
+    /// compact varint representation instead of decoded AST products avoids
+    /// millions of small `String` allocations and the ~5x memory
+    /// amplification of a decoded parse, so a large repository's products fit
+    /// the LRU budget instead of thrashing.
+    encoded: Arc<[u8]>,
 }
 
-/// Approximate heap bytes of a decoded parse (strings plus vector slots).
-fn parsed_weight(parsed: &ParsedFile) -> usize {
-    let symbols: usize = parsed
-        .symbols
-        .iter()
-        .map(|s| std::mem::size_of::<CodeSymbol>() + s.name.len() + s.signature.len())
-        .sum();
-    let imports: usize = parsed
-        .imports
-        .iter()
-        .map(|i| std::mem::size_of::<String>() + i.len())
-        .sum();
-    let calls: usize = parsed
-        .calls
-        .iter()
-        .map(|(c, _)| std::mem::size_of::<(String, u32)>() + c.len())
-        .sum();
-    std::mem::size_of::<ParsedFile>() + symbols + imports + calls
+impl CachedProduct {
+    fn from_parsed(language: Language, sha: String, loc: u32, parsed: &ParsedFile) -> Option<Self> {
+        let bytes = store::encode_parsed(parsed).ok()?;
+        Some(Self {
+            language,
+            sha,
+            loc,
+            encoded: Arc::from(bytes),
+        })
+    }
+
+    fn decode(&self) -> Option<ParsedFile> {
+        store::decode_parsed(&self.encoded).ok()
+    }
+
+    /// Heap footprint of the product: the struct, its SHA and the encoded
+    /// bytes, plus 32 B for the `Arc` header and allocator rounding.
+    fn weight(&self) -> usize {
+        std::mem::size_of::<Self>() + self.sha.capacity() + self.encoded.len() + 32
+    }
 }
 
-/// Byte-capped LRU of decoded [`ParsedFile`] products, keyed by repo-relative
-/// path. Values are cheap to clone (`Arc`). They used to be the JSON cache
-/// encoding, which every apply decoded again for every unchanged file; that
-/// decode was a fifth of the cost of a one-file edit on a large repository.
+/// Byte-capped LRU of wire-encoded [`ParsedFile`] products, keyed by
+/// repo-relative path. Values are cheap to clone (`Arc`). They used to hold
+/// decoded products shared with the assembly pass, which kept a second full
+/// copy of every symbol name and signature resident and made the estimate
+/// miss the millions of small allocations; the encoded form is roughly the
+/// size of the store's rows, so a whole large repository fits the budget.
 /// A new cache is filled on each incremental apply so a retained previous
 /// [`IncrementalIndex`] is not mutated.
 struct ParseProductCache {
@@ -240,10 +251,15 @@ impl ParseProductCache {
     }
 
     fn entry_bytes(path: &RelPath, value: &CachedProduct) -> u64 {
-        (path.as_str().len()
-            + value.sha.len()
-            + value.weight as usize
-            + std::mem::size_of::<CachedProduct>()) as u64
+        (path.as_str().len() + value.weight()) as u64
+    }
+
+    /// Drop every product and release the map's heap memory. The next apply
+    /// re-reads from the redb store or re-parses from disk.
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.entries.shrink_to_fit();
+        self.bytes = 0;
     }
 
     fn get(&self, path: &RelPath) -> Option<CachedProduct> {
@@ -681,7 +697,8 @@ fn stamp_hit(
         language,
         sha: stamp.sha,
         loc: stamp.loc,
-        parsed: Arc::new(parsed),
+        parsed,
+        encoded: Some(Arc::from(bytes)),
     })
 }
 
@@ -793,7 +810,8 @@ fn parse_one(
                         language,
                         sha,
                         loc,
-                        parsed: Arc::new(parsed),
+                        parsed,
+                        encoded: Some(Arc::from(bytes)),
                     });
                 }
                 Err(error) => {
@@ -827,13 +845,16 @@ fn parse_one(
                 // parse errors are `Err` below and are never cached.
                 note_partial(failures, path, &parsed);
             }
-            // Only a writable store needs the encoding; the in-memory product
-            // keeps the decoded parse.
+            // Encode once: the same bytes go to the store and (via
+            // `ParsedRow::encoded`) into the in-memory product cache.
+            let mut encoded: Option<Arc<[u8]>> = None;
             if let Some(store) = store.filter(|s| !s.is_read_only()) {
                 match store::encode_parsed(&parsed) {
                     Ok(bytes) => {
                         side.note_stamp(path, stat.as_ref(), &cache_key, &sha, loc, language);
-                        cache_writes.push(store, cache_key, Arc::from(bytes));
+                        let bytes: Arc<[u8]> = Arc::from(bytes);
+                        cache_writes.push(store, cache_key, Arc::clone(&bytes));
+                        encoded = Some(bytes);
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -849,7 +870,8 @@ fn parse_one(
                 language,
                 sha,
                 loc,
-                parsed: Arc::new(parsed),
+                parsed,
+                encoded,
             })
         }
         Err(error) => {
@@ -1096,16 +1118,29 @@ struct ParseOutcome {
 }
 
 fn insert_product(cache: &mut ParseProductCache, row: &ParsedRow) {
-    cache.insert(
-        row.path.clone(),
-        CachedProduct {
+    let product = match &row.encoded {
+        Some(bytes) => CachedProduct {
             language: row.language,
             sha: row.sha.clone(),
             loc: row.loc,
-            parsed: Arc::clone(&row.parsed),
-            weight: u32::try_from(parsed_weight(&row.parsed)).unwrap_or(u32::MAX),
+            encoded: Arc::clone(bytes),
         },
-    );
+        // No store encoding exists (persistence off, or the write failed):
+        // encode here so the in-memory cache still holds the compact form.
+        None => {
+            match CachedProduct::from_parsed(row.language, row.sha.clone(), row.loc, &row.parsed) {
+                Some(product) => product,
+                None => {
+                    tracing::warn!(
+                        path = %row.path.as_str(),
+                        "parse product encode failed; not cached"
+                    );
+                    return;
+                }
+            }
+        }
+    };
+    cache.insert(row.path.clone(), product);
 }
 
 fn fill_products(rows: &[ParsedRow], budget_bytes: u64) -> ParseProductCache {
@@ -1117,14 +1152,18 @@ fn fill_products(rows: &[ParsedRow], budget_bytes: u64) -> ParseProductCache {
     products
 }
 
-fn row_from_product(path: RelPath, product: &CachedProduct) -> ParsedRow {
-    ParsedRow {
+/// Decode a cached product into a row. The decode makes the row's parse
+/// exclusive, so assembly can move its symbols into the graph; the encoded
+/// bytes stay shared with the cache for the next apply.
+fn row_from_product(path: RelPath, product: &CachedProduct) -> Option<ParsedRow> {
+    Some(ParsedRow {
         path,
         language: product.language,
         sha: product.sha.clone(),
         loc: product.loc,
-        parsed: Arc::clone(&product.parsed),
-    }
+        parsed: product.decode()?,
+        encoded: Some(Arc::clone(&product.encoded)),
+    })
 }
 
 /// Parallel collection order is not stable; sort before assigning ids so
@@ -1191,13 +1230,12 @@ fn assemble_graph_with(
         });
     }
 
-    // Symbols move into the graph (no second copy of every name/signature);
-    // nothing below reads `row.parsed.symbols`. The cache encoding is not
-    // needed past this point either.
+    // Symbols move into the graph: each row owns its parse (the product
+    // cache holds the encoded wire form, not a shared decoded copy), so
+    // `mem::take` hands over the `Vec<CodeSymbol>` without cloning a single
+    // name or signature. Nothing below reads `row.parsed.symbols`.
     // Rows are sorted by path and FileId(i) is row i, so symbols stay grouped
-    // by file in file order; `file_ranges[i]` is file i's slice. Cloned (not
-    // moved) because the parse is shared with the product cache, in parallel
-    // because this is a copy of every symbol of the repository per apply.
+    // by file in file order; `file_ranges[i]` is file i's slice.
     let mut file_ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(parsed.len());
     let mut next_symbol = 0usize;
     for row in &parsed {
@@ -1205,26 +1243,15 @@ fn assemble_graph_with(
         file_ranges.push(next_symbol..next_symbol + n);
         next_symbol += n;
     }
-    let per_file: Vec<Vec<CodeSymbol>> = parsed
-        .par_iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let base = file_ranges[i].start;
-            row.parsed
-                .symbols
-                .iter()
-                .enumerate()
-                .map(|(k, sym)| CodeSymbol {
-                    id: SymbolId((base + k) as u32),
-                    file: FileId(i as u32),
-                    ..sym.clone()
-                })
-                .collect()
-        })
-        .collect();
     graph.symbols.reserve(next_symbol);
-    for chunk in per_file {
-        graph.symbols.extend(chunk);
+    for (i, row) in parsed.iter_mut().enumerate() {
+        let base = file_ranges[i].start;
+        let mut symbols = std::mem::take(&mut row.parsed.symbols);
+        for (k, sym) in symbols.iter_mut().enumerate() {
+            sym.id = SymbolId((base + k) as u32);
+            sym.file = FileId(i as u32);
+        }
+        graph.symbols.extend(symbols);
     }
     report.symbols = graph.symbols.len();
 
@@ -1272,6 +1299,12 @@ fn assemble_graph_with(
             entry
         })
         .collect();
+    // Resolutions own their spec strings; the raw imports are dead now.
+    // Release them before the graph is finalized so the parsed products do
+    // not sit next to a fully built symbol table.
+    for row in &mut parsed {
+        row.parsed.imports = Vec::new();
+    }
     for (row, entry) in parsed.iter().zip(entries) {
         let from = index_of[&row.path];
         for (spec, resolution) in &entry.items {
@@ -1442,6 +1475,13 @@ fn assemble_graph_with(
         }
     }
 
+    // Every parsed product has now been consumed (symbols moved, imports and
+    // calls turned into edges). Release the remaining per-file vectors before
+    // the edge merge allocates the final graph edges, so the two peaks do not
+    // stack on a repository with millions of call sites.
+    drop(parsed);
+    drop(file_ranges);
+
     if opts.call_edges {
         // Go implicit interface satisfaction (type -> interface, syntactic
         // method-set match). Symbol-level like call edges, so behind the
@@ -1605,8 +1645,8 @@ pub fn index_repo(root: &Path, opts: &IndexOptions) -> (CodeGraph, IndexReport) 
 /// Snapshot of a previous index that can absorb a watcher [`ChangeSet`]
 /// without re-reading unchanged source files.
 ///
-/// Route (b): encoded parse products live in a byte-capped LRU; each apply
-/// reuses hits, re-parses `added`/`modified` (and LRU misses), then
+/// Route (b): wire-encoded parse products live in a byte-capped LRU; each
+/// apply decodes hits, re-parses `added`/`modified` (and LRU misses), then
 /// reassembles the graph. True graph-delta (route a) is deferred because
 /// import resolution, FileId assignment, and name-matched call edges are
 /// coupled across the whole file set.
@@ -1733,6 +1773,12 @@ impl IncrementalIndex {
         index_repo_incremental(root, self, changes, opts)
     }
 
+    /// Drop all cached per-file parse products and release their heap memory.
+    /// Subsequent incremental updates will re-read from the redb store or disk.
+    pub fn clear_product_cache(&mut self) {
+        self.products.clear();
+    }
+
     /// Admitted paths after resolver excludes, including non-source files
     /// (`go.mod`, `Cargo.toml`, …) that resolvers need in [`FileIndex`].
     pub fn admitted_paths(&self) -> &[RelPath] {
@@ -1744,6 +1790,7 @@ impl IncrementalIndex {
         &self.excluded_sources
     }
 
+    /// Bytes currently held by the retained parse products.
     #[cfg(test)]
     fn product_bytes(&self) -> u64 {
         self.products.weighted_size()
@@ -1854,6 +1901,7 @@ pub fn index_repo_incremental(
     let mut retried: HashMap<RelPath, u8> = HashMap::new();
     let mut failure_retries: HashMap<RelPath, u8> = HashMap::new();
 
+    let mut reuse_plan: Vec<(RelPath, CachedProduct)> = Vec::new();
     for path in &scanned.files {
         if dirty.contains(path) {
             to_parse.push(path.clone());
@@ -1873,20 +1921,7 @@ pub fn index_repo_incremental(
             continue;
         }
         if let Some(product) = previous.products.get(path) {
-            let row = row_from_product(path.clone(), &product);
-            // A partial parse keeps its product (the flag travels in the
-            // product); carry it so the report stays stable.
-            let previous_reason = previous_failures
-                .get(path)
-                .map(|r| r.as_str())
-                .filter(|r| is_partial_reason(r));
-            if row.parsed.partial {
-                failures.push((path.clone(), partial_reason(&row.parsed).to_owned()));
-            } else if let Some(reason) = previous_reason {
-                failures.push((path.clone(), reason.to_owned()));
-            }
-            reused_products.push((path.clone(), product));
-            reused.push(row);
+            reuse_plan.push((path.clone(), product));
         } else if let Some(reason) = previous_failures.get(path) {
             let tries = previous.failure_retries.get(path).copied().unwrap_or(0);
             if is_transient_failure(reason) && tries < MAX_FAILURE_RETRIES {
@@ -1903,6 +1938,43 @@ pub fn index_repo_incremental(
             lru_misses += 1;
             to_parse.push(path.clone());
         }
+    }
+
+    // Decoding the products of every unchanged file is the bulk of an apply's
+    // CPU on a large repository; the decoded parse is owned by its row, so the
+    // parallel map hands each one to the assembly pass without another copy.
+    // Indexed `collect` keeps `scanned.files` order, so the report is stable.
+    let decoded: Vec<(RelPath, CachedProduct, Option<ParsedRow>)> = reuse_plan
+        .into_par_iter()
+        .map(|(path, product)| {
+            let row = row_from_product(path.clone(), &product);
+            (path, product, row)
+        })
+        .collect();
+    for (path, product, row) in decoded {
+        let Some(row) = row else {
+            // A corrupt cache entry is just a miss: re-read and re-parse.
+            tracing::warn!(
+                path = %path.as_str(),
+                "in-memory parse product failed to decode; re-parsing"
+            );
+            lru_misses += 1;
+            to_parse.push(path);
+            continue;
+        };
+        // A partial parse keeps its product (the flag travels in the
+        // product); carry it so the report stays stable.
+        let previous_reason = previous_failures
+            .get(&path)
+            .map(|r| r.as_str())
+            .filter(|r| is_partial_reason(r));
+        if row.parsed.partial {
+            failures.push((path.clone(), partial_reason(&row.parsed).to_owned()));
+        } else if let Some(reason) = previous_reason {
+            failures.push((path.clone(), reason.to_owned()));
+        }
+        reused_products.push((path, product));
+        reused.push(row);
     }
 
     let reused_count = reused.len();
@@ -2498,13 +2570,31 @@ mod tests {
     }
 
     #[test]
+    fn clear_product_cache_drops_products_and_stays_equivalent() {
+        let root = scratch("clear-products");
+        seed_go_repo(&root);
+        let opts = with_calls();
+        let mut inc = IncrementalIndex::build(&root, &opts);
+        assert!(inc.product_bytes() > 0, "a cold build retains products");
+        inc.clear_product_cache();
+        assert_eq!(inc.product_bytes(), 0);
+        // Products are a cache, not state: the next apply falls back to the
+        // store/disk and still equals a fresh index of the same tree.
+        let next = inc.apply_changeset(&root, &ChangeSet::default(), &opts);
+        let (full, _) = index_repo(&root, &opts);
+        assert_graphs_equivalent(&full, &next.graph);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn product_cache_evicts_oldest_generation_first_and_tracks_bytes() {
         let product = |n: usize| CachedProduct {
             language: Language::Go,
             sha: "s".into(),
             loc: 1,
-            parsed: Arc::new(ParsedFile::default()),
-            weight: n as u32,
+            // `weight()` is sha capacity + encoded len + a constant, so a
+            // padded body of `n` bytes makes the entry bytes grow with `n`.
+            encoded: Arc::from(vec![0u8; n]),
         };
         let one = ParseProductCache::entry_bytes(&RelPath::new("a"), &product(100));
         let mut cache = ParseProductCache::new(2 * one, 5);
@@ -2613,10 +2703,7 @@ mod tests {
             let key = store::parse_cache_key(f.language.unwrap(), &f.sha);
             let stored = store.cached_parse(&key).unwrap().expect("stored");
             let held = inc.products.get(&f.path).expect("product");
-            assert_eq!(
-                &stored[..],
-                &store::encode_parsed(&held.parsed).unwrap()[..]
-            );
+            assert_eq!(&stored[..], &held.encoded[..]);
         }
         std::fs::remove_dir_all(&root).ok();
     }

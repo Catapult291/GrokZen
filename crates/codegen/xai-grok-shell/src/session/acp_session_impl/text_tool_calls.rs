@@ -18,15 +18,19 @@ pub(super) fn is_tool_call_only(text: &str) -> bool {
     let mut rest = text.trim();
     let mut blocks = 0;
     while !rest.is_empty() {
-        let Some(index) = OPENERS.iter().position(|opener| rest.starts_with(opener)) else {
+        let Some((_, closer)) = OPENERS
+            .iter()
+            .zip(CLOSERS.iter())
+            .find(|(opener, _)| rest.starts_with(*opener))
+        else {
             return false;
         };
-        let Some(end) = rest.find(CLOSERS[index]) else {
+        let Some(end) = rest.find(closer) else {
             // A stream that broke mid-tag leaves nothing but the partial call; the dead end and the
             // correction are the same.
             return true;
         };
-        rest = rest[end + CLOSERS[index].len()..].trim_start();
+        rest = rest[end + closer.len()..].trim_start();
         blocks += 1;
     }
     blocks > 0

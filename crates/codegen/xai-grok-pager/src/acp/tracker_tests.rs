@@ -2656,34 +2656,6 @@ fn activity_writing_tool_call_labels_localize_without_translating_subjects() {
     );
 }
 #[test]
-fn zh_localization_feedback_writing_label_keeps_ordinal_and_tool_identity() {
-    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
-        locale: crate::locale::UiLocale::ZhCn,
-        source: crate::locale::LocaleSource::Cli,
-    });
-    let names = xai_grok_tools::tool_taxonomy::WRITING_TOOL_WIRE_NAMES
-        .iter()
-        .filter(|(_, kind)| matches!(kind, xai_grok_tools::types::tool::ToolKind::Feedback))
-        .map(|(name, _)| *name)
-        .collect::<Vec<_>>();
-    assert!(!names.is_empty(), "feedback wire names must be covered");
-    for name in names {
-        for (ordinal, en, zh) in [
-            (1, "Writing feedback draft…", "正在编写反馈草稿…"),
-            (2, "Writing feedback draft (2)…", "正在编写反馈草稿 (2)…"),
-        ] {
-            let writing = WritingToolCall {
-                tool_name: Some(name.to_owned()),
-                ordinal: std::num::NonZeroU32::new(ordinal).unwrap(),
-            };
-            assert_eq!(writing.label(), en);
-            assert_eq!(writing.label_with_locale(Some(&locale)), zh);
-            assert_eq!(writing.tool_name.as_deref(), Some(name));
-        }
-    }
-}
-
-#[test]
 fn zh_localization_subagent_wait_preserves_new_and_dynamic_subjects() {
     let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
         locale: crate::locale::UiLocale::ZhCn,
@@ -5238,52 +5210,6 @@ fn generic_failed_tool_call_takes_its_error_from_raw_output() {
     assert_eq!(
         None, other.output,
         "a failure carries its text as the error only"
-    );
-}
-#[test]
-fn send_feedback_update_renders_feedback_drafted() {
-    let tool_call_id = acp::ToolCallId::new(Arc::from("feedback-draft"));
-    let tool_meta = serde_json::json!({
-        "version": 1,
-        "name": "send_feedback",
-        "kind": "feedback",
-        "namespace": "grok_build",
-        "label": "Feedback",
-        "read_only": false,
-    });
-    let pending = acp::ToolCall::new(tool_call_id.clone(), "send_feedback".to_owned())
-        .kind(acp::ToolKind::Other)
-        .status(acp::ToolCallStatus::Pending)
-        .meta(
-            serde_json::json!({xai_grok_tools::tool_taxonomy::TOOL_META_KEY: tool_meta})
-                .as_object()
-                .cloned(),
-        );
-    let completed = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
-        tool_call_id,
-        acp::ToolCallUpdateFields::new()
-            .title(Some("Dynamic tool call".to_owned()))
-            .status(Some(acp::ToolCallStatus::Completed))
-            .raw_input(Some(serde_json::json!({"title": "Draft"}))),
-    ));
-    let mut tracker = AcpUpdateTracker::new();
-    let mut scrollback = ScrollbackState::new();
-    tracker.handle_update(
-        acp::SessionUpdate::ToolCall(pending),
-        &meta(),
-        &mut scrollback,
-    );
-    tracker.handle_update(completed, &meta(), &mut scrollback);
-    let block = &scrollback.get(0).expect("feedback block").block;
-    let RenderBlock::ToolCall(ToolCallBlock::Other(other)) = block else {
-        panic!("expected Other block, got {block:?}");
-    };
-    assert_eq!(other.name, "Feedback drafted");
-    assert!(
-        !block
-            .searchable_text()
-            .unwrap()
-            .contains("Dynamic tool call")
     );
 }
 #[test]

@@ -66,9 +66,7 @@ pub(in crate::app::dispatch) fn resolve_cut_for_at_prompt(
     if position == 1 {
         return None;
     }
-    let Some(selected_prompt_index) = position.checked_sub(1) else {
-        return None;
-    };
+    let selected_prompt_index = position.checked_sub(1)?;
     if let Some(ForkPointRow::Before {
         prompt_index: row_prompt_index,
         text,

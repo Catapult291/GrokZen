@@ -35,7 +35,10 @@ struct Server {
 
 impl Server {
     fn spawn() -> Self {
-        let root = unique_temp_dir();
+        Self::spawn_at(unique_temp_dir())
+    }
+
+    fn spawn_at(root: PathBuf) -> Self {
         // Mirror Claude Code's global config: `args: ["."]` plus the client's cwd.
         let mut child = Command::new(env!("CARGO_BIN_EXE_astrolabe"))
             .arg(".")
@@ -113,12 +116,12 @@ fn assert_tool_catalog(response: &Value) {
     let mut names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     names.sort_unstable();
     let mut expected = vec![
-        "find_references",
+        "find_refs",
         "find_symbol",
-        "get_diagnostics",
-        "get_languages",
-        "goto_definition",
-        "resolve_context",
+        "get_diag",
+        "get_lang",
+        "goto_def",
+        "resolve_contx",
         "search_code",
     ];
     expected.sort_unstable();
@@ -177,7 +180,7 @@ fn stdio_tools_list_after_initialize_includes_ttl() {
 }
 
 #[test]
-fn stdio_get_languages_returns_nonempty_text() {
+fn stdio_get_lang_returns_nonempty_text() {
     let mut server = Server::spawn();
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut last;
@@ -189,7 +192,7 @@ fn stdio_get_languages_returns_nonempty_text() {
             id,
             "tools/call",
             json!({
-                "name": "get_languages",
+                "name": "get_lang",
                 "arguments": {"budget_tokens": 2500}
             }),
         );
@@ -341,4 +344,86 @@ fn stdio_single_nested_repo_is_selected_automatically() {
     let _ = std::fs::remove_dir_all(&parent);
     assert!(text.contains("only_here_marker"), "{text}");
     assert!(!text.contains("cannot route"), "{text}");
+}
+
+/// Reproduce the session failure over the same native stdio entry point used
+/// by Claude Code, with a disposable repository rather than a live index DB.
+#[test]
+fn stdio_subroot_correction_round_trips_with_unchanged_index_root() {
+    let root = unique_temp_dir();
+    for scope in ["ai-proxy", "src/daemon"] {
+        let dir = root.join(scope).join("relay/channel/antigravity");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("claude_request_convert_diff_test.go"),
+            "package antigravity\nfunc MarkerGo() {}\n",
+        )
+        .unwrap();
+    }
+    let mut server = Server::spawn_at(root);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut id = 0;
+    loop {
+        id += 1;
+        let response = server.rpc(
+            id,
+            "tools/call",
+            json!({
+                "name": "find_symbol", "arguments": {"query": "greet"}
+            }),
+        );
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        if !text.contains("Index is building") {
+            assert!(text.contains("greet"), "{response}");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "index never became ready: {response}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    for scope in ["ai-proxy", "src/daemon"] {
+        // cwd-relative index_root must retain its original semantics, too.
+        id += 1;
+        let error = server.rpc(
+            id,
+            "tools/call",
+            json!({
+                "name": "search_code", "arguments": {
+                    "query": "MarkerGo", "index_root": scope,
+                    "path_filter": "antigravity/claude_request_convert_diff_test.go"
+                }
+            }),
+        );
+        assert_eq!(error["result"]["isError"], true, "{error}");
+        let message = error["result"]["content"][0]["text"].as_str().unwrap();
+        let suggested = message
+            .split("e.g. \"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        assert_eq!(
+            suggested, "relay/channel/antigravity/claude_request_convert_diff_test.go",
+            "{message}"
+        );
+        id += 1;
+        let success = server.rpc(
+            id,
+            "tools/call",
+            json!({
+                "name": "search_code", "arguments": {
+                    "query": "MarkerGo", "index_root": scope, "path_filter": suggested
+                }
+            }),
+        );
+        assert_ne!(success["result"]["isError"], true, "{success}");
+        let text = success["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("MarkerGo"), "{text}");
+        assert!(text.contains(&format!("{scope}/{suggested}")), "{text}");
+    }
 }

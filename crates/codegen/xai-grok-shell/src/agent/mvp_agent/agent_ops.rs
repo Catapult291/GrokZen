@@ -2261,29 +2261,6 @@ impl MvpAgent {
             &self.media_tool_credentials(),
         )
     }
-    pub(super) fn prepare_web_search_sampling_config(&self) -> Option<SamplingConfig> {
-        let model_id = self.cfg.borrow().web_search_model.clone();
-        let models = self.models_manager.models();
-        let session = self.current_or_buffered_auth();
-        let alpha_test_key = self.cfg.borrow().endpoints.alpha_test_key.clone();
-        let client_version = self.cfg.borrow().client_version.clone();
-        let mut cfg = config::resolve_web_search_sampling_config(
-            &model_id,
-            &models,
-            session.as_ref().map(|a| a.key.as_str()),
-            self.cfg.borrow().grok_com_config.api_key_auth_disabled(),
-            alpha_test_key.clone(),
-            client_version,
-            &self.cfg.borrow().endpoints,
-        )?;
-        crate::agent::proxy_headers::inject_proxy_headers(
-            &mut cfg.extra_headers,
-            cfg.client_version.as_deref(),
-            alpha_test_key.as_deref(),
-            &cfg.base_url,
-        );
-        Some(cfg)
-    }
     /// The caller at the process boundary renders the [`crate::agent::init::BootstrapError`] and exits.
     pub fn new(
         gateway: GatewaySender,
@@ -2442,7 +2419,6 @@ impl MvpAgent {
             trace_upload_live: Arc::new(
                 std::sync::atomic::AtomicBool::new(cfg.is_trace_upload_enabled()),
             ),
-            feedback_trace_upload_grants: RefCell::new(VecDeque::new()),
             memory_config: RefCell::new(None),
             config_watcher_path_tx: None,
             relay_sync_enabled,
@@ -3605,35 +3581,6 @@ impl MvpAgent {
             .current_or_expired()
             .is_some_and(|auth| auth.team_name.is_some())
     }
-    pub(crate) fn issue_feedback_trace_upload_grant(
-        &self,
-        session_id: acp::SessionId,
-    ) -> String {
-        const MAX_PENDING_GRANTS: usize = 8;
-        let token = uuid::Uuid::new_v4().to_string();
-        let mut grants = self.feedback_trace_upload_grants.borrow_mut();
-        if grants.len() == MAX_PENDING_GRANTS {
-            let _ = grants.pop_front();
-        }
-        grants.push_back((token.clone(), session_id));
-        token
-    }
-    pub(crate) fn consume_feedback_trace_upload_grant(
-        &self,
-        token: &str,
-        session_id: &acp::SessionId,
-    ) -> bool {
-        let mut grants = self.feedback_trace_upload_grants.borrow_mut();
-        let Some(position) = grants
-            .iter()
-            .position(|(grant, granted_session)| {
-                grant == token && granted_session == session_id
-            }) else {
-            return false;
-        };
-        let _ = grants.remove(position);
-        true
-    }
     /// Whether `/feedback` may offer to turn trace upload on.
     /// An individual coding-data opt-out still asks: the card is how opted-out users switch sharing back on.
     /// ZDR has no self-serve way back, so it never asks.
@@ -4723,7 +4670,6 @@ impl MvpAgent {
             .find(|entry| entry.info.has_model_id(&sampling_config.model))
             .and_then(|entry| entry.info.max_retries);
         let origin_client = self.origin_client_info_from_meta(init.meta.as_ref());
-        let web_search_sampling_config = self.prepare_web_search_sampling_config();
         let image_gen_config = self.prepare_image_gen_config();
         let video_gen_config = self.prepare_video_gen_config();
         let app_builder_deployer_config = self.prepare_app_builder_deployer_config();
@@ -4994,7 +4940,6 @@ impl MvpAgent {
                     inference_idle_timeout_secs,
                     model_max_retries,
                     subagent_rate_limit_max_attempts,
-                    web_search_sampling_config,
                     web_fetch_config,
                     image_gen_config,
                     video_gen_config,

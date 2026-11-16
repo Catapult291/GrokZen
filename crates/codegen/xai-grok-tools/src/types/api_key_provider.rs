@@ -38,11 +38,3 @@ pub trait ApiKeyProvider: Send + Sync + 'static {
 
 /// Shared provider used across tool clients.
 pub type SharedApiKeyProvider = Arc<dyn ApiKeyProvider>;
-
-/// Resolve the bearer for the next request from the provider.
-pub(crate) async fn resolve_bearer(provider: Option<&SharedApiKeyProvider>) -> Option<String> {
-    match provider {
-        Some(p) => p.current_api_key_async().await,
-        None => None,
-    }
-}

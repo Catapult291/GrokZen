@@ -99,7 +99,6 @@ fn panel_rows(item_rows: u16) -> u16 {
 
 /// Kept well below a full screen so closing the modal leaves only a small blank band (the band equals `target - base`).
 /// A screen-tall band was the "bunch of blank space" dogfooding complaint.
-/// The feedback form shares this band.
 pub(super) const MINIMAL_APP_MODAL_ROWS: u16 = 18;
 
 /// Target live-viewport height for a centered app-modal: a moderate, bottom-anchored panel rather than the full screen.
@@ -187,7 +186,7 @@ fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
     let force_todos = minimal_api::minimal_show_todos(app);
     // Committed appearance (timestamps off) so the measured tail height matches exactly what `draw_tail` renders
     let commit_app = super::commit::committed_appearance(&app.appearance);
-    // Theme and prompt style are built after the agent is known so bash/feedback/remember chrome matches `draw_live` (same `prompt_style` inputs)
+    // Theme and prompt style are built after the agent is known so bash and remember chrome matches `draw_live` (same `prompt_style` inputs)
     // Minimal is flush-left: prompt-replacing modals span the live region's full width with no outer horizontal padding
     // Measure their height at that same width; it must match `live::draw_live`'s `modal_area` or the viewport is sized for a different text wrap
     let content_w = width as usize;
@@ -224,7 +223,7 @@ fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
         return super::panel::panel_height(agent, kind, width, ceiling, Some(&locale));
     }
 
-    // A centered app-modal (command palette / settings / pickers) or the feedback form reuses the full-TUI popup
+    // A centered app-modal (command palette / settings / pickers) reuses the full-TUI popup
     // renderer, which fills whatever area it's given. Committed rows scrolled into native scrollback can't be pulled back.
     if is_live_region_modal_active(agent) || minimal_api::extensions_modal(agent).is_some() {
         return app_modal_target(base, ceiling);
@@ -541,10 +540,10 @@ pub fn app_modal_active(agent: &AgentView) -> bool {
     agent.active_modal.is_some()
 }
 
-/// Whether a modal owns the whole live band (a centered app-modal or the feedback form), so no `insert_before` may run under it.
+/// Whether a modal owns the whole live band (a centered app-modal), so no `insert_before` may run under it.
 /// The extensions modal shares the band size (see `compute_target`) but is not held here.
 pub fn is_live_region_modal_active(agent: &AgentView) -> bool {
-    app_modal_active(agent) || minimal_api::feedback_modal(agent).is_some()
+    app_modal_active(agent)
 }
 
 /// Render the active centered app-modal into `area`.
@@ -999,19 +998,13 @@ mod tests {
     /// Prompt-replacing modals are sized by `modal_target`; only band-owning modals may hold commits.
     #[test]
     fn is_live_region_modal_active_ignores_prompt_modals() {
-        use xai_grok_pager::views::feedback_modal::{FeedbackModalState, OpenFeedbackModal};
-
         let mut agent = question_input_agent("answer");
         assert_eq!(active_modal(&agent), Some(Modal::Question));
         assert!(!is_live_region_modal_active(&agent));
 
         minimal_api::set_question_view(&mut agent, None);
-        minimal_api::set_feedback_modal(
-            &mut agent,
-            Some(FeedbackModalState::new(OpenFeedbackModal::default())),
-        );
         assert!(!app_modal_active(&agent));
-        assert!(is_live_region_modal_active(&agent));
+        assert!(!is_live_region_modal_active(&agent));
     }
 
     #[test]

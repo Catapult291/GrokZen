@@ -376,7 +376,10 @@ fn resolve_trust_prompt_locale(
 
 fn cli_locale_arg(args: &[String]) -> Option<&str> {
     args.windows(2)
-        .find_map(|pair| (pair[0] == "--locale").then_some(pair[1].as_str()))
+        .find_map(|pair| match pair {
+            [flag, value] if flag == "--locale" => Some(value.as_str()),
+            _ => None,
+        })
         .or_else(|| args.iter().find_map(|arg| arg.strip_prefix("--locale=")))
 }
 

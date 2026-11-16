@@ -19,7 +19,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use astrolabe_core::cache::FileCache;
+use astrolabe_core::cache::{CachedLines, FileCache};
 use astrolabe_core::lsp::{Location, Position, Precise, Range};
 use astrolabe_core::types::{
     CodeSymbol, Confidence, EdgeKind, FileId, Language, RelPath, SymbolKind,
@@ -59,7 +59,7 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Run `f` with [`read_lines`] served from `cache` (the session's
+/// Run `f` with [`read_line_view`] served from `cache` (the session's
 /// search_code cache, keyed by repo-relative path, mtime/len-checked), so
 /// fix_path / snap / graph / annotate stop re-reading the same files.
 pub(crate) fn with_file_cache<R>(cache: Option<&Arc<FileCache>>, f: impl FnOnce() -> R) -> R {
@@ -69,12 +69,15 @@ pub(crate) fn with_file_cache<R>(cache: Option<&Arc<FileCache>>, f: impl FnOnce(
     out
 }
 
-pub(crate) fn read_lines(root: &Path, path: &str) -> Option<Arc<Vec<String>>> {
+/// Shared compact source lines. Callers can iterate without allocations, or
+/// use `borrowed_lines()` for consumers accepting a slice of borrowed strings.
+/// Cache hits retain the original text allocation and offset table.
+pub(crate) fn read_line_view(root: &Path, path: &str) -> Option<Arc<CachedLines>> {
     if let Some(cache) = FILE_CACHE.with(|c| c.borrow().clone()) {
         return crate::index::load_source_lines(&cache, root, path).map(|(lines, _)| lines);
     }
     let source = astrolabe_core::text::read_source(&root.join(path)).ok()?;
-    Some(Arc::new(source.lines().map(str::to_owned).collect()))
+    Some(Arc::new(CachedLines::from_text(source)))
 }
 
 fn is_ident(c: char) -> bool {
@@ -133,7 +136,7 @@ pub(crate) enum HitKind {
 
 /// Comment / string classification of `(line, byte)` hits in one file.
 /// `Code` everywhere when the file type has no lexer.
-fn classify(path: &str, lines: &[String], hits: &[(usize, usize)]) -> Vec<HitKind> {
+fn classify(path: &str, lines: &[&str], hits: &[(usize, usize)]) -> Vec<HitKind> {
     let all_masked = crate::code_mask::code_mask(path, lines, false);
     let comments = crate::code_mask::code_mask(path, lines, true);
     let python = path.ends_with(".py") || path.ends_with(".pyi");
@@ -185,9 +188,10 @@ pub(crate) fn snap_position(root: &Path, path: &str, symbol: &str, pos: Position
     if symbol.is_empty() {
         return keep;
     }
-    let Some(lines) = read_lines(root, path) else {
+    let Some(lines) = read_line_view(root, path) else {
         return keep;
     };
+    let lines = lines.borrowed_lines();
     let at = astrolabe_core::lsp::queries::identifier_at(root, &RelPath::new(path), pos);
     if at.as_deref() == Some(symbol) {
         return keep;
@@ -296,7 +300,7 @@ pub(crate) fn same_family(a: Language, b: Language) -> bool {
 }
 
 fn contains_word(root: &Path, path: &str, name: &str) -> bool {
-    read_lines(root, path)
+    read_line_view(root, path)
         .is_some_and(|lines| lines.iter().any(|l| !word_offsets(l, name).is_empty()))
 }
 
@@ -373,7 +377,7 @@ pub(crate) fn fix_path(
             };
             PathFix::Ambiguous {
                 note: format!(
-                    "{why}, and the index has `{symbol}` defined in {n} files (exported/non-test first): {}{more}. Pass one as path and retry (or find_symbol to narrow, then find_references).",
+                    "{why}, and the index has `{symbol}` defined in {n} files (exported/non-test first): {}{more}. Pass one as path and retry (or find_symbol to narrow, then find_refs).",
                     list.join(", ")
                 ),
             }
@@ -422,11 +426,7 @@ fn go_import_path(root: &Path, def_dir: &str) -> Option<String> {
 /// Local names of the Go imports in `lines` that are not the package at
 /// `def_dir` (`fmt`, `exec`, an alias…): `name.X` through one of them is
 /// another package's `X`, not ours.
-fn go_foreign_imports(
-    lines: &[String],
-    def_import: Option<&str>,
-    def_dir: &str,
-) -> HashSet<String> {
+fn go_foreign_imports(lines: &[&str], def_import: Option<&str>, def_dir: &str) -> HashSet<String> {
     let mut out = HashSet::new();
     let mut in_block = false;
     // Imports follow the `package` clause; a package doc comment above it
@@ -505,7 +505,7 @@ fn selector_base(line: &str, byte: usize) -> Option<&str> {
 
 /// All Go imports in `lines`: `(local name, import path)`. `_` and `.`
 /// imports are left out (no selector reaches them).
-fn go_imports(lines: &[String]) -> Vec<(String, String)> {
+fn go_imports(lines: &[&str]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut in_block = false;
     // Imports follow the `package` clause; a package doc comment above it
@@ -786,14 +786,14 @@ enum Binding {
 
 /// Nearest binding of `x` above `(line, byte)`, up to and including the
 /// enclosing top-level `func` line.
-fn go_local_binding(lines: &[String], line: usize, byte: usize, x: &str) -> Option<Binding> {
+fn go_local_binding(lines: &[&str], line: usize, byte: usize, x: &str) -> Option<Binding> {
     let last = line.min(lines.len().checked_sub(1)?);
     for i in (0..=last).rev() {
         let full = &lines[i];
         let text = if i == line {
             &full[..byte.min(full.len())]
         } else {
-            full.as_str()
+            *full
         };
         if let Some(b) = binding_on_line(text, x) {
             return Some(b);
@@ -930,14 +930,14 @@ struct GoRecv<'a> {
     /// Receiver type of the method being searched.
     recv: &'a str,
     method: &'a str,
-    files: HashMap<String, Option<Arc<Vec<String>>>>,
+    files: HashMap<String, Option<Arc<CachedLines>>>,
 }
 
 impl<'a> GoRecv<'a> {
-    fn lines(&mut self, path: &str) -> Option<Arc<Vec<String>>> {
+    fn lines(&mut self, path: &str) -> Option<Arc<CachedLines>> {
         self.files
             .entry(path.to_string())
-            .or_insert_with(|| read_lines(self.root, path))
+            .or_insert_with(|| read_line_view(self.root, path))
             .clone()
     }
 
@@ -1028,6 +1028,7 @@ impl<'a> GoRecv<'a> {
     /// Type of the receiver `base` of the hit at `(line, byte)` of `path`.
     fn base_type(&mut self, path: &str, line: usize, byte: usize, base: &str) -> Option<GoTy> {
         let lines = self.lines(path)?;
+        let lines = lines.borrowed_lines();
         let dir = dir_of(path).to_string();
         let imports = go_imports(&lines);
         let base_start = byte.checked_sub(base.len() + 1)?;
@@ -1048,7 +1049,7 @@ impl<'a> GoRecv<'a> {
     #[allow(clippy::too_many_arguments)]
     fn var_type(
         &mut self,
-        lines: &[String],
+        lines: &[&str],
         dir: &str,
         imports: &[(String, String)],
         line: usize,
@@ -1093,7 +1094,7 @@ impl<'a> GoRecv<'a> {
     #[allow(clippy::too_many_arguments)]
     fn expr_type(
         &mut self,
-        lines: &[String],
+        lines: &[&str],
         dir: &str,
         imports: &[(String, String)],
         line: usize,
@@ -1199,6 +1200,7 @@ impl<'a> GoRecv<'a> {
         let parts = go_func_parts(&decl.signature).into_iter().next()?;
         let t = go_result_type(parts.results, idx)?.to_string();
         let lines = self.lines(&path)?;
+        let lines = lines.borrowed_lines();
         let imports = go_imports(&lines);
         self.ty_in(dir, &imports, go_type_name(&t)?)
     }
@@ -1218,6 +1220,7 @@ impl<'a> GoRecv<'a> {
         let parts = go_func_parts(&decl.signature).into_iter().next()?;
         let t = go_result_type(parts.results, 0)?.to_string();
         let lines = self.lines(&path)?;
+        let lines = lines.borrowed_lines();
         let imports = go_imports(&lines);
         self.ty_in(dir, &imports, go_type_name(&t)?)
     }
@@ -1237,6 +1240,7 @@ impl<'a> GoRecv<'a> {
         for (path, sig) in fields {
             let rest = sig.trim().strip_prefix(name)?.trim();
             let lines = self.lines(&path)?;
+            let lines = lines.borrowed_lines();
             let imports = go_imports(&lines);
             let ty = self.ty_in(dir_of(&path), &imports, go_type_name(rest)?)?;
             match &agreed {
@@ -1368,18 +1372,12 @@ fn choose_declaration<'a>(
 /// The bare Go name at `(line, byte)` is a function-local binding: inside
 /// one of `funcs` (1-based line ranges), it is bound on its own line (`x :=`
 /// left side, a parameter) or above it in the function.
-fn go_shadowed(
-    lines: &[String],
-    line: usize,
-    byte: usize,
-    name: &str,
-    funcs: &[(u32, u32)],
-) -> bool {
+fn go_shadowed(lines: &[&str], line: usize, byte: usize, name: &str, funcs: &[(u32, u32)]) -> bool {
     let line1 = line as u32 + 1;
     if !funcs.iter().any(|&(s, e)| s <= line1 && line1 <= e) {
         return false;
     }
-    binding_on_line(&lines[line], name).is_some()
+    binding_on_line(lines[line], name).is_some()
         || go_local_binding(lines, line, byte, name).is_some()
 }
 
@@ -1407,9 +1405,10 @@ fn go_call_site<'a>(
     origin: &RelPath,
     line: usize,
 ) -> Site<'a> {
-    let Some(lines) = read_lines(root, origin.as_str()) else {
+    let Some(lines) = read_line_view(root, origin.as_str()) else {
         return Site::Undecided;
     };
+    let lines = lines.borrowed_lines();
     let Some(text) = lines.get(line) else {
         return Site::Undecided;
     };
@@ -1731,9 +1730,10 @@ fn decl_refs(
     let mut unconfirmed: Vec<(String, usize)> = Vec::new();
     let mut members = 0usize;
     for path in files {
-        let Some(lines) = read_lines(root, path.as_str()) else {
+        let Some(lines) = read_line_view(root, path.as_str()) else {
             continue;
         };
+        let lines = lines.borrowed_lines();
         // The name, plus (TS/JS) the local aliases it has in this file.
         let words: Vec<&str> = match (&ts, index.file_id(path.as_str())) {
             (Some(t), Some(id)) => t.words(id.0, name),
@@ -1787,7 +1787,7 @@ fn decl_refs(
             if kind != HitKind::Code {
                 continue;
             }
-            let base = selector_base(&lines[line], byte);
+            let base = selector_base(lines[line], byte);
             if base.is_some_and(|b| foreign.contains(b)) {
                 continue;
             }
@@ -1811,7 +1811,7 @@ fn decl_refs(
             if ts.is_some()
                 && !is_decl
                 && base.is_none()
-                && crate::refs_graph_ts::is_object_key(&lines[line], byte)
+                && crate::refs_graph_ts::is_object_key(lines[line], byte)
             {
                 members += 1;
                 continue;
@@ -1836,7 +1836,7 @@ fn decl_refs(
                     continue;
                 }
             }
-            if go && !is_decl && base.is_none() && go_literal_key(&lines[line], byte, name) {
+            if go && !is_decl && base.is_none() && go_literal_key(lines[line], byte, name) {
                 // `Name: v` in a composite literal is a field key.
                 members += 1;
                 continue;
@@ -1925,7 +1925,7 @@ fn decl_refs(
                     }
                 }
             }
-            let character = utf16_col(&lines[line], byte);
+            let character = utf16_col(lines[line], byte);
             let start = Position {
                 line: line as u32,
                 character,
@@ -2344,7 +2344,8 @@ pub(crate) fn annotate(
     }
     let mut out = vec![HitInfo::default(); locations.len()];
     for (path, idxs) in by_file {
-        let lines = read_lines(root, path).unwrap_or_default();
+        let lines = read_line_view(root, path).unwrap_or_default();
+        let lines = lines.borrowed_lines();
         let file_symbols: Vec<&CodeSymbol> = index
             .and_then(|ix| {
                 ix.file_id(path)
@@ -2406,7 +2407,7 @@ pub(crate) fn annotate(
 
 /// First whole-word occurrence of `name` from 1-based line `from` through
 /// `to`, as `(0-based line, byte)`.
-fn first_occurrence(lines: &[String], name: &str, from: u32, to: u32) -> Option<(usize, usize)> {
+fn first_occurrence(lines: &[&str], name: &str, from: u32, to: u32) -> Option<(usize, usize)> {
     let start = from.saturating_sub(1) as usize;
     let end = to.saturating_sub(1) as usize;
     (start..=end).find_map(|l| {
@@ -2442,10 +2443,26 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_line_reads_reuse_cached_source() {
+        let dir = repo(&[("source.go", "package p\r\nvar Name = 1\n")]);
+        let cache = Arc::new(FileCache::new(Default::default()));
+        with_file_cache(Some(&cache), || {
+            let first = read_line_view(&dir, "source.go").unwrap();
+            let second = read_line_view(&dir, "source.go").unwrap();
+            assert!(Arc::ptr_eq(&first, &second));
+            assert_eq!(first.borrowed_lines(), ["package p", "var Name = 1"]);
+            assert!(contains_word(&dir, "source.go", "Name"));
+            assert!(!contains_word(&dir, "source.go", "Nam"));
+        });
+        let uncached = read_line_view(&dir, "source.go").unwrap();
+        assert_eq!(uncached.borrowed_lines(), ["package p", "var Name = 1"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn go_foreign_imports_and_selector_base() {
-        let lines: Vec<String> = "package p\n\nimport \"fmt\"\nimport (\n\tex \"os/exec\"\n\t\"example.com/m/service\"\n\t\"gopkg.in/yaml.v3\"\n\t\"github.com/x/y/v2\"\n)\n\nfunc F() {}\n"
+        let lines: Vec<&str> = "package p\n\nimport \"fmt\"\nimport (\n\tex \"os/exec\"\n\t\"example.com/m/service\"\n\t\"gopkg.in/yaml.v3\"\n\t\"github.com/x/y/v2\"\n)\n\nfunc F() {}\n"
             .lines()
-            .map(str::to_string)
             .collect();
         let f = go_foreign_imports(&lines, Some("example.com/m/service"), "service");
         let want: HashSet<String> = ["fmt", "ex", "yaml", "y"]
@@ -2457,9 +2474,8 @@ mod tests {
         let f = go_foreign_imports(&lines, None, "x/service");
         assert!(!f.contains("service") && f.contains("fmt"));
         // Example code in the package doc comment does not end the scan.
-        let doc: Vec<String> = "/*\nUsage:\n\tvar png []byte\n\tfunc f() {}\n*/\npackage qrcode\n\nimport (\n\trs \"github.com/skip2/go-qrcode/reedsolomon\"\n)\n"
+        let doc: Vec<&str> = "/*\nUsage:\n\tvar png []byte\n\tfunc f() {}\n*/\npackage qrcode\n\nimport (\n\trs \"github.com/skip2/go-qrcode/reedsolomon\"\n)\n"
             .lines()
-            .map(str::to_string)
             .collect();
         assert_eq!(
             go_imports(&doc),

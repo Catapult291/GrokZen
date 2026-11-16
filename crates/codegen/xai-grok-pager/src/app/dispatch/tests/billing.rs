@@ -1254,23 +1254,6 @@ fn free_usage_error_detected_by_embedded_code() {
 }
 
 #[test]
-fn free_usage_upsell_displaces_feedback_before_opening_question() {
-    let mut app = test_app_with_agent();
-    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-    agent.feedback_modal = Some(crate::views::feedback_modal::FeedbackModalState::new(
-        crate::views::feedback_modal::OpenFeedbackModal {
-            text: Some("unsent report".to_owned()),
-            ..Default::default()
-        },
-    ));
-
-    open_free_usage_upsell(agent, None);
-
-    assert!(agent.feedback_modal.is_none());
-    assert!(agent.question_view.is_some());
-}
-
-#[test]
 fn free_usage_upsell_shows_three_options_with_exact_labels() {
     let mut app = test_app_with_agent();
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();

@@ -10,7 +10,7 @@ use std::{
 
 use astrolabe_core::{
     budget::{estimate_tokens, truncate_ranked, TokenBudget},
-    cache::{FileCache, DEFAULT_MEMORY_BUDGET_BYTES},
+    cache::{CachedLines, FileCache, DEFAULT_MEMORY_BUDGET_BYTES},
     graph::{cached_centrality, rank_and_match},
     render::symbol_line,
     types::RelPath,
@@ -53,7 +53,7 @@ use crate::{
 pub(crate) use crate::session::IndexState;
 
 const DEFAULT_BUDGET: usize = 2_500;
-/// `resolve_context` budget for counting/caller tasks (~3 KB of output).
+/// `resolve_contx` budget for counting/caller tasks (~3 KB of output).
 const COMPACT_CONTEXT_BUDGET: usize = 700;
 /// 资源卸载阈值基线：正文 token 估算超过阈值（含 SLACK）时转存为
 /// MCP resource。`ASTROLABE_RESOURCE_THRESHOLD` 可调，格式错误回退默认。
@@ -618,7 +618,7 @@ struct RoleView {
 /// Role of hit lines using the file's `code_mask`: trailing comments no longer
 /// leak words into the label, and lines inside multi-line / raw strings (Go
 /// backticks, Python triple quotes) are tagged `字符串` instead of `定义`/`加载`.
-fn role_views(path: &str, lines: &[String], wanted: &[usize]) -> Option<HashMap<usize, RoleView>> {
+fn role_views(path: &str, lines: &[&str], wanted: &[usize]) -> Option<HashMap<usize, RoleView>> {
     let comments_only = crate::code_mask::code_mask(path, lines, true)?;
     let bare_mask = crate::code_mask::code_mask(path, lines, false)?;
     let pick = |line: &str, mask: &[bool]| -> String {
@@ -873,7 +873,7 @@ fn grouped_closure_line(hits: &[SearchHit], shown: usize, folded_tests: usize) -
 /// Next-step line for results with many hits (> `GROUP_FULL_HITS`).
 fn many_hits_hint(total: usize) -> String {
     if total > GROUP_FULL_HITS {
-        "Next: to count hit lines per directory/file (per line; multiple hits on one line count as 1; for exact occurrence counts use rg -o) use aggregate=top|dir|file (optional skip_comments=true, exclude=[\"_test.go\",\"vendor\"]); for batch rename use find_references dry_run_rename.\n".to_string()
+        "Next: to count hit lines per directory/file (per line; multiple hits on one line count as 1; for exact occurrence counts use rg -o) use aggregate=top|dir|file (optional skip_comments=true, exclude=[\"_test.go\",\"vendor\"]); for batch rename use find_refs dry_run_rename.\n".to_string()
     } else {
         String::new()
     }
@@ -1186,10 +1186,10 @@ fn classify_task(task: &str) -> TaskKind {
 /// One-line pointer to the follow-up tool that fits the task wording.
 fn next_step_hint(task: &str) -> &'static str {
     match classify_task(task) {
-        TaskKind::Rename => "Next: find_references(symbol, dry_run_rename=new_name) for a per-file rename checklist; then run build/tests to verify (use get_diagnostics only if you cannot).\n",
+        TaskKind::Rename => "Next: find_refs(symbol, dry_run_rename=new_name) for a per-file rename checklist; then run build/tests to verify (use get_diag only if you cannot).\n",
         TaskKind::Count => "Next: search_code(query, aggregate=top|dir|file, skip_comments=true, exclude=[…]) for N lines / M files per dir/file (per line; multiple hits on one line count as 1); add count_only=true for totals only.\n",
-        TaskKind::Refs => "Next: find_references(symbol) for precise call sites; use goto_definition for the definition.\n",
-        TaskKind::Other => "Next: for a known name use find_symbol (include_body=true for source); for literals/copy use search_code; for callers use find_references.\n",
+        TaskKind::Refs => "Next: find_refs(symbol) for precise call sites; use goto_def for the definition.\n",
+        TaskKind::Other => "Next: for a known name use find_symbol (include_body=true for source); for literals/copy use search_code; for callers use find_refs.\n",
     }
 }
 
@@ -1245,9 +1245,10 @@ fn render_grouped_hits(
         }
         let file_is_test = crate::explain::is_test_caller(path, "");
         let wanted: Vec<usize> = rows.iter().map(|r| r.line.saturating_sub(1)).collect();
+        // Borrow source text for role classification; only the reference table is allocated.
         let views = index
             .cached_lines(cache, path)
-            .and_then(|(lines, _)| role_views(path, &lines, &wanted));
+            .and_then(|(lines, _)| role_views(path, &lines.borrowed_lines(), &wanted));
         for r in &mut rows {
             let test = file_is_test || crate::explain::is_test_caller(path, &r.sym);
             r.role = match views
@@ -1430,7 +1431,7 @@ fn render_symbol_hits(
     limit: usize,
     fallback: usize,
     enclosing: &dyn Fn(&SearchHit) -> Option<CodeSymbol>,
-    file_lines: &mut dyn FnMut(&SearchHit) -> Option<Arc<Vec<String>>>,
+    file_lines: &mut dyn FnMut(&SearchHit) -> Option<Arc<CachedLines>>,
     seen: &mut dyn FnMut(&str, u32, u32) -> Option<u64>,
 ) -> Option<(String, bool)> {
     let mut out = String::new();
@@ -1547,11 +1548,11 @@ fn render_search_hits(
     hits: &[SearchHit],
     context: usize,
     limit: usize,
-    file_lines: &mut dyn FnMut(&SearchHit) -> Option<Arc<Vec<String>>>,
+    file_lines: &mut dyn FnMut(&SearchHit) -> Option<Arc<CachedLines>>,
 ) -> (String, usize) {
     let mut budget = TokenBudget::new(limit);
     let mut out = String::new();
-    let mut current: Option<(String, Option<Arc<Vec<String>>>)> = None;
+    let mut current: Option<(String, Option<Arc<CachedLines>>)> = None;
     // Last line (1-based) already printed for the current file.
     let mut printed = 0usize;
     for (i, hit) in hits.iter().enumerate() {
@@ -1831,11 +1832,15 @@ pub(crate) struct ResolveContextParams {
     #[serde(default)]
     #[schemars(description = "false: resend a repeated call.")]
     pub dedup: Option<bool>,
+    /// Host / test agent identity for session result dedup isolation (unadvertised).
+    #[serde(default)]
+    #[schemars(skip)]
+    pub agent_id: Option<String>,
     #[serde(default)]
     #[schemars(description = "Next-page offset.")]
     pub offset: usize,
     #[serde(default)]
-    #[schemars(description = "Repo-relative path substring.")]
+    #[schemars(description = "index_root-relative path substring.")]
     pub path_filter: Option<String>,
 }
 
@@ -1874,7 +1879,7 @@ pub(crate) struct QueryParams {
     pub kind: Option<String>,
     /// 仓库相对路径子串过滤（与 search_code 相同语义）。
     #[serde(default)]
-    #[schemars(description = "Repo-relative path substring (not a substitute for query).")]
+    #[schemars(description = "index_root-relative path substring, not query.")]
     pub path_filter: Option<String>,
     /// 展开成员的层数（0=不展开）；`query="*"` + path_filter 时输出文件大纲。
     #[serde(default)]
@@ -1889,6 +1894,19 @@ pub(crate) struct QueryParams {
     #[serde(default)]
     #[schemars(description = "0-based match offset for pagination (see next_offset in result).")]
     pub offset: usize,
+    /// Default true: reference a definition body already returned this session
+    /// for the current *known* agent. Pass false to refetch the full body.
+    /// When agent identity is missing, bodies are always resent (no shared shard).
+    #[serde(default)]
+    #[schemars(
+        description = "Default true: reference a definition body already returned this session for this agent; false to refetch. No-op when agent identity is missing."
+    )]
+    pub dedup: Option<bool>,
+    /// Host / test / hook-injected agent identity for session body dedup isolation.
+    /// Prefer request `_meta` when the host provides one; this arg overrides.
+    #[serde(default)]
+    #[schemars(skip)]
+    pub agent_id: Option<String>,
 }
 
 /// Valid `kind` filter names for path queries (case-insensitive).
@@ -1935,7 +1953,7 @@ pub(crate) struct SearchParams {
     #[schemars(description = "Default false. Set true to treat query as a regular expression.")]
     pub regex: bool,
     #[serde(default)]
-    #[schemars(description = "Repo-relative path substring (case-sensitive, not glob).")]
+    #[schemars(description = "index_root-relative substring (case-sensitive, not glob).")]
     pub path_filter: Option<String>,
     #[serde(default)]
     #[schemars(description = "Override case (default: sensitive iff query has uppercase).")]
@@ -1962,6 +1980,10 @@ pub(crate) struct SearchParams {
     #[serde(default)]
     #[schemars(description = "Default true: reference repeated symbol bodies by location.")]
     pub dedup: Option<bool>,
+    /// Host / test agent identity for session body dedup isolation (unadvertised).
+    #[serde(default)]
+    #[schemars(skip)]
+    pub agent_id: Option<String>,
     #[serde(default)]
     #[schemars(description = "top|dir|file: hit/file counts per dir or file + total.")]
     pub aggregate: Option<String>,
@@ -2056,6 +2078,10 @@ impl ResourceStore {
         self.map.len()
     }
 }
+/// Per-agent map of already-returned definition ranges (agent → range key → (generation, call #)).
+type AgentSentRanges = HashMap<String, HashMap<String, (u64, u64)>>;
+/// Per-agent map of already-returned search/resolve digests (agent → result key → digest).
+type AgentSearchDigests = HashMap<String, HashMap<String, String>>;
 
 #[derive(Debug, Clone)]
 pub struct AstrolabeServer {
@@ -2076,18 +2102,20 @@ pub struct AstrolabeServer {
     loop_guard: Arc<Mutex<LoopGuard<CallToolResult>>>,
     tool_router: ToolRouter<Self>,
     /// Code ranges (symbol bodies) already returned in this MCP session,
-    /// keyed by root+path+range, with the index generation they were read at
-    /// and the ordinal of the call that sent them.
-    sent_ranges: Arc<Mutex<HashMap<String, (u64, u64)>>>,
-    /// One-line digest of each whole `search_code` result, keyed like the
-    /// query entries of `sent_ranges`, so a repeat query gets the gist back.
-    search_digests: Arc<Mutex<HashMap<String, String>>>,
+    /// nested by dedup agent id → root+path+range → (index generation, call #).
+    /// Parent/subagent shards stay independent so one agent's FULL body does
+    /// not starve another. Cleared when the session view is rebuilt.
+    sent_ranges: Arc<Mutex<AgentSentRanges>>,
+    /// One-line digest of each whole `search_code` / resolve result, nested by
+    /// dedup agent id then result key.
+    search_digests: Arc<Mutex<AgentSearchDigests>>,
     /// Index generation each `find_symbol` query (offset and budget aside) was
     /// last served at, so a later page can say the index changed in between.
     symbol_page_generations: Arc<Mutex<HashMap<String, u64>>>,
-    /// Same for `resolve_context` pages.
+    /// Same for `resolve_contx` pages.
     context_page_generations: Arc<Mutex<HashMap<String, u64>>>,
-    call_seq: Arc<AtomicU64>,
+    /// Per-agent monotonic tool-call counters for "already returned on call #N".
+    call_seq: Arc<Mutex<HashMap<String, u64>>>,
     /// Fixed legends and footers already shown this MCP session (each is
     /// printed once, like the syntax-error footnote).
     shown_once: Arc<Mutex<std::collections::HashSet<&'static str>>>,
@@ -2097,8 +2125,8 @@ pub struct AstrolabeServer {
     /// Per-session coverage-note memory for leader-side session views
     /// (the root session's own slot otherwise).
     coverage_note_override: Option<Arc<Mutex<Option<String>>>>,
-    /// Last unambiguous symbol → path[:line] from find_symbol / goto_definition
-    /// in this MCP process, so find_references can inherit a missing path.
+    /// Last unambiguous symbol → path[:line] from find_symbol / goto_def
+    /// in this MCP process, so find_refs can inherit a missing path.
     recent_symbols: Arc<crate::recent_symbol::RecentSymbols>,
 }
 
@@ -2289,7 +2317,7 @@ impl AstrolabeServer {
             search_digests: Arc::new(Mutex::new(HashMap::new())),
             symbol_page_generations: Arc::new(Mutex::new(HashMap::new())),
             context_page_generations: Arc::new(Mutex::new(HashMap::new())),
-            call_seq: Arc::new(AtomicU64::new(0)),
+            call_seq: Arc::new(Mutex::new(HashMap::new())),
             shown_once: Arc::new(Mutex::new(std::collections::HashSet::new())),
             shared: None,
             coverage_note_override: None,
@@ -2317,9 +2345,21 @@ impl AstrolabeServer {
 
     pub fn start_indexing(&self) {
         if let Some(dispatch) = &self.dispatch {
-            start_idle_ticker(Arc::clone(dispatch), Arc::clone(&self.ticker_stop));
+            start_idle_ticker(
+                Some(Arc::clone(&self.primary)),
+                Some(Arc::clone(dispatch)),
+                Arc::clone(&self.ticker_stop),
+            );
             return;
         }
+        // Single-root mode: patrol the primary for two-stage idle eviction.
+        // The primary is not indexed here when a dispatch exists (multi-project
+        // children activate on first use), and `assemble` never begins a ticker.
+        start_idle_ticker(
+            Some(Arc::clone(&self.primary)),
+            None,
+            Arc::clone(&self.ticker_stop),
+        );
         start_root_indexing(Arc::clone(&self.primary));
     }
 
@@ -2380,12 +2420,20 @@ impl AstrolabeServer {
         })
     }
 
+    /// Route a tool call to its session, stamping the idle clock.
+    /// Native facade: wake the primary index if it was unloaded by hard
+    /// hibernation. No-op in every other state.
+    #[cfg(feature = "native")]
+    pub(crate) fn native_wake_if_hibernated(&self) {
+        self.primary.wake_if_hibernated();
+    }
+
     /// Native facade: readiness of the primary index.
     /// `0` = building, `1` = ready, `2` = failed (with message).
     #[cfg(feature = "native")]
     pub(crate) fn native_primary_state(&self) -> (u8, Option<String>) {
         match &*self.primary.state.read().unwrap_or_else(|e| e.into_inner()) {
-            IndexState::Building => (0, None),
+            IndexState::Building | IndexState::Hibernated => (0, None),
             IndexState::Ready(_) => (1, None),
             IndexState::Failed(err) => (2, Some(err.clone())),
         }
@@ -2469,11 +2517,22 @@ impl AstrolabeServer {
     }
 
     fn session_for(&self, hint: &str) -> Result<Arc<RootSession>, CallToolResult> {
+        let session = self.route_session_for(hint)?;
+        session.touch();
+        Ok(session)
+    }
+
+    /// Route without stamping: pre-call state probes (`building_session`) use
+    /// this, so deciding how to answer does not count as activity.
+    fn route_session_for(&self, hint: &str) -> Result<Arc<RootSession>, CallToolResult> {
         if hint.is_empty() {
             return Ok(Arc::clone(&self.primary));
         }
         let hint_path = Path::new(hint);
-        if hint_path == self.primary.root.as_path() || self.primary.root.to_string_lossy() == hint {
+        if astrolabe_core::paths::paths_eq_normalized(hint_path, self.primary.root.as_path())
+            || self.primary.root.to_string_lossy() == hint
+            || astrolabe_core::paths::display_path(&self.primary.root) == hint
+        {
             return Ok(Arc::clone(&self.primary));
         }
         if let Some(dispatch) = &self.dispatch {
@@ -2496,9 +2555,21 @@ impl AstrolabeServer {
         Ok(Arc::clone(&self.primary))
     }
 
+    /// Wake a hard-hibernated index and wait briefly (bounded) for its warm
+    /// start, so every indexed tool path gets a served snapshot instead of a
+    /// "building" answer. Also joins an in-flight warm wake.
+    fn wake_if_hibernated(&self, session: &Arc<RootSession>) {
+        session.ensure_awake();
+    }
+
     /// Resolve optional per-call `index_root`, then fall back to multi-project
     /// `root` / path / task routing. `index_root` wins and keeps `path` /
     /// `path_filter` relative to that directory.
+    ///
+    /// When the override directory sits under an already-active session root
+    /// (startup primary or a previously activated root), that parent session is
+    /// reused and the override is folded into `path` / `path_filter` so a
+    /// subdirectory argument does not kick off a second cold build.
     fn resolve_call_root(
         &self,
         index_root: Option<&str>,
@@ -2511,11 +2582,40 @@ impl AstrolabeServer {
             let resolved = match resolve_call_index_root(raw) {
                 Ok(p) => p,
                 Err(msg) => {
-                    return Err(self.finish(text_error(format!("{msg}\nconfidence: unknown"))))
+                    return Err(self.finish(text_error(format!(
+                        "{msg}
+confidence: unknown"
+                    ))))
                 }
             };
+            if let Some((session, rel_under)) = self.find_covering_session(&resolved) {
+                let caller_path = match path_relative_to_index_root(&resolved, path) {
+                    Ok(path) => path,
+                    Err(message) => return Err(self.finish(text_error(message))),
+                };
+                let keep_path = nest_path_under_rel(caller_path.as_deref(), &rel_under);
+                let note = if rel_under.as_os_str().is_empty() {
+                    None
+                } else {
+                    Some(format!(
+                        "note: reusing active index at {}; input path/path_filter and missing-path corrections remain relative to requested index_root={}. Result file paths are relative to the active index root.",
+                        astrolabe_core::paths::display_path(&session.root),
+                        astrolabe_core::paths::display_path(&resolved)
+                    ))
+                };
+                // Touch residency when the covering session lives in a dispatcher.
+                let _ = self.ensure_index_root_session(&session.root)?;
+                return Ok(RouteOutcome {
+                    hint: session.root.to_string_lossy().into_owned(),
+                    path: keep_path,
+                    note,
+                });
+            }
+            let keep_path = match path_relative_to_index_root(&resolved, path) {
+                Ok(path) => path,
+                Err(message) => return Err(self.finish(text_error(message))),
+            };
             let session = self.ensure_index_root_session(&resolved)?;
-            let keep_path = path.map(str::to_string).filter(|p| !p.is_empty());
             return Ok(RouteOutcome {
                 hint: session.root.to_string_lossy().into_owned(),
                 path: keep_path,
@@ -2525,12 +2625,56 @@ impl AstrolabeServer {
         self.resolve_route(root, path, text)
     }
 
+    /// Longest active session root that equals or contains `resolved`.
+    ///
+    /// Returns the session and the path of `resolved` relative to that root
+    /// (empty when equal). Used so `index_root=<subdir>` reuses the parent
+    /// project index instead of starting a parallel cold build.
+    fn find_covering_session(&self, resolved: &Path) -> Option<(Arc<RootSession>, PathBuf)> {
+        let mut best: Option<(Arc<RootSession>, PathBuf)> = None;
+        let mut consider = |session: &Arc<RootSession>| {
+            let Some(rel) = astrolabe_core::paths::strip_prefix_normalized(&session.root, resolved)
+            else {
+                return;
+            };
+            let better = match &best {
+                None => true,
+                Some((cur, _)) => {
+                    astrolabe_core::paths::path_norm_key(&session.root).len()
+                        > astrolabe_core::paths::path_norm_key(&cur.root).len()
+                }
+            };
+            if better {
+                best = Some((Arc::clone(session), rel));
+            }
+        };
+        consider(&self.primary);
+        let mut scan_dispatch = |dispatch: &DispatchState| {
+            let map = dispatch.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            for session in map.values() {
+                consider(session);
+            }
+        };
+        if let Some(dispatch) = &self.dispatch {
+            scan_dispatch(dispatch);
+        }
+        if let Some(dispatch) = self
+            .dynamic_roots
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            scan_dispatch(dispatch);
+        }
+        best
+    }
+
     /// Open or reuse a [`RootSession`] for an absolute index root.
     fn ensure_index_root_session(
         &self,
         resolved: &Path,
     ) -> Result<Arc<RootSession>, CallToolResult> {
-        if resolved == self.primary.root.as_path() {
+        if astrolabe_core::paths::paths_eq_normalized(resolved, self.primary.root.as_path()) {
             return Ok(Arc::clone(&self.primary));
         }
         if let Some(dispatch) = &self.dispatch {
@@ -2543,7 +2687,11 @@ impl AstrolabeServer {
                 self.primary.knobs.clone(),
                 self.cache_budget_bytes,
             );
-            start_idle_ticker(Arc::clone(&dispatch), Arc::clone(&self.ticker_stop));
+            start_idle_ticker(
+                None,
+                Some(Arc::clone(&dispatch)),
+                Arc::clone(&self.ticker_stop),
+            );
             *slot = Some(dispatch);
         }
         let dispatch = Arc::clone(slot.as_ref().expect("just inserted"));
@@ -2551,7 +2699,7 @@ impl AstrolabeServer {
         Ok(activate_absolute_root(&dispatch, resolved))
     }
 
-    /// Remember a single unambiguous symbol hit for later find_references.
+    /// Remember a single unambiguous symbol hit for later find_refs.
     fn remember_symbol_anchor(
         &self,
         root: &Path,
@@ -2588,7 +2736,7 @@ impl AstrolabeServer {
         let Some(file) = index.file(s.file) else {
             return;
         };
-        // Index lines are 1-based; find_references line is 0-based.
+        // Index lines are 1-based; find_refs line is 0-based.
         let line = s.start_line.saturating_sub(1);
         self.remember_symbol_anchor(root, &s.name, file.path.as_str(), Some(line));
     }
@@ -2662,12 +2810,17 @@ impl AstrolabeServer {
         }
     }
 
-    /// The routed session, when its index is still in the cold build.
+    /// The routed session, when its index is not serving yet (cold build, or
+    /// a hard-hibernated index that has to warm-start). A hibernated index is
+    /// woken here (bounded) so `search_code` can answer from the restored
+    /// index; if the warm start does not finish in time, the on-disk scan
+    /// fallback still answers instead of a "retry shortly" error.
     fn building_session(&self, hint: &str) -> Option<Arc<RootSession>> {
         let session = self.session_for(hint).ok()?;
+        session.ensure_awake();
         let building = matches!(
             &*session.state.read().unwrap_or_else(|e| e.into_inner()),
-            IndexState::Building
+            IndexState::Building | IndexState::Hibernated
         );
         building.then_some(session)
     }
@@ -2684,6 +2837,8 @@ impl AstrolabeServer {
         const MAX_SECONDS: u64 = 20;
         let mut params = params.clone();
         let regex_downgraded = apply_code_fragment_literal(&mut params);
+        params.path_filter =
+            normalize_filter_for_root(&session.root, params.path_filter.as_deref());
         let sensitive = search_shape::literal_case_sensitive(
             &params.query,
             params.regex,
@@ -2700,7 +2855,7 @@ impl AstrolabeServer {
         let started = std::time::Instant::now();
         let scanned = astrolabe_core::scan::scan(
             &session.root,
-            &crate::session::scan_options(&session.knobs),
+            &astrolabe_core::scan::ScanOptions::default(),
         );
         let mut total = 0usize;
         let mut files_hit = 0usize;
@@ -2783,7 +2938,7 @@ impl AstrolabeServer {
     }
 
     /// Index access without a write barrier and without the per-query
-    /// coverage note: for `get_languages`, whose own body already carries the
+    /// coverage note: for `get_lang`, whose own body already carries the
     /// full coverage block.
     fn with_index_without_coverage_note(
         &self,
@@ -2815,6 +2970,9 @@ impl AstrolabeServer {
             Ok(s) => s,
             Err(err) => return err,
         };
+        // A hibernated index has no snapshot to serve: warm-start it first
+        // (bounded), then run the ordinary freshness barrier on the result.
+        self.wake_if_hibernated(&session);
         let effect = if barrier {
             run_barrier(&session)
         } else {
@@ -2832,12 +2990,20 @@ impl AstrolabeServer {
             IndexState::Building => Snap::Building,
             IndexState::Failed(error) => Snap::Failed(error.clone()),
             IndexState::Ready(index) => Snap::Ready(Arc::clone(index)),
+            // Still hibernated: the wake either did not start (cooldown) or
+            // did not finish inside `WAKE_WAIT`. Answer like a cold build.
+            IndexState::Hibernated => Snap::Building,
         };
         let result = match snap {
-            Snap::Building => self.finish_at(
-                &session.root,
-                text_error("Index is building in the background; MCP handshake is done — retry shortly. confidence: unknown"),
-            ),
+            Snap::Building => {
+                let root_disp = astrolabe_core::paths::display_path(&session.root);
+                self.finish_at(
+                    &session.root,
+                    text_error(format!(
+                        "Index is building in the background for {root_disp}; MCP handshake is done — retry shortly. confidence: unknown"
+                    )),
+                )
+            }
             Snap::Failed(error) => self.finish_at(
                 &session.root,
                 text_error(format!("Index build failed: {error}\nconfidence: unknown")),
@@ -2876,6 +3042,7 @@ impl AstrolabeServer {
             Ok(s) => s,
             Err(err) => return err,
         };
+        self.wake_if_hibernated(&session);
         let effect = if barrier {
             run_barrier(&session)
         } else {
@@ -2888,7 +3055,7 @@ impl AstrolabeServer {
         }
     }
 
-    /// The coordinate legend of find_references / goto_definition is the
+    /// The coordinate legend of find_refs / goto_def is the
     /// same sentence every time (seven times in one A/B run); keep the
     /// first one in the session and drop the rest.
     fn coord_note_once(&self, mut result: CallToolResult) -> CallToolResult {
@@ -2974,6 +3141,7 @@ impl AstrolabeServer {
         let Ok(session) = self.session_for(hint) else {
             return run();
         };
+        self.wake_if_hibernated(&session);
         let _ = run_barrier(&session);
         let Some(stamp) = Self::stamp_of(&session) else {
             return run();
@@ -3016,7 +3184,8 @@ impl AstrolabeServer {
     }
 
     fn finish_at(&self, root: &Path, mut result: CallToolResult) -> CallToolResult {
-        let root = root.display().to_string();
+        // Strip Windows verbatim prefix so agents see ordinary `C:\…` in index_root lines.
+        let root = astrolabe_core::paths::display_path(root);
         let mut first_text = None;
         let mut content = Vec::with_capacity(result.content.len());
         for (index, block) in result.content.into_iter().enumerate() {
@@ -3133,6 +3302,7 @@ const UNADVERTISED_PARAMS: &[&str] = &[
     "kind",
     "substring",
     "dedup",
+    "agent_id",
     "context_lines",
     "count_only",
     "exclude",
@@ -3245,6 +3415,98 @@ pub(crate) mod cancel {
                 .as_ref()
                 .is_some_and(|flag| flag.load(Ordering::Relaxed))
         })
+    }
+}
+/// Session body / search digest dedup is scoped per agent so a parent and its
+/// subagents (or sibling Task agents) sharing one MCP stdio process do not
+/// starve each other of definition bodies.
+///
+/// Identity sources (first non-empty wins):
+/// 1. tool argument `agent_id` / `agentId` (tests + hosts that pass it in args;
+///    Claude Code PreToolUse hooks inject this when the payload carries agent id)
+/// 2. request `_meta` keys used by Claude Code / common hosts:
+///    `claudecode/agentId`, `agent_id`, `agentId`, `agent`
+///
+/// Missing / empty identity disables body and search-digest dedup for that call
+/// (always FULL). Only a known agent shard records and skips repeats — never a
+/// shared `""` bucket that would starve siblings when the host omits identity.
+mod dedup_agent {
+    use std::cell::RefCell;
+
+    use rmcp::model::MetaObject;
+    use serde_json::Map;
+
+    use crate::hooks::sanitize_agent_component;
+
+    thread_local! {
+        static CURRENT: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+
+    pub(super) fn scope<R>(agent: String, f: impl FnOnce() -> R) -> R {
+        CURRENT.with(|c| {
+            let prev = std::mem::replace(&mut *c.borrow_mut(), agent);
+            let out = f();
+            *c.borrow_mut() = prev;
+            out
+        })
+    }
+
+    pub(super) fn current() -> String {
+        CURRENT.with(|c| c.borrow().clone())
+    }
+
+    /// True when the current call has a non-empty agent shard (dedup allowed).
+    pub(super) fn known() -> bool {
+        CURRENT.with(|c| !c.borrow().is_empty())
+    }
+
+    fn from_str(raw: &str) -> Option<String> {
+        let t = raw.trim();
+        if t.is_empty() {
+            return None;
+        }
+        Some(sanitize_agent_component(t))
+    }
+
+    fn from_value(v: &serde_json::Value) -> Option<String> {
+        v.as_str().and_then(from_str)
+    }
+
+    fn from_map(map: &Map<String, serde_json::Value>) -> Option<String> {
+        for key in ["agent_id", "agentId", "agent"] {
+            if let Some(s) = map.get(key).and_then(from_value) {
+                return Some(s);
+            }
+        }
+        None
+    }
+
+    fn from_meta(meta: &MetaObject) -> Option<String> {
+        for key in ["claudecode/agentId", "agent_id", "agentId", "agent"] {
+            if let Some(s) = meta.get(key).and_then(from_value) {
+                return Some(s);
+            }
+        }
+        None
+    }
+
+    /// Prefer an explicit tool arg, then MCP request `_meta`.
+    /// Empty string means "unknown agent" — callers must not dedup on it.
+    pub(super) fn extract(
+        meta: Option<&MetaObject>,
+        arguments: Option<&Map<String, serde_json::Value>>,
+    ) -> String {
+        if let Some(args) = arguments {
+            if let Some(s) = from_map(args) {
+                return s;
+            }
+        }
+        if let Some(m) = meta {
+            if let Some(s) = from_meta(m) {
+                return s;
+            }
+        }
+        String::new()
     }
 }
 
@@ -3381,11 +3643,75 @@ struct RouteOutcome {
 fn relativize_to_child(child: &Path, path: &str) -> String {
     let p = Path::new(path.trim());
     if p.is_absolute() {
-        if let Ok(rel) = p.strip_prefix(child) {
+        if let Some(rel) = astrolabe_core::paths::strip_prefix_normalized(child, p) {
             return rel.to_string_lossy().replace('\\', "/");
         }
     }
     path.to_string()
+}
+
+/// Validate and normalize in the requested root BEFORE translating into a
+/// reused index. An absolute filter cannot override the requested scope, and
+/// parent components must never become an accidental wider search.
+fn path_relative_to_index_root(root: &Path, path: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = path.map(str::trim).filter(|p| !p.is_empty()) else {
+        return Ok(None);
+    };
+    let slashed = raw.replace('\\', "/");
+    let absolute = slashed.starts_with('/') || slashed.as_bytes().get(1) == Some(&b':');
+    if absolute && !astrolabe_core::paths::is_under_normalized(root, Path::new(raw)) {
+        return Err(format!(
+            "path/path_filter '{raw}' is outside index_root={}; keep index_root unchanged and use a path within it.",
+            astrolabe_core::paths::display_path(root)
+        ));
+    }
+    let relative = astrolabe_core::paths::normalize_path_filter_under(root, raw);
+    if relative.split('/').any(|component| component == "..") {
+        return Err(
+            "path/path_filter must not contain '..' components; use a path within index_root."
+                .into(),
+        );
+    }
+    Ok((!relative.is_empty() && relative != ".").then_some(relative))
+}
+
+/// Fold a caller `path` / `path_filter` (relative to an override `index_root`)
+/// under the relative path of that override inside a reused parent session.
+///
+/// When `rel_under` is empty the override equalled the parent root and the
+/// caller path is kept as-is (still with `/` separators: array `path_filter`
+/// matching is byte-wise against `/`-normalized index paths). When the caller
+/// omitted path, `rel_under` itself becomes the scoped filter (so
+/// `index_root=<subdir>` still narrows results).
+fn nest_path_under_rel(path: Option<&str>, rel_under: &Path) -> Option<String> {
+    let rel = rel_under.to_string_lossy().replace('\\', "/");
+    let caller = path
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| p.replace('\\', "/"));
+    match (caller.as_deref(), rel.as_str()) {
+        (Some(p), "") => Some(p.to_string()),
+        (None, "") => None,
+        (None, r) => Some(r.to_string()),
+        (Some(p), r) => {
+            let joined = Path::new(r).join(p);
+            Some(joined.to_string_lossy().replace('\\', "/"))
+        }
+    }
+}
+
+/// Bring a caller `path_filter` into the repo's own spelling before matching:
+/// `/` separators, no leading `./`, and absolute paths under `root` trimmed to
+/// repo-relative.
+///
+/// Index paths are always `/`-separated repo-relative strings, so a Windows
+/// client sending `crates\astrolabe-mcp` (or an absolute
+/// `C:\repo\crates\astrolabe-mcp`) would otherwise match nothing. Empty after
+/// normalization (filter == root) means "whole repo".
+fn normalize_filter_for_root(root: &Path, filter: Option<&str>) -> Option<String> {
+    let filter = filter.map(str::trim).filter(|f| !f.is_empty())?;
+    let normalized = astrolabe_core::paths::normalize_path_filter_under(root, filter);
+    (!normalized.is_empty()).then_some(normalized)
 }
 
 fn top_unindexed_exts(
@@ -3450,27 +3776,43 @@ fn format_find_symbol_unindexed_hint(
 #[tool_router]
 impl AstrolabeServer {
     #[tool(description = "When the task is unclear: task-ranked related files and symbols.")]
-    pub(crate) fn resolve_context(
+    pub(crate) fn resolve_contx(
         &self,
         Parameters(params): Parameters<ResolveContextParams>,
     ) -> CallToolResult {
-        let route = match self.resolve_call_root(
-            params.index_root.as_deref(),
-            params.root.as_deref(),
-            params.path_filter.as_deref(),
-            Some(&params.task_description),
-        ) {
-            Ok(route) => route,
-            Err(err) => return err,
+        let agent_override = params
+            .agent_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(crate::hooks::sanitize_agent_component);
+        let run = || {
+            let route = match self.resolve_call_root(
+                params.index_root.as_deref(),
+                params.root.as_deref(),
+                params.path_filter.as_deref(),
+                Some(&params.task_description),
+            ) {
+                Ok(route) => route,
+                Err(err) => return err,
+            };
+            let mut params = params;
+            params.path_filter = route.path.clone();
+            let result = self.resolve_contx_inner(params, &route.hint);
+            Self::with_route_note(result, &route.note)
         };
-        let mut params = params;
-        params.path_filter = route.path.clone();
-        let result = self.resolve_context_inner(params, &route.hint);
-        Self::with_route_note(result, &route.note)
+        match agent_override {
+            Some(agent) => dedup_agent::scope(agent, run),
+            None => run(),
+        }
     }
 
-    fn resolve_context_inner(&self, params: ResolveContextParams, hint: &str) -> CallToolResult {
+    fn resolve_contx_inner(&self, mut params: ResolveContextParams, hint: &str) -> CallToolResult {
         self.with_fresh_index(hint, |session, index| {
+            // Windows clients may send `crates\astrolabe-mcp` (or an absolute
+            // path): match against `/`-separated index paths.
+            params.path_filter =
+                normalize_filter_for_root(&session.root, params.path_filter.as_deref());
             let graph = index.graph();
             let kind = classify_task(&params.task_description);
             let compact_task = matches!(kind, TaskKind::Count | TaskKind::Refs);
@@ -3486,7 +3828,7 @@ impl AstrolabeServer {
             // Repeat call with the same arguments on an unchanged index:
             // short pointer instead of resending the whole map.
             let dedup_on = session_dedup_enabled(params.dedup);
-            let call = self.call_seq.fetch_add(1, Ordering::Relaxed) + 1;
+            let call = self.next_call();
             let key = format!(
                 "{}|resolve|{}|{}|{}|{}",
                 session.root.display(),
@@ -3497,31 +3839,16 @@ impl AstrolabeServer {
             );
             let generation = index.generation();
             if dedup_on {
-                let earlier = {
-                    let mut map = self.sent_ranges.lock().unwrap_or_else(|e| e.into_inner());
-                    match map.get(&key) {
-                        Some((g, c)) if *g == generation => Some(*c),
-                        _ => {
-                            map.insert(key.clone(), (generation, call));
-                            None
-                        }
-                    }
-                };
+                let earlier = self.claim_result_key(&key, generation, call);
                 if let Some(c) = earlier {
-                    let digest = self
-                        .search_digests
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .get(&key)
-                        .cloned()
-                        .unwrap_or_default();
+                    let digest = self.digest_get(&key);
                     let body = format!(
-                        "Same resolve_context already returned on tool call #{c} this session (index unchanged); not resending full text.\n{digest}If you did not see that result (e.g. subtask or compressed context), pass dedup=false to refetch.\n{}",
+                        "Same resolve_contx already returned on tool call #{c} this session (index unchanged); not resending full text.\n{digest}If you did not see that result (e.g. subtask or compressed context), pass dedup=false to refetch.\n{}",
                         next_step_hint(&params.task_description)
                     );
                     return self.result_on(
                         &session.root,
-                        "resolve_context",
+                        "resolve_contx",
                         body,
                         json!({"deduplicated":true,"earlier_call":c,"budget_tokens":params.budget_tokens}),
                         Some(params.budget_tokens),
@@ -3574,15 +3901,12 @@ impl AstrolabeServer {
                 } else {
                     format!("First-result digest: top related files {}\n", top_files.join(", "))
                 };
-                self.search_digests
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(key, digest);
+                self.digest_put(key, digest);
             }
             let conf_label = if page.unmatched { "unknown" } else { "scoped" };
             self.result_on(
                 &session.root,
-                "resolve_context",
+                "resolve_contx",
                 body,
                 json!({"confidence":conf_label,"matched":!page.unmatched,"budget_tokens":budget,"offset":params.offset,"total":page.total}),
                 Some(budget),
@@ -3597,10 +3921,10 @@ impl AstrolabeServer {
     // `precise_tools`, which reports an actionable install hint (and
     // `confidence: unknown`) when no server is available — never an empty
     // result that reads like "there are no references".
-    #[tool(description = crate::precise_tools::FIND_REFERENCES_DESC)]
-    pub(crate) fn find_references(
+    #[tool(description = crate::precise_tools::FIND_REFS_DESC)]
+    pub(crate) fn find_refs(
         &self,
-        Parameters(mut params): Parameters<crate::precise_tools::FindReferencesParams>,
+        Parameters(mut params): Parameters<crate::precise_tools::FindRefsParams>,
     ) -> CallToolResult {
         let route = match self.resolve_call_root(
             params.index_root.as_deref(),
@@ -3613,7 +3937,7 @@ impl AstrolabeServer {
         };
         params.path = route.path;
         // Inherit path from this session's last unambiguous symbol hit when
-        // the model omitted it (common after find_symbol / goto_definition).
+        // the model omitted it (common after find_symbol / goto_def).
         let mut inherit_note: Option<String> = None;
         if params.path.is_none() {
             if let Ok(session) = self.session_for(&route.hint) {
@@ -3639,7 +3963,7 @@ impl AstrolabeServer {
             }
         }
         self.with_precise(&route.hint, true, move |session| {
-            let mut result = self.coord_note_once(crate::precise_tools::run_find_references(
+            let mut result = self.coord_note_once(crate::precise_tools::run_find_refs(
                 params,
                 session.precise.as_ref(),
             ));
@@ -3650,10 +3974,10 @@ impl AstrolabeServer {
         })
     }
 
-    #[tool(description = crate::precise_tools::GOTO_DEFINITION_DESC)]
-    pub(crate) fn goto_definition(
+    #[tool(description = crate::precise_tools::GOTO_DEF_DESC)]
+    pub(crate) fn goto_def(
         &self,
-        Parameters(mut params): Parameters<crate::precise_tools::GotoDefinitionParams>,
+        Parameters(mut params): Parameters<crate::precise_tools::GotoDefParams>,
     ) -> CallToolResult {
         let route = match self.resolve_call_root(
             params.index_root.as_deref(),
@@ -3666,7 +3990,7 @@ impl AstrolabeServer {
         };
         params.path = route.path.unwrap_or_default();
         self.with_precise(&route.hint, true, move |session| {
-            // Use site is enough for a later find_references without path
+            // Use site is enough for a later find_refs without path
             // (fix_path keeps a file that contains the symbol).
             if let Some(sym) = params
                 .symbol
@@ -3676,17 +4000,17 @@ impl AstrolabeServer {
             {
                 self.remember_symbol_anchor(&session.root, sym, &params.path, params.line);
             }
-            self.coord_note_once(crate::precise_tools::run_goto_definition(
+            self.coord_note_once(crate::precise_tools::run_goto_def(
                 params,
                 session.precise.as_ref(),
             ))
         })
     }
 
-    #[tool(description = crate::precise_tools::GET_DIAGNOSTICS_DESC)]
-    pub(crate) fn get_diagnostics(
+    #[tool(description = crate::precise_tools::GET_DIAG_DESC)]
+    pub(crate) fn get_diag(
         &self,
-        Parameters(mut params): Parameters<crate::precise_tools::GetDiagnosticsParams>,
+        Parameters(mut params): Parameters<crate::precise_tools::GetDiagParams>,
     ) -> CallToolResult {
         let route = match self.resolve_call_root(
             params.index_root.as_deref(),
@@ -3700,11 +4024,7 @@ impl AstrolabeServer {
         params.path = route.path.unwrap_or_default();
         let toolchain = params.toolchain;
         self.with_precise(&route.hint, false, move |session| {
-            crate::precise_tools::run_get_diagnostics_with(
-                params,
-                session.precise.as_ref(),
-                toolchain,
-            )
+            crate::precise_tools::run_get_diag_with(params, session.precise.as_ref(), toolchain)
         })
     }
 
@@ -3716,22 +4036,36 @@ impl AstrolabeServer {
         Parameters(mut params): Parameters<QueryParams>,
     ) -> CallToolResult {
         let signature = format!("{params:?}");
-        // The query is a symbol name, never a routing hint.
-        let route = match self.resolve_call_root(
-            params.index_root.as_deref(),
-            params.root.as_deref(),
-            params.path_filter.as_deref(),
-            None,
-        ) {
-            Ok(route) => route,
-            Err(err) => return err,
+        // Explicit agent_id on the tool args overrides (and covers unit tests that
+        // call find_symbol without going through call_tool / request `_meta`).
+        let agent_override = params
+            .agent_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(crate::hooks::sanitize_agent_component);
+        let run = || {
+            // The query is a symbol name, never a routing hint.
+            let route = match self.resolve_call_root(
+                params.index_root.as_deref(),
+                params.root.as_deref(),
+                params.path_filter.as_deref(),
+                None,
+            ) {
+                Ok(route) => route,
+                Err(err) => return err,
+            };
+            params.path_filter = route.path.clone();
+            params.root = (!route.hint.is_empty()).then(|| route.hint.clone());
+            let result = self.guarded("find_symbol", &route.hint, &signature, || {
+                self.find_symbol_inner(params)
+            });
+            Self::with_route_note(result, &route.note)
         };
-        params.path_filter = route.path.clone();
-        params.root = (!route.hint.is_empty()).then(|| route.hint.clone());
-        let result = self.guarded("find_symbol", &route.hint, &signature, || {
-            self.find_symbol_inner(params)
-        });
-        Self::with_route_note(result, &route.note)
+        match agent_override {
+            Some(agent) => dedup_agent::scope(agent, run),
+            None => run(),
+        }
     }
 
     /// Pages of one `find_symbol` query are cut from a ranking recomputed on
@@ -3759,7 +4093,7 @@ impl AstrolabeServer {
         })
     }
 
-    /// `resolve_context` pages are cut from a ranking recomputed per call; see
+    /// `resolve_contx` pages are cut from a ranking recomputed per call; see
     /// `symbol_page_drift_note`.
     fn context_page_drift_note(
         &self,
@@ -3782,7 +4116,7 @@ impl AstrolabeServer {
         })
     }
 
-    fn find_symbol_inner(&self, params: QueryParams) -> CallToolResult {
+    fn find_symbol_inner(&self, mut params: QueryParams) -> CallToolResult {
         if params.query.trim().is_empty() {
             return text_error(
                 "find_symbol needs a non-empty query (symbol name, substring, or 'Class/method' path); a blank query does not return all symbols.".to_string(),
@@ -3791,8 +4125,17 @@ impl AstrolabeServer {
         if looks_like_filesystem_path(&params.query) {
             return text_error(filesystem_path_as_query_error(&params.query));
         }
-        self.with_fresh_index(params.root.as_deref().unwrap_or(""), |session, index| {
-            if let Some(message) = path_filter_error(index, params.path_filter.as_deref()) {
+        let hint = params.root.clone().unwrap_or_default();
+        self.with_fresh_index(&hint, |session, index| {
+            // Windows clients may send `crates\astrolabe-mcp` (or an absolute
+            // path): match against `/`-separated index paths.
+            params.path_filter =
+                normalize_filter_for_root(&session.root, params.path_filter.as_deref());
+            if let Some(message) = path_filter_error(
+                index,
+                params.path_filter.as_deref(),
+                params.index_root.as_deref(),
+            ) {
                 return self.finish_at(&session.root, text_error(message));
             }
             let kind = match params.kind.as_deref() {
@@ -3921,7 +4264,7 @@ impl AstrolabeServer {
                     (symbol_line(symbol, path), idx)
                 })
                 .collect();
-            // One exact hit → later find_references can omit path.
+            // One exact hit → later find_refs can omit path.
             self.remember_if_unique_symbol_hit(&session.root, typed, index, &hits);
             let total = hits.len();
             let offset = params.offset.min(total);
@@ -3986,7 +4329,7 @@ impl AstrolabeServer {
             }
             body.push_str(&implementors);
             body.push_str(&folded_note);
-            // 零命中时显式声明（对齐 find_references 空结果约定），并跳过
+            // 零命中时显式声明（对齐 find_refs 空结果约定），并跳过
             // include_body 附加，避免误导性的"无可提取的符号体"。
             if hits.is_empty() {
                 body.push_str("(no matching symbols)\n");
@@ -4012,13 +4355,15 @@ impl AstrolabeServer {
                 }
             }
             if params.include_body && !hits.is_empty() {
+                let page = &hits[offset..];
+                let kept = &page[..kept_count.min(page.len())];
                 self.attach_include_bodies(
                     &session.root,
                     index,
                     &mut body,
-                    &hits[offset..],
-                    kept_count,
+                    kept,
                     params.budget_tokens,
+                    params.dedup,
                 );
             }
             self.result_on(
@@ -4047,38 +4392,55 @@ impl AstrolabeServer {
         Parameters(mut params): Parameters<SearchParams>,
     ) -> CallToolResult {
         let signature = format!("{params:?}");
-        // The query is a search string, never a routing hint.
-        let route = match self.resolve_call_root(
-            params.index_root.as_deref(),
-            params.root.as_deref(),
-            params.path_filter.as_deref(),
-            None,
-        ) {
-            Ok(route) => route,
-            Err(err) => return err,
+        let agent_override = params
+            .agent_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(crate::hooks::sanitize_agent_component);
+        let run = || {
+            // The query is a search string, never a routing hint.
+            let route = match self.resolve_call_root(
+                params.index_root.as_deref(),
+                params.root.as_deref(),
+                params.path_filter.as_deref(),
+                None,
+            ) {
+                Ok(route) => route,
+                Err(err) => return err,
+            };
+            params.path_filter = route.path.clone();
+            params.root = (!route.hint.is_empty()).then(|| route.hint.clone());
+            if let Some(building) = self.building_session(&route.hint) {
+                let result = self.search_while_building(&building, &params);
+                return Self::with_route_note(result, &route.note);
+            }
+            let result = self.guarded("search_code", &route.hint, &signature, || {
+                self.search_code_inner(params)
+            });
+            Self::with_route_note(result, &route.note)
         };
-        params.path_filter = route.path.clone();
-        params.root = (!route.hint.is_empty()).then(|| route.hint.clone());
-        if let Some(building) = self.building_session(&route.hint) {
-            let result = self.search_while_building(&building, &params);
-            return Self::with_route_note(result, &route.note);
+        match agent_override {
+            Some(agent) => dedup_agent::scope(agent, run),
+            None => run(),
         }
-        let result = self.guarded("search_code", &route.hint, &signature, || {
-            self.search_code_inner(params)
-        });
-        Self::with_route_note(result, &route.note)
     }
 
     fn search_code_inner(&self, mut params: SearchParams) -> CallToolResult {
         let regex_downgraded = apply_code_fragment_literal(&mut params);
-        self.with_fresh_index(
-            params.root.as_deref().unwrap_or(""),
-            |session, index| {
-                // A filter that only hits non-code text files (docs/, *.toml …)
-                // is valid here: those files are searched as [text-only].
-                // Computed once per call; the path_filter view, the text-only
-                // scan and `data_hits_outside` all derive from it.
-                let all_text_paths = index.text_only_paths(None);
+        // `hint` must be its own binding: the closure mutates `params`, so it
+        // cannot also borrow `params.root`.
+        let hint = params.root.clone().unwrap_or_default();
+        self.with_fresh_index(&hint, |session, index| {
+            // Windows clients may send `crates\astrolabe-mcp` (or an absolute
+            // path): match against `/`-separated index paths.
+            params.path_filter =
+                normalize_filter_for_root(&session.root, params.path_filter.as_deref());
+            // A filter that only hits non-code text files (docs/, *.toml …)
+            // is valid here: those files are searched as [text-only].
+            // Computed once per call; the path_filter view, the text-only
+            // scan and `data_hits_outside` all derive from it.
+            let all_text_paths = index.text_only_paths(None);
                 let filter_text_paths: Vec<&RelPath> = all_text_paths
                     .iter()
                     .copied()
@@ -4090,7 +4452,11 @@ impl AstrolabeServer {
                     })
                     .collect();
                 if filter_text_paths.is_empty() {
-                    if let Some(message) = path_filter_error(index, params.path_filter.as_deref()) {
+                    if let Some(message) = path_filter_error(
+                        index,
+                        params.path_filter.as_deref(),
+                        params.index_root.as_deref(),
+                    ) {
                         return text_error(message);
                     }
                 }
@@ -4117,16 +4483,6 @@ impl AstrolabeServer {
                 ) {
                     Ok(matcher) => matcher,
                     Err(error) => return text_error(invalid_regex_message(error)),
-                };
-                // Whole-buffer candidate lines (a superset of the lines the
-                // per-line matchers accept; see `line_scan`). With smart case
-                // the case-insensitive variant covers both matchers.
-                let line_scanner = if variant_matcher.is_some() {
-                    crate::line_scan::LineScanner::new(&regex::escape(&params.query), true)
-                } else if params.regex {
-                    crate::line_scan::LineScanner::new(&params.query, !sensitive)
-                } else {
-                    crate::line_scan::LineScanner::new(&regex::escape(&params.query), !sensitive)
                 };
                 if let Some(mode) = params.aggregate.as_deref() {
                     if mode != "top" && mode != "dir" && mode != "file" {
@@ -4183,28 +4539,17 @@ impl AstrolabeServer {
                     let key = format!("{}|search|{probe:?}", session.root.display());
                     let generation = index.generation();
                     // A real, monotonically increasing tool-call ordinal.
-                    let call = self.call_seq.fetch_add(1, Ordering::Relaxed) + 1;
+                    let call = self.next_call();
                     search_call = Some(call);
                     dedup_key = Some(key.clone());
-                    let earlier = {
-                        let mut map = self.sent_ranges.lock().unwrap_or_else(|e| e.into_inner());
-                        match map.get(&key) {
-                            Some((g, c)) if *g == generation => Some(*c),
-                            _ => {
-                                map.insert(key.clone(), (generation, call));
-                                None
-                            }
-                        }
-                    };
+                    let earlier = self.claim_result_key(&key, generation, call);
                     if let Some(c) = earlier {
-                        let digest = self
-                            .search_digests
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .get(&key)
-                            .cloned()
-                            .map(|d| format!("First-result digest: {d}\n"))
-                            .unwrap_or_default();
+                        let digest = self.digest_get(&key);
+                        let digest = if digest.is_empty() {
+                            String::new()
+                        } else {
+                            format!("First-result digest: {digest}\n")
+                        };
                         let body = format!(
                             "{conf}{}Same query already returned on tool call #{c} this session (files unchanged); not resending full text.\n{digest}If you did not see that result (e.g. subtask or compressed/lost context), pass dedup=false to refetch.\n",
                             render_search_mode_header(params.regex, &params.query, regex_downgraded)
@@ -4247,6 +4592,7 @@ impl AstrolabeServer {
                         return None;
                     }
                     let (lines, cache_hit) = index.cached_lines(&session.file_cache, path)?;
+                    // Search and comment filtering both borrow the cached source text.
                     let mut out = FileScan {
                         hits: Vec::new(),
                         cache_hit,
@@ -4256,8 +4602,25 @@ impl AstrolabeServer {
                     };
                     // Lazy: the mask is only computed once a line matches.
                     let mut mask: Option<Option<Vec<Vec<bool>>>> = None;
-                    for line_no in line_scanner.candidates(&lines) {
-                        let line = &lines[line_no];
+                    // Literal matches cannot span lines (newline queries were
+                    // rejected above). Prefilter against the shared text once,
+                    // avoiding regex startup/pool contention on every line.
+                    // Regex queries retain exact per-line anchor semantics.
+                    let candidate_matcher = variant_matcher.as_ref().unwrap_or(&matcher);
+                    let mut buffer_matches = (!params.regex)
+                        .then(|| candidate_matcher.find_iter(lines.as_text()).peekable());
+                    let base = lines.as_text().as_ptr() as usize;
+                    for (line_no, line) in lines.iter().enumerate() {
+                        if let Some(candidates) = &mut buffer_matches {
+                            let start = line.as_ptr() as usize - base;
+                            let end = start + line.len();
+                            while candidates.peek().is_some_and(|hit| hit.end() <= start) {
+                                candidates.next();
+                            }
+                            if candidates.peek().is_none_or(|hit| hit.start() >= end) {
+                                continue;
+                            }
+                        }
                         if !matcher.is_match(line) {
                             if variant_matcher.as_ref().is_some_and(|v| v.is_match(line)) {
                                 let text = if out.variants.is_empty() {
@@ -4276,7 +4639,11 @@ impl AstrolabeServer {
                         }
                         if params.skip_comments {
                             let mask = mask.get_or_insert_with(|| {
-                                crate::code_mask::code_mask(path, &lines, strings_are_code)
+                                if crate::code_mask::has_lexer(path) {
+                                    crate::code_mask::code_mask(path, &lines.borrowed_lines(), strings_are_code)
+                                } else {
+                                    None
+                                }
                             });
                             if let Some(mask) = mask {
                                 let real = matcher
@@ -4365,8 +4732,7 @@ impl AstrolabeServer {
                                 let text = std::fs::read(session.root.join(rels[idx]))
                                     .map(|raw| String::from_utf8_lossy(&raw).into_owned())
                                     .unwrap_or_default();
-                                let lines: Vec<String> =
-                                    text.lines().map(str::to_string).collect();
+                                let lines: Vec<&str> = text.lines().collect();
                                 if let Some(mask) = crate::code_mask::code_mask(
                                     rels[idx],
                                     &lines,
@@ -4453,15 +4819,12 @@ impl AstrolabeServer {
                 if let Some(key) = &dedup_key {
                     if total > 0 {
                         let digest = search_digest(index, &matches);
-                        self.search_digests
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .insert(key.clone(), digest);
+                        self.digest_put(key.clone(), digest);
                     }
                 }
                 if counting {
                     if search_call.is_none() {
-                        self.call_seq.fetch_add(1, Ordering::Relaxed);
+                        let _ = self.next_call();
                     }
                     let body = format!(
                         "{conf}{}{}",
@@ -4587,11 +4950,11 @@ impl AstrolabeServer {
                     );
                 }
                 let context = search_context_lines(params.context_lines, total);
-                let mut file_lines = |hit: &SearchHit| -> Option<Arc<Vec<String>>> {
+                let mut file_lines = |hit: &SearchHit| -> Option<Arc<CachedLines>> {
                     if hit.text_only {
                         let text =
                             std::fs::read_to_string(session.root.join(&hit.path)).ok()?;
-                        Some(Arc::new(text.lines().map(str::to_string).collect()))
+                        Some(Arc::new(CachedLines::from_text(text)))
                     } else {
                         index
                             .cached_lines(&session.file_cache, &hit.path)
@@ -4605,7 +4968,7 @@ impl AstrolabeServer {
                 let dedup = session_dedup_enabled(params.dedup);
                 let generation = index.generation();
                 let call = search_call
-                    .unwrap_or_else(|| self.call_seq.fetch_add(1, Ordering::Relaxed) + 1);
+                    .unwrap_or_else(|| self.next_call());
                 let root_key = session.root.display().to_string();
                 let mut pending: Vec<(String, u32, u32)> = Vec::new();
                 let mut seen = |path: &str, start: u32, end: u32| -> Option<u64> {
@@ -4683,7 +5046,7 @@ impl AstrolabeServer {
                 body.push_str(&skip_note);
                     body.push_str(&data_note);
                 // 零命中时显式声明，区分"正常无匹配"与"服务故障/吞内容"
-                // (对齐 find_references 的 `未找到对 … 的引用.` 空结果约定).
+                // (对齐 find_refs 的 `未找到对 … 的引用.` 空结果约定).
                 let mut unindexed_hint = false;
                 if matches.is_empty() {
                     body.push_str("(no matching code lines)\n");
@@ -4752,21 +5115,100 @@ impl AstrolabeServer {
 
     /// Earlier call ordinal if this exact range was already returned this
     /// session at the same index generation (and dedup is on).
+    /// Next ordinal for the current dedup agent (used in skip messages).
+    fn next_call(&self) -> u64 {
+        let agent = dedup_agent::current();
+        let mut map = self.call_seq.lock().unwrap_or_else(|e| e.into_inner());
+        let n = map.entry(agent).or_insert(0);
+        *n += 1;
+        *n
+    }
+
+    /// Current agent's call counter (tests; default agent is `""`).
+    #[cfg(test)]
+    fn call_seq_current(&self) -> u64 {
+        let agent = dedup_agent::current();
+        self.call_seq
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&agent)
+            .copied()
+            .unwrap_or(0)
+    }
+
     fn lookup_sent(&self, key: &str, dedup: bool, generation: u64) -> Option<u64> {
-        let map = self.sent_ranges.lock().unwrap_or_else(|e| e.into_inner());
-        match map.get(key) {
-            Some((g, c)) if dedup && *g == generation => Some(*c),
+        // Unknown agent: never skip — missing identity must not share a shard.
+        if !dedup || !dedup_agent::known() {
+            return None;
+        }
+        let agent = dedup_agent::current();
+        let outer = self.sent_ranges.lock().unwrap_or_else(|e| e.into_inner());
+        match outer.get(&agent).and_then(|m| m.get(key)) {
+            Some((g, c)) if *g == generation => Some(*c),
             _ => None,
         }
     }
 
-    /// Remember a range as fully returned (dedup table + opt-in served log).
+    /// Remember a range as fully returned for the current agent.
+    /// No-op when agent identity is missing (avoids a shared `""` bucket).
     fn commit_sent(&self, root: &Path, path: &str, range: (u32, u32), generation: u64, call: u64) {
+        if !dedup_agent::known() {
+            return;
+        }
+        let agent = dedup_agent::current();
         let key = format!("{}|{path}:{}-{}", root.display(), range.0, range.1);
         self.sent_ranges
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .entry(agent)
+            .or_default()
             .insert(key, (generation, call));
+    }
+
+    /// Claim a whole-result dedup key for the current agent, or return the
+    /// earlier call number if already claimed at this index generation.
+    /// When agent identity is missing, always treats the call as new (no store).
+    fn claim_result_key(&self, key: &str, generation: u64, call: u64) -> Option<u64> {
+        if !dedup_agent::known() {
+            return None;
+        }
+        let agent = dedup_agent::current();
+        let mut outer = self.sent_ranges.lock().unwrap_or_else(|e| e.into_inner());
+        let map = outer.entry(agent).or_default();
+        match map.get(key) {
+            Some((g, c)) if *g == generation => Some(*c),
+            _ => {
+                map.insert(key.to_string(), (generation, call));
+                None
+            }
+        }
+    }
+
+    fn digest_get(&self, key: &str) -> String {
+        if !dedup_agent::known() {
+            return String::new();
+        }
+        let agent = dedup_agent::current();
+        self.search_digests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&agent)
+            .and_then(|m| m.get(key))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn digest_put(&self, key: String, digest: String) {
+        if !dedup_agent::known() {
+            return;
+        }
+        let agent = dedup_agent::current();
+        self.search_digests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(agent)
+            .or_default()
+            .insert(key, digest);
     }
 
     /// include_body:对展示列表(kept)前 5 个符号附源码体，头带
@@ -4780,17 +5222,17 @@ impl AstrolabeServer {
         index: &RepoIndex,
         body: &mut String,
         hits: &[(String, usize)],
-        kept_count: usize,
         budget_tokens: usize,
+        dedup: Option<bool>,
     ) {
         let mut attached = 0usize;
         let mut failed = 0usize;
         let mut spent = estimate_tokens(body);
-        let dedup = session_dedup_enabled(None);
+        let dedup = session_dedup_enabled(dedup);
         let generation = index.generation();
-        let call = self.call_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let call = self.next_call();
         let root_key = root.display().to_string();
-        for (line, idx) in hits.iter().take(kept_count).take(5) {
+        for (line, idx) in hits.iter().take(5) {
             let symbol = &index.graph().symbols[*idx];
             let Some(file) = index.file(symbol.file) else {
                 failed += 1;
@@ -4923,7 +5365,8 @@ impl AstrolabeServer {
                 let mut impl_sources = std::collections::HashMap::new();
                 // Equal ignoring ASCII case implies equal lowercase names, so
                 // the name table's group is a superset (in symbol order).
-                let candidates = index.names().by_lower(&last.to_lowercase());
+                let names = index.names();
+                let candidates = names.by_lower(&last.to_lowercase());
                 for symbol in candidates.iter().map(|&i| &symbols[i as usize]) {
                     if !symbol.name.eq_ignore_ascii_case(last)
                         || kind.is_some_and(|k| symbol.kind != k)
@@ -5077,13 +5520,15 @@ impl AstrolabeServer {
             }
         }
         if params.include_body && !hits.is_empty() {
+            let page = &hits[offset..];
+            let kept = &page[..kept_count.min(page.len())];
             self.attach_include_bodies(
                 root,
                 index,
                 &mut body,
-                &hits[offset..],
-                kept_count,
+                kept,
                 params.budget_tokens,
+                params.dedup,
             );
         }
         self.result_on(
@@ -5107,10 +5552,7 @@ impl AstrolabeServer {
     #[tool(
         description = "Language distribution, code size, LSP readiness (Ready/needs_install/AST-only), index gaps, and files with syntax errors."
     )]
-    pub(crate) fn get_languages(
-        &self,
-        Parameters(params): Parameters<BudgetOnly>,
-    ) -> CallToolResult {
+    pub(crate) fn get_lang(&self, Parameters(params): Parameters<BudgetOnly>) -> CallToolResult {
         let route = match self.resolve_call_root(
             params.index_root.as_deref(),
             params.root.as_deref(),
@@ -5120,11 +5562,11 @@ impl AstrolabeServer {
             Ok(route) => route,
             Err(err) => return err,
         };
-        let result = self.get_languages_inner(params, &route.hint);
+        let result = self.get_lang_inner(params, &route.hint);
         Self::with_route_note(result, &route.note)
     }
 
-    fn get_languages_inner(&self, params: BudgetOnly, hint: &str) -> CallToolResult {
+    fn get_lang_inner(&self, params: BudgetOnly, hint: &str) -> CallToolResult {
         self.with_index_without_coverage_note(hint, |session, index| {
             let mut totals: BTreeMap<&str, (usize, u64)> = BTreeMap::new();
             for file in &index.graph().files {
@@ -5266,7 +5708,7 @@ impl AstrolabeServer {
             }
             self.result_on(
                 &session.root,
-                "get_languages",
+                "get_lang",
                 body,
                 json!({
                     "confidence":"exact",
@@ -5327,9 +5769,15 @@ impl ServerHandler for AstrolabeServer {
     /// [`cancel::is_cancelled`] at its checkpoints.
     async fn call_tool(
         &self,
-        request: CallToolRequestParams,
+        mut request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        // Old long names and `ast_*` spellings stay callable: rewrite to the
+        // canonical catalog name before anything else looks at it (shared-index
+        // forwarding, loop guard, dispatch).
+        if let Some(canonical) = crate::compat::canonical_tool_name(&request.name) {
+            request.name = canonical.into();
+        }
         if self.shared.is_some() {
             let ct = context.ct.clone();
             let forwarded = self
@@ -5348,18 +5796,28 @@ impl ServerHandler for AstrolabeServer {
         let worker_flag = Arc::clone(&flag);
         let server = self.clone();
         let tool_name = request.name.to_string();
+        // Prefer tool-arg agent_id (hooks may inject); else MCP `_meta`.
+        // Empty disables body/search digest dedup for this call (no shared shard).
+        let mut agent = dedup_agent::extract(Some(&*context.meta), request.arguments.as_ref());
+        if agent.is_empty() {
+            if let Some(ref meta) = request.meta {
+                agent = dedup_agent::extract(Some(&**meta), None);
+            }
+        }
         let runtime = tokio::runtime::Handle::current();
         let work = tokio::task::spawn_blocking({
             let tool_name = tool_name.clone();
             move || {
                 cancel::scope(worker_flag, || {
-                    // Stale clients still call explain_symbol; alias without listing it.
-                    if tool_name == crate::compat::EXPLAIN_SYMBOL {
-                        return Ok(server.explain_symbol_compat(request.arguments).into());
-                    }
-                    runtime.block_on(async {
-                        let tcc = ToolCallContext::new(&server, request, context);
-                        server.tool_router.call(tcc).await
+                    dedup_agent::scope(agent, || {
+                        // Stale clients still call explain_symbol; alias without listing it.
+                        if tool_name == crate::compat::EXPLAIN_SYMBOL {
+                            return Ok(server.explain_symbol_compat(request.arguments).into());
+                        }
+                        runtime.block_on(async {
+                            let tcc = ToolCallContext::new(&server, request, context);
+                            server.tool_router.call(tcc).await
+                        })
                     })
                 })
             }
@@ -5858,8 +6316,27 @@ fn symbol_suggestions(index: &RepoIndex, needle: &str) -> String {
 
 /// path_filter 不匹配任何已索引路径（也不匹配未入索引的代码文件）时返回
 /// 显式错误，列出最接近的已索引路径，而不是静默返回 0 条。
-fn path_filter_error(index: &RepoIndex, filter: Option<&str>) -> Option<String> {
-    let filter = filter.filter(|f| !f.is_empty())?;
+fn path_filter_error(
+    index: &RepoIndex,
+    filter: Option<&str>,
+    index_root: Option<&str>,
+) -> Option<String> {
+    // The matcher sees paths in the reused index, but the caller still supplies
+    // filters relative to its requested directory. Never suggest sibling paths.
+    let requested = index_root.and_then(|raw| resolve_call_index_root(raw).ok());
+    path_filter_error_at_root(index, filter, requested.as_deref())
+}
+
+fn path_filter_error_at_root(
+    index: &RepoIndex,
+    filter: Option<&str>,
+    requested: Option<&Path>,
+) -> Option<String> {
+    let raw = filter.filter(|f| !f.is_empty())?;
+    // Match the repo's `/`-separated spelling so a Windows client sending
+    // `crates\astrolabe-mcp` is diagnosed as a hit, not as a missing path.
+    let normalized = normalize_filter_for_root(&index.root, Some(raw));
+    let filter = normalized.as_deref().unwrap_or(raw);
     let files = &index.graph().files;
     if files.iter().any(|file| file.path.as_str().contains(filter)) {
         return None;
@@ -5867,7 +6344,17 @@ fn path_filter_error(index: &RepoIndex, filter: Option<&str>) -> Option<String> 
     if !index.unindexed_code_exts(Some(filter)).is_empty() {
         return None;
     }
-    let cleaned = filter.trim_start_matches("./").trim_start_matches('/');
+    let scope = requested
+        .and_then(|root| astrolabe_core::paths::strip_prefix_normalized(&index.root, root))
+        .filter(|rel| !rel.as_os_str().is_empty())
+        .map(|rel| format!("{}/", rel.to_string_lossy().replace('\\', "/")));
+    let caller_filter = scope
+        .as_deref()
+        .and_then(|prefix| filter.strip_prefix(prefix))
+        .unwrap_or(filter);
+    let cleaned = caller_filter
+        .trim_start_matches("./")
+        .trim_start_matches('/');
     let segments: Vec<String> = cleaned
         .split('/')
         .filter(|seg| !seg.is_empty())
@@ -5876,6 +6363,13 @@ fn path_filter_error(index: &RepoIndex, filter: Option<&str>) -> Option<String> 
     let mut candidates: BTreeMap<String, ()> = BTreeMap::new();
     for file in files {
         let path = file.path.as_str();
+        let path = match scope.as_deref() {
+            Some(prefix) => match path.strip_prefix(prefix) {
+                Some(relative) => relative,
+                None => continue,
+            },
+            None => path,
+        };
         candidates.insert(path.to_string(), ());
         let mut dir = path;
         while let Some((parent, _)) = dir.rsplit_once('/') {
@@ -5906,12 +6400,13 @@ fn path_filter_error(index: &RepoIndex, filter: Option<&str>) -> Option<String> 
     scored.sort();
     let closest: Vec<String> = scored.into_iter().take(5).map(|entry| entry.3).collect();
     let mut message = format!(
-        "path_filter '{filter}' matches no indexed path (case-sensitive repo-relative path substring, not a glob; no absolute path or ./ prefix)."
+        "path_filter '{caller_filter}' matches no indexed path (case-sensitive path substring, not a glob; relative to index_root={}). ",
+        astrolabe_core::paths::display_path(requested.unwrap_or(&index.root))
     );
     if !closest.is_empty() {
-        message.push_str(&format!("Closest indexed paths: {}.", closest.join(", ")));
+        message.push_str(&format!("Closest indexed paths: {}. ", closest.join(", ")));
         message.push_str(&format!(
-            "Next: use one of the paths above as path_filter (e.g. \"{}\"), or drop path_filter and retry.",
+            "Next: keep index_root unchanged and use one of the paths above as path_filter (e.g. \"{}\"), or drop path_filter and retry within that index_root.",
             closest[0]
         ));
     } else {
@@ -6283,7 +6778,7 @@ mod tests {
     #[test]
     fn excluded_tools_are_omitted_from_catalog() {
         let mut ctx = crate::ClientContext::default_builtin();
-        ctx.excluded_tools = vec!["get_languages".into(), "find_symbol".into()];
+        ctx.excluded_tools = vec!["get_lang".into(), "find_symbol".into()];
         let server = AstrolabeServer::new_with_cache_budget_and_context(
             PathBuf::from("."),
             DEFAULT_MEMORY_BUDGET_BYTES,
@@ -6294,13 +6789,10 @@ mod tests {
             .into_iter()
             .map(|tool| tool.name.to_string())
             .collect();
-        assert!(
-            !names.iter().any(|name| name == "get_languages"),
-            "{names:?}"
-        );
+        assert!(!names.iter().any(|name| name == "get_lang"), "{names:?}");
         assert!(!names.iter().any(|name| name == "find_symbol"), "{names:?}");
         assert!(
-            names.iter().any(|name| name == "resolve_context"),
+            names.iter().any(|name| name == "resolve_contx"),
             "{names:?}"
         );
         assert_eq!(names.len(), crate::TOOL_COUNT - 2);
@@ -6354,9 +6846,7 @@ mod tests {
             crate::ClientContext::default_builtin(),
         );
         let raw = Value::Object((*default_server.listed_tools()[0].input_schema).clone());
-        let line = raw
-            .pointer("/properties/line")
-            .expect("find_references line");
+        let line = raw.pointer("/properties/line").expect("find_refs line");
         assert_eq!(
             line.get("type"),
             Some(&json!("integer")),
@@ -6385,12 +6875,13 @@ mod tests {
     #[test]
     fn every_tool_returns_nonempty_first_text_block() {
         let server = ready_server();
-        assert_first_text(server.resolve_context(Parameters(ResolveContextParams {
+        assert_first_text(server.resolve_contx(Parameters(ResolveContextParams {
             root: None,
             index_root: None,
             task_description: "alpha".into(),
             budget_tokens: 100,
             dedup: None,
+            agent_id: None,
             offset: 0,
             path_filter: None,
         })));
@@ -6405,6 +6896,8 @@ mod tests {
             depth: 0,
             budget_tokens: 100,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         })));
         assert_first_text(server.search_code(Parameters(SearchParams {
             root: None,
@@ -6419,13 +6912,14 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
             skip_comments: false,
             glob: None,
         })));
-        assert_first_text(server.get_languages(Parameters(BudgetOnly {
+        assert_first_text(server.get_lang(Parameters(BudgetOnly {
             root: None,
             index_root: None,
             budget_tokens: 100,
@@ -6447,6 +6941,8 @@ mod tests {
             depth: 0,
             budget_tokens: 0,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         }));
         let text = result.content[0].as_text().unwrap().text.as_str();
         assert!(text.contains("truncated=true"), "{text}");
@@ -6465,7 +6961,7 @@ mod tests {
     fn structured_output_opt_in_carries_root_and_full_text() {
         let mut server = ready_server();
         server.structured_output = true;
-        let result = server.get_languages(Parameters(BudgetOnly {
+        let result = server.get_lang(Parameters(BudgetOnly {
             root: None,
             index_root: None,
             budget_tokens: 100,
@@ -6692,6 +7188,7 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -6740,6 +7237,7 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -6825,6 +7323,7 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -6909,7 +7408,7 @@ mod tests {
         assert_eq!(missing.is_error, Some(true));
         let err = text_of(&missing);
         assert!(err.contains("find_symbol"), "{err}");
-        assert!(err.contains("find_references"), "{err}");
+        assert!(err.contains("find_refs"), "{err}");
 
         let via_query = server
             .dispatch_tool(
@@ -6923,6 +7422,65 @@ mod tests {
             text_of(&via_query)
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every catalog tool is callable by its canonical short name and by each
+    /// legacy alias (`resolve_context`, `ast_get_diag`, …). The alias is
+    /// rewritten before the router sees it, so the two paths answer alike.
+    #[test]
+    fn canonical_and_alias_names_reach_the_same_tool() {
+        let (server, dir) = smart_server(&[("calc.py", CALC_PY.into())]);
+        // (canonical, alias, arguments that exercise the tool without an LSP)
+        let cases: &[(&str, &str, Value)] = &[
+            (
+                "resolve_contx",
+                "resolve_context",
+                json!({"task_description": "compute"}),
+            ),
+            ("find_refs", "find_references", json!({"symbol": "compute"})),
+            (
+                "goto_def",
+                "goto_definition",
+                json!({"path": "calc.py", "symbol": "compute"}),
+            ),
+            ("get_diag", "get_diagnostics", json!({"path": "calc.py"})),
+            ("get_lang", "get_languages", json!({})),
+            ("search_code", "ast_search", json!({"query": "marker_x"})),
+            ("find_symbol", "ast_symbol", json!({"query": "compute"})),
+        ];
+        for (canonical, alias, args) in cases {
+            let by_canonical = server
+                .dispatch_tool(canonical, args.as_object().cloned())
+                .unwrap_or_else(|err| panic!("{canonical}: {err:?}"));
+            let by_alias = server
+                .dispatch_tool(alias, args.as_object().cloned())
+                .unwrap_or_else(|err| panic!("{alias}: {err:?}"));
+            assert_eq!(by_canonical.is_error, by_alias.is_error, "{canonical}");
+            assert!(
+                !text_of(&by_alias).trim().is_empty(),
+                "{alias} produced empty text"
+            );
+            assert!(
+                text_of(&by_alias).starts_with("index_root:"),
+                "{alias} lost the index_root header: {}",
+                text_of(&by_alias)
+            );
+        }
+        // Unknown names still fail: the alias table cannot hide typos.
+        assert!(server.dispatch_tool("ast_nope", None).is_err());
+        // Aliases never appear in tools/list.
+        let listed: Vec<String> = server
+            .listed_tools()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        for (_, alias, _) in cases {
+            assert!(
+                !listed.iter().any(|name| name == alias),
+                "{alias} leaked into tools/list: {listed:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6949,8 +7507,12 @@ mod tests {
     #[test]
     fn search_code_session_dedup_references_resent_bodies() {
         let (server, dir) = smart_server(&[("calc.py", CALC_PY.into())]);
-        let _ = server.search_code(Parameters(search("marker_x")));
-        let again = text_of(&server.search_code(Parameters(search("total *= 2"))));
+        let mut first = search("marker_x");
+        first.agent_id = Some("agent-dedup".into());
+        let _ = server.search_code(Parameters(first));
+        let mut second = search("total *= 2");
+        second.agent_id = Some("agent-dedup".into());
+        let again = text_of(&server.search_code(Parameters(second)));
         assert!(!again.contains("  1| def compute"), "{again}");
         assert!(again.contains("@calc.py:3 total *= 2"), "{again}");
         assert!(
@@ -6958,6 +7520,7 @@ mod tests {
             "{again}"
         );
         let mut opt_out = search("total = a");
+        opt_out.agent_id = Some("agent-dedup".into());
         opt_out.dedup = Some(false);
         let full = text_of(&server.search_code(Parameters(opt_out)));
         assert!(full.contains("  1| def compute(a, b):"), "{full}");
@@ -7030,7 +7593,7 @@ mod tests {
         assert!(again.contains("total 2 hit lines"), "{again}");
         // Wording is honest: lines, not occurrences (foo( occurs 3 times).
         assert!(again.contains("not occurrences"), "{again}");
-        assert_eq!(server.call_seq.load(Ordering::Relaxed), 4);
+        assert_eq!(server.call_seq_current(), 4);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7190,11 +7753,13 @@ mod tests {
             depth: 0,
             budget_tokens: 2500,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         }
     }
 
     #[test]
-    fn find_references_inherits_path_from_unique_find_symbol() {
+    fn find_refs_inherits_path_from_unique_find_symbol() {
         let (server, dir) = smart_server(&[(
             "svc/channel.go",
             "package svc\n\nfunc ShouldDisableChannel() bool { return false }\n".into(),
@@ -7205,8 +7770,8 @@ mod tests {
             sym.contains("svc/channel.go"),
             "find_symbol should hit the definition: {sym}"
         );
-        let refs = text_of(&server.find_references(Parameters(
-            crate::precise_tools::FindReferencesParams {
+        let refs = text_of(
+            &server.find_refs(Parameters(crate::precise_tools::FindRefsParams {
                 root: None,
                 index_root: None,
                 symbol: "ShouldDisableChannel".into(),
@@ -7216,8 +7781,8 @@ mod tests {
                 budget_tokens: 2500,
                 offset: None,
                 dry_run_rename: None,
-            },
-        )));
+            })),
+        );
         assert!(
             refs.contains("reusing this session's latest") && refs.contains("svc/channel.go"),
             "expected session inherit note: {refs}"
@@ -7226,7 +7791,7 @@ mod tests {
     }
 
     #[test]
-    fn find_references_does_not_inherit_when_find_symbol_is_ambiguous() {
+    fn find_refs_does_not_inherit_when_find_symbol_is_ambiguous() {
         let (server, dir) = smart_server(&[
             ("a/x.go", "package a\n\nfunc Dup() {}\n".into()),
             ("b/y.go", "package b\n\nfunc Dup() {}\n".into()),
@@ -7234,8 +7799,8 @@ mod tests {
         let sym = text_of(&server.find_symbol(Parameters(find("Dup"))));
         assert!(sym.contains("a/x.go") && sym.contains("b/y.go"), "{sym}");
         // Two exact hits → nothing remembered; missing path stays Ambiguous.
-        let refs = text_of(&server.find_references(Parameters(
-            crate::precise_tools::FindReferencesParams {
+        let refs = text_of(
+            &server.find_refs(Parameters(crate::precise_tools::FindRefsParams {
                 root: None,
                 index_root: None,
                 symbol: "Dup".into(),
@@ -7245,8 +7810,8 @@ mod tests {
                 budget_tokens: 2500,
                 offset: None,
                 dry_run_rename: None,
-            },
-        )));
+            })),
+        );
         assert!(
             !refs.contains("reusing this session's latest"),
             "must not invent a path from an ambiguous find_symbol: {refs}"
@@ -7259,7 +7824,7 @@ mod tests {
     }
 
     #[test]
-    fn find_references_inherits_after_path_filter_narrows_to_one() {
+    fn find_refs_inherits_after_path_filter_narrows_to_one() {
         let (server, dir) = smart_server(&[
             ("a/x.go", "package a\n\nfunc Init() {}\n".into()),
             ("b/y.go", "package b\n\nfunc Init() {}\n".into()),
@@ -7269,8 +7834,8 @@ mod tests {
         let sym = text_of(&server.find_symbol(Parameters(q)));
         assert!(sym.contains("a/x.go"), "{sym}");
         assert!(!sym.contains("b/y.go"), "{sym}");
-        let refs = text_of(&server.find_references(Parameters(
-            crate::precise_tools::FindReferencesParams {
+        let refs = text_of(
+            &server.find_refs(Parameters(crate::precise_tools::FindRefsParams {
                 root: None,
                 index_root: None,
                 symbol: "Init".into(),
@@ -7280,8 +7845,8 @@ mod tests {
                 budget_tokens: 2500,
                 offset: None,
                 dry_run_rename: None,
-            },
-        )));
+            })),
+        );
         assert!(
             refs.contains("reusing this session's latest") && refs.contains("a/x.go"),
             "path_filter-narrowed find_symbol should be inherited: {refs}"
@@ -7291,29 +7856,138 @@ mod tests {
 
     #[test]
     fn find_symbol_bodies_and_repeat_search_are_deduplicated() {
+        // Dedup only applies inside a known agent shard (hooks / _meta / arg).
         let (server, dir) = smart_server(&[("calc.py", CALC_PY.into())]);
-        let first = text_of(&server.find_symbol(Parameters(find("compute"))));
+        let mut q = find("compute");
+        q.agent_id = Some("agent-dedup".into());
+        let first = text_of(&server.find_symbol(Parameters(q.clone())));
         assert!(first.contains("total *= 2"), "{first}");
-        let again = text_of(&server.find_symbol(Parameters(find("compute"))));
+        let again = text_of(&server.find_symbol(Parameters(q)));
         assert!(
             (again.contains("already returned") && again.contains("definition body"))
                 || again.contains("already returned on tool call"),
             "{again}"
         );
         assert!(!again.contains("total *= 2"), "{again}");
-        // A search whose body find_symbol already sent references it.
-        let hit = text_of(&server.search_code(Parameters(search("marker_x"))));
+        // A search whose body find_symbol already sent references it (same agent).
+        let mut s = search("marker_x");
+        s.agent_id = Some("agent-dedup".into());
+        let hit = text_of(&server.search_code(Parameters(s.clone())));
         assert!(hit.contains("already returned on tool call #"), "{hit}");
         // The identical query again is not resent at all.
-        let repeat = text_of(&server.search_code(Parameters(search("marker_x"))));
+        let repeat = text_of(&server.search_code(Parameters(s)));
         assert!(
             repeat.contains("Same query already returned on tool call #"),
             "{repeat}"
         );
         let mut fresh = search("marker_x");
+        fresh.agent_id = Some("agent-dedup".into());
         fresh.dedup = Some(false);
         let full = text_of(&server.search_code(Parameters(fresh)));
         assert!(full.contains("@calc.py:4 marker_x = total - 1"), "{full}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_symbol_body_dedup_is_isolated_per_agent() {
+        let (server, dir) = smart_server(&[("calc.py", CALC_PY.into())]);
+        let mut a = find("compute");
+        a.agent_id = Some("agent-a".into());
+        let first_a = text_of(&server.find_symbol(Parameters(a.clone())));
+        assert!(
+            first_a.contains("total *= 2"),
+            "agent A first call must get FULL body: {first_a}"
+        );
+
+        let mut b = find("compute");
+        b.agent_id = Some("agent-b".into());
+        let first_b = text_of(&server.find_symbol(Parameters(b)));
+        assert!(
+            first_b.contains("total *= 2"),
+            "agent B must not be starved by A's sent_ranges: {first_b}"
+        );
+        assert!(
+            !first_b.contains("already returned") && !first_b.contains("not resending"),
+            "agent B must not see A's skip pointer: {first_b}"
+        );
+
+        let second_a = text_of(&server.find_symbol(Parameters(a)));
+        assert!(
+            (second_a.contains("already returned") && second_a.contains("definition body"))
+                || second_a.contains("already returned on tool call"),
+            "same agent second call still skips: {second_a}"
+        );
+        assert!(!second_a.contains("total *= 2"), "{second_a}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_symbol_missing_agent_never_dedups_across_calls() {
+        // Claude Code today often omits agent identity on MCP calls. Empty must
+        // NOT share a "" shard — two "anonymous" calls both get FULL bodies.
+        let (server, dir) = smart_server(&[("calc.py", CALC_PY.into())]);
+        let first = text_of(&server.find_symbol(Parameters(find("compute"))));
+        assert!(
+            first.contains("total *= 2"),
+            "first anonymous call FULL: {first}"
+        );
+        let second = text_of(&server.find_symbol(Parameters(find("compute"))));
+        assert!(
+            second.contains("total *= 2"),
+            "second anonymous call must still be FULL (no shared shard): {second}"
+        );
+        assert!(
+            !second.contains("already returned") && !second.contains("not resending"),
+            "anonymous must not see skip pointer: {second}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_symbol_missing_agent_does_not_poison_known_agent_shard() {
+        let (server, dir) = smart_server(&[("calc.py", CALC_PY.into())]);
+        // Anonymous call would formerly populate the "" shard.
+        let anon = text_of(&server.find_symbol(Parameters(find("compute"))));
+        assert!(anon.contains("total *= 2"), "{anon}");
+
+        let mut known = find("compute");
+        known.agent_id = Some("agent-a".into());
+        let first_known = text_of(&server.find_symbol(Parameters(known.clone())));
+        assert!(
+            first_known.contains("total *= 2"),
+            "known agent must get FULL after anonymous (no shared bucket): {first_known}"
+        );
+        assert!(
+            !first_known.contains("already returned") && !first_known.contains("not resending"),
+            "{first_known}"
+        );
+
+        let second_known = text_of(&server.find_symbol(Parameters(known)));
+        assert!(
+            (second_known.contains("already returned") && second_known.contains("definition body"))
+                || second_known.contains("already returned on tool call"),
+            "same known agent still skips: {second_known}"
+        );
+        assert!(!second_known.contains("total *= 2"), "{second_known}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_symbol_dedup_false_always_returns_full_body() {
+        let (server, dir) = smart_server(&[("calc.py", CALC_PY.into())]);
+        let first = text_of(&server.find_symbol(Parameters(find("compute"))));
+        assert!(first.contains("total *= 2"), "{first}");
+        let mut again = find("compute");
+        again.dedup = Some(false);
+        let full = text_of(&server.find_symbol(Parameters(again)));
+        assert!(
+            full.contains("total *= 2"),
+            "dedup=false must refetch FULL body: {full}"
+        );
+        assert!(
+            !full.contains("already returned") && !full.contains("not resending"),
+            "{full}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7354,8 +8028,12 @@ mod tests {
     #[test]
     fn dedup_pointer_carries_signature_and_match_line() {
         let (server, dir) = smart_server(&[("calc.py", CALC_PY.into())]);
-        let _ = server.search_code(Parameters(search("marker_x")));
-        let again = text_of(&server.search_code(Parameters(search("total *= 2"))));
+        let mut first = search("marker_x");
+        first.agent_id = Some("agent-dedup".into());
+        let _ = server.search_code(Parameters(first));
+        let mut again_q = search("total *= 2");
+        again_q.agent_id = Some("agent-dedup".into());
+        let again = text_of(&server.search_code(Parameters(again_q)));
         assert!(again.contains("@calc.py:3 total *= 2"), "{again}");
         assert!(again.contains("signature: def compute(a, b):"), "{again}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -7485,7 +8163,7 @@ mod tests {
 
     #[test]
     fn hit_roles_use_lexer_for_trailing_comments_and_raw_strings() {
-        let go: Vec<String> = [
+        let go: Vec<&str> = [
             "package p",
             "func f() {",
             "\ts := `",
@@ -7494,32 +8172,30 @@ mod tests {
             "\treturn s // a := b",
             "}",
         ]
-        .iter()
-        .map(|l| l.to_string())
+        .into_iter()
         .collect();
         let v = role_views("a.go", &go, &[3, 5]).unwrap();
         // inside a Go raw string: not a definition
-        assert_eq!(hit_role_view(false, &go[3], &v[&3]), "string");
+        assert_eq!(hit_role_view(false, go[3], &v[&3]), "string");
         // trailing comment words do not leak into the label
-        assert_eq!(hit_role_view(false, &go[5], &v[&5]), "use");
-        let py: Vec<String> = [
+        assert_eq!(hit_role_view(false, go[5], &v[&5]), "use");
+        let py: Vec<&str> = [
             "def g(thread):",
             "    return thread  # read SysLog(x)",
             "    # SysLog(x)",
             "    x = 1  # note",
         ]
-        .iter()
-        .map(|l| l.to_string())
+        .into_iter()
         .collect();
         let v = role_views("b.py", &py, &[1, 2]).unwrap();
-        assert_eq!(hit_role_view(false, &py[1], &v[&1]), "use");
-        assert_eq!(hit_role_view(false, &py[2], &v[&2]), "comment");
+        assert_eq!(hit_role_view(false, py[1], &v[&1]), "use");
+        assert_eq!(hit_role_view(false, py[2], &v[&2]), "comment");
         // no lexer: falls back to text heuristic
         assert!(role_views("a.txt", &py, &[0]).is_none());
         // string literal keys still see strings
-        let rs: Vec<String> = vec!["let k = \"v\"; // read".into()];
+        let rs: Vec<&str> = vec!["let k = \"v\"; // read"];
         let v = role_views("a.rs", &rs, &[0]).unwrap();
-        assert_eq!(hit_role_view(false, &rs[0], &v[&0]), "def");
+        assert_eq!(hit_role_view(false, rs[0], &v[&0]), "def");
     }
 
     #[test]
@@ -7954,6 +8630,7 @@ mod tests {
         let (server, dir) = counting_fixture();
         let mut p = search("SysLog(");
         p.group = Some(false);
+        p.agent_id = Some("agent-dedup".into());
         let _first = server.search_code(Parameters(p.clone()));
         let again = text_of(&server.search_code(Parameters(p)));
         assert!(again.contains("not resending full text"), "{again}");
@@ -7968,10 +8645,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_context_next_step_hint_matches_task() {
+    fn resolve_contx_next_step_hint_matches_task() {
         assert!(next_step_hint("rename Foo to Bar everywhere").contains("dry_run_rename"));
         assert!(next_step_hint("count calls per directory").contains("aggregate=top|dir|file"));
-        assert!(next_step_hint("who calls parse").contains("find_references"));
+        assert!(next_step_hint("who calls parse").contains("find_refs"));
         assert!(next_step_hint("add a flag").contains("find_symbol"));
         for t in ["rename x", "how many hits", "callers of x", "other"] {
             let h = next_step_hint(t);
@@ -7980,14 +8657,15 @@ mod tests {
     }
 
     #[test]
-    fn resolve_context_output_ends_with_next_step_line() {
+    fn resolve_contx_output_ends_with_next_step_line() {
         let server = ready_server();
-        let result = server.resolve_context(Parameters(ResolveContextParams {
+        let result = server.resolve_contx(Parameters(ResolveContextParams {
             root: None,
             index_root: None,
             task_description: "rename alpha".into(),
             budget_tokens: 2000,
             dedup: None,
+            agent_id: None,
             offset: 0,
             path_filter: None,
         }));
@@ -8003,6 +8681,7 @@ mod tests {
             task_description: task.into(),
             budget_tokens: budget,
             dedup,
+            agent_id: None,
             offset: 0,
             path_filter: None,
         }
@@ -8029,7 +8708,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_context_pages_via_offset_and_warns_when_index_changed() {
+    fn resolve_contx_pages_via_offset_and_warns_when_index_changed() {
         let files: Vec<(String, String)> = (0..80)
             .map(|i| {
                 (
@@ -8045,7 +8724,7 @@ mod tests {
         let page = |offset: usize| {
             let mut p = rc(task, 2500, Some(false));
             p.offset = offset;
-            text_of(&server.resolve_context(Parameters(p)))
+            text_of(&server.resolve_contx(Parameters(p)))
         };
         let first = page(0);
         assert!(first.contains("Matched 80 files"), "{first}");
@@ -8067,7 +8746,7 @@ mod tests {
         // path_filter narrows instead of paging.
         let mut p = rc(task, 2500, Some(false));
         p.path_filter = Some("pkg1/".into());
-        let narrowed = text_of(&server.resolve_context(Parameters(p)));
+        let narrowed = text_of(&server.resolve_contx(Parameters(p)));
         assert!(narrowed.contains("Matched 20 files"), "{narrowed}");
         assert!(narrowed
             .lines()
@@ -8106,12 +8785,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_context_lists_go_implementors_and_package_after_the_interface() {
+    fn resolve_contx_lists_go_implementors_and_package_after_the_interface() {
         let files = go_iface_repo();
         let refs: Vec<(&str, String)> =
             files.iter().map(|(a, b)| (a.as_str(), b.clone())).collect();
         let (server, dir) = smart_server(&refs);
-        let text = text_of(&server.resolve_context(Parameters(rc(
+        let text = text_of(&server.resolve_contx(Parameters(rc(
             "which types implement the `Provider` interface in oauth/provider.go?",
             2500,
             Some(false),
@@ -8146,9 +8825,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_context_ranks_symbols_and_files_by_task_words() {
+    fn resolve_contx_ranks_symbols_and_files_by_task_words() {
         let (server, dir) = many_file_server();
-        let text = text_of(&server.resolve_context(Parameters(rc(
+        let text = text_of(&server.resolve_contx(Parameters(rc(
             "where is repeat_budget_check in the loop guard",
             2500,
             None,
@@ -8167,9 +8846,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_context_without_match_says_so_and_stays_small() {
+    fn resolve_contx_without_match_says_so_and_stays_small() {
         let (server, dir) = many_file_server();
-        let text = text_of(&server.resolve_context(Parameters(rc(
+        let text = text_of(&server.resolve_contx(Parameters(rc(
             "zzzz qqqq nonexistent thing",
             2500,
             None,
@@ -8185,28 +8864,34 @@ mod tests {
     }
 
     #[test]
-    fn resolve_context_counting_task_is_short() {
+    fn resolve_contx_counting_task_is_short() {
         let (server, dir) = many_file_server();
-        let text = text_of(&server.resolve_context(Parameters(rc(
+        let text = text_of(&server.resolve_contx(Parameters(rc(
             "how many callers of filler_3 per directory",
             2500,
             None,
         ))));
         assert!(text.len() < 3_000, "{} bytes\n{text}", text.len());
-        assert!(text.contains("find_references"), "{text}");
+        assert!(text.contains("find_refs"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn resolve_context_repeat_returns_pointer_with_top_files_and_dedup_hint() {
+    fn resolve_contx_repeat_returns_pointer_with_top_files_and_dedup_hint() {
         let (server, dir) = many_file_server();
         let task = "where is repeat_budget_check in the loop guard";
-        let first = text_of(&server.resolve_context(Parameters(rc(task, 2500, None))));
-        let again = text_of(&server.resolve_context(Parameters(rc(task, 2500, None))));
+        let mut first_p = rc(task, 2500, None);
+        first_p.agent_id = Some("agent-dedup".into());
+        let first = text_of(&server.resolve_contx(Parameters(first_p)));
+        let mut again_p = rc(task, 2500, None);
+        again_p.agent_id = Some("agent-dedup".into());
+        let again = text_of(&server.resolve_contx(Parameters(again_p)));
         assert!(again.contains("not resending full text"), "{again}");
         assert!(again.contains("pkg/loop_guard.py"), "{again}");
         assert!(again.contains("dedup=false"), "{again}");
-        let full = text_of(&server.resolve_context(Parameters(rc(task, 2500, Some(false)))));
+        let mut full_p = rc(task, 2500, Some(false));
+        full_p.agent_id = Some("agent-dedup".into());
+        let full = text_of(&server.resolve_contx(Parameters(full_p)));
         assert_eq!(
             full.contains("repeat_budget_check"),
             first.contains("repeat_budget_check")
@@ -8219,30 +8904,34 @@ mod tests {
     fn next_step_hint_uses_word_boundaries_and_caller_priority() {
         assert!(next_step_hint("account balance count").contains("find_symbol"));
         assert!(next_step_hint("the country discount").contains("find_symbol"));
-        assert!(next_step_hint("how many callers of resolve_context").contains("find_references"));
+        assert!(next_step_hint("how many callers of resolve_contx").contains("find_refs"));
         assert!(next_step_hint("how many calls per directory").contains("aggregate"));
-        assert!(next_step_hint("count the usages of foo").contains("find_references"));
+        assert!(next_step_hint("count the usages of foo").contains("find_refs"));
         assert!(next_step_hint("count TODO comments").contains("aggregate"));
         assert!(next_step_hint("rename account to user").contains("dry_run_rename"));
         assert!(next_step_hint("count occurrences of foo").contains("aggregate"));
-        assert!(next_step_hint("who calls parse").contains("find_references"));
+        assert!(next_step_hint("who calls parse").contains("find_refs"));
     }
 
     #[test]
     fn search_dedup_pointer_has_real_call_number_and_sample_hits() {
         let (server, dir) = smart_server(&[("calc.py", CALC_PY.into())]);
-        let first = server.call_seq.load(Ordering::Relaxed);
-        let _ = server.search_code(Parameters(search("marker_x")));
-        let second_seq_before = server.call_seq.load(Ordering::Relaxed);
-        assert_eq!(second_seq_before, first + 1, "search must take an ordinal");
-        let again = text_of(&server.search_code(Parameters(search("marker_x"))));
-        assert!(
-            again.contains(&format!("tool call #{}", first + 1)),
-            "{again}"
-        );
-        assert!(again.contains("first hits: @calc.py:"), "{again}");
-        assert!(again.contains("compressed"), "{again}");
-        assert!(again.contains("dedup=false"), "{again}");
+        dedup_agent::scope("agent-dedup".into(), || {
+            let first = server.call_seq_current();
+            let mut p = search("marker_x");
+            p.agent_id = Some("agent-dedup".into());
+            let _ = server.search_code(Parameters(p.clone()));
+            let second_seq_before = server.call_seq_current();
+            assert_eq!(second_seq_before, first + 1, "search must take an ordinal");
+            let again = text_of(&server.search_code(Parameters(p)));
+            assert!(
+                again.contains(&format!("tool call #{}", first + 1)),
+                "{again}"
+            );
+            assert!(again.contains("first hits: @calc.py:"), "{again}");
+            assert!(again.contains("compressed"), "{again}");
+            assert!(again.contains("dedup=false"), "{again}");
+        });
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -8333,20 +9022,14 @@ mod tests {
         let find_symbol = desc("find_symbol");
         assert!(find_symbol.contains("include_body"), "{find_symbol}");
         assert!(!find_symbol.contains("offset=next_offset"), "{find_symbol}");
-        let find_references = desc("find_references");
+        let find_refs = desc("find_refs");
         // One source of truth: index-first, language server as fallback.
-        assert!(
-            !find_references.contains("LSP-resolved"),
-            "{find_references}"
-        );
-        assert!(find_references.contains("index first"), "{find_references}");
-        assert!(find_references.contains("rename"), "{find_references}");
-        assert!(
-            find_references.contains("dry_run_rename"),
-            "{find_references}"
-        );
-        let goto_definition = desc("goto_definition");
-        assert!(goto_definition.contains("definition"), "{goto_definition}");
+        assert!(!find_refs.contains("LSP-resolved"), "{find_refs}");
+        assert!(find_refs.contains("index first"), "{find_refs}");
+        assert!(find_refs.contains("rename"), "{find_refs}");
+        assert!(find_refs.contains("dry_run_rename"), "{find_refs}");
+        let goto_def = desc("goto_def");
+        assert!(goto_def.contains("definition"), "{goto_def}");
     }
 
     #[test]
@@ -8363,66 +9046,9 @@ mod tests {
     }
 
     #[test]
-    fn get_languages_does_not_repeat_the_per_query_coverage_note() {
-        let (server, dir) = smart_server(&[
-            ("ok.py", "def fine():\n    return 1\n".to_string()),
-            ("bad.py", "def broken(:\n    pass\n".to_string()),
-        ]);
-        let note = {
-            let state = server.primary.state.read().unwrap();
-            let IndexState::Ready(index) = &*state else {
-                panic!("index not ready")
-            };
-            index.coverage_note().expect("partial parse yields a note")
-        };
-        let languages = server.get_languages(Parameters(BudgetOnly {
-            root: None,
-            index_root: None,
-            budget_tokens: 1000,
-            host_lsp: None,
-        }));
-        let text = languages.content[0].as_text().unwrap().text.as_str();
-        assert!(text.contains("syntax/compile errors: 1"), "{text}");
-        assert!(
-            !text.contains(&note),
-            "note duplicated in get_languages: {text}"
-        );
-        let search = server.search_code(Parameters(search("fine")));
-        let search_text = search.content[0].as_text().unwrap().text.as_str();
-        assert!(
-            search_text.contains(&note),
-            "other tools keep the note: {search_text}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn get_languages_reports_file_cache_occupancy() {
-        let server = ready_server();
-        let result = server.get_languages(Parameters(BudgetOnly {
-            root: None,
-            index_root: None,
-            budget_tokens: 100,
-            host_lsp: None,
-        }));
-        let text = result.content[0].as_text().unwrap().text.as_str();
-        assert!(
-            text.contains("file_cache:"),
-            "get_languages should expose cache occupancy: {text}"
-        );
-        assert!(
-            text.contains(&format!("/{} bytes", DEFAULT_MEMORY_BUDGET_BYTES)),
-            "cache budget should appear in text: {text}"
-        );
-        assert!(result.structured_content.is_none());
-    }
-
-    /// Native-only host LSP list overrides the PATH-probe column for covered
-    /// languages and appends the registration inventory.
-    #[test]
     fn get_languages_host_lsp_overrides_the_path_probe_column() {
         let server = ready_server();
-        let result = server.get_languages(Parameters(BudgetOnly {
+        let result = server.get_lang(Parameters(BudgetOnly {
             root: None,
             index_root: None,
             budget_tokens: 2000,
@@ -8465,7 +9091,7 @@ mod tests {
     #[test]
     fn get_languages_without_host_lsp_keeps_the_path_probe() {
         let server = ready_server();
-        let result = server.get_languages(Parameters(BudgetOnly {
+        let result = server.get_lang(Parameters(BudgetOnly {
             root: None,
             index_root: None,
             budget_tokens: 2000,
@@ -8480,6 +9106,58 @@ mod tests {
             text.contains("LSP status: Ready = server on PATH"),
             "path-probe legend: {text}"
         );
+    }
+
+    #[test]
+    fn get_lang_does_not_repeat_the_per_query_coverage_note() {
+        let (server, dir) = smart_server(&[
+            ("ok.py", "def fine():\n    return 1\n".to_string()),
+            ("bad.py", "def broken(:\n    pass\n".to_string()),
+        ]);
+        let note = {
+            let state = server.primary.state.read().unwrap();
+            let IndexState::Ready(index) = &*state else {
+                panic!("index not ready")
+            };
+            index.coverage_note().expect("partial parse yields a note")
+        };
+        let languages = server.get_lang(Parameters(BudgetOnly {
+            root: None,
+            index_root: None,
+            budget_tokens: 1000,
+            host_lsp: None,
+        }));
+        let text = languages.content[0].as_text().unwrap().text.as_str();
+        assert!(text.contains("syntax/compile errors: 1"), "{text}");
+        assert!(!text.contains(&note), "note duplicated in get_lang: {text}");
+        let search = server.search_code(Parameters(search("fine")));
+        let search_text = search.content[0].as_text().unwrap().text.as_str();
+        assert!(
+            search_text.contains(&note),
+            "other tools keep the note: {search_text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_lang_reports_file_cache_occupancy() {
+        let server = ready_server();
+        let result = server.get_lang(Parameters(BudgetOnly {
+            root: None,
+            index_root: None,
+            budget_tokens: 100,
+            host_lsp: None,
+        }));
+        let text = result.content[0].as_text().unwrap().text.as_str();
+        assert!(
+            text.contains("file_cache:"),
+            "get_lang should expose cache occupancy: {text}"
+        );
+        assert!(
+            text.contains(&format!("/{} bytes", DEFAULT_MEMORY_BUDGET_BYTES)),
+            "cache budget should appear in text: {text}"
+        );
+        assert!(result.structured_content.is_none());
     }
 
     /// The "N 个文件有语法错误" footnote cost 7.2 KB over 87 of 223 results in
@@ -8520,6 +9198,81 @@ mod tests {
     }
 
     #[test]
+    fn search_code_borrowed_cache_keeps_crlf_unicode_and_bare_cr_lines() {
+        let (server, dir) = smart_server(&[(
+            "hello.py",
+            "# Needle 雪\r\n# needle\r\n\r\n# Needle 雪\r".into(),
+        )]);
+        let repo = server.primary.snapshot_ready().unwrap();
+        let (cached, _) = repo
+            .cached_lines(&server.primary.file_cache, "hello.py")
+            .unwrap();
+        let base = cached.as_text().as_ptr() as usize;
+        for line in cached.iter() {
+            let start = line.as_ptr() as usize;
+            assert!(start >= base && start + line.len() <= base + cached.as_text().len());
+        }
+        for (query, regex) in [("Needle 雪", false), ("^# Needle 雪", true)] {
+            let mut params = search(query);
+            params.regex = regex;
+            params.case_sensitive = Some(true);
+            params.context_lines = Some(0);
+            params.group = Some(false);
+            params.dedup = Some(false);
+            for _ in 0..2 {
+                let text = first_text(server.search_code(Parameters(params.clone())));
+                assert!(text.contains("hello.py:1"), "{text}");
+                assert!(text.contains("hello.py:4"), "{text}");
+                assert!(!text.contains("hello.py:2"), "{text}");
+            }
+        }
+        assert!(server.primary.cache_hits.load(Ordering::Relaxed) >= 4);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn search_code_skip_comments_borrows_warm_cache_for_literal_and_regex() {
+        let (server, dir) = smart_server(&[(
+            "hello.go",
+            "package p\r\n// Needle 雪\r\n/* Needle 雪\r\nNeedle 雪 */\r\nfunc f() { call(Needle) }\r\nvar s = `Needle`\r\n// Needle\r".into(),
+        )]);
+        let repo = server.primary.snapshot_ready().unwrap();
+        let (cached, _) = repo
+            .cached_lines(&server.primary.file_cache, "hello.go")
+            .unwrap();
+        for (query, regex) in [
+            ("Needle", false),
+            (r"\bNeedle\b", true),
+            (r"^func .*Needle", true),
+        ] {
+            let mut params = search(query);
+            params.regex = regex;
+            params.skip_comments = true;
+            params.case_sensitive = Some(true);
+            params.context_lines = Some(0);
+            params.group = Some(false);
+            params.dedup = Some(false);
+            for _ in 0..2 {
+                let text = first_text(server.search_code(Parameters(params.clone())));
+                assert!(text.contains("hello.go:5"), "{query}: {text}");
+                for excluded in [2, 3, 4, 6, 7] {
+                    assert!(
+                        !text.contains(&format!("hello.go:{excluded}")),
+                        "{query}: {text}"
+                    );
+                }
+            }
+        }
+        let (after, hit) = repo
+            .cached_lines(&server.primary.file_cache, "hello.go")
+            .unwrap();
+        assert!(hit);
+        assert!(Arc::ptr_eq(&cached, &after));
+        assert!(server.primary.cache_hits.load(Ordering::Relaxed) >= 6);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn search_code_uses_file_cache_and_records_hits() {
         let (server, dir) = ready_server_with_disk();
         let params = SearchParams {
@@ -8535,6 +9288,7 @@ mod tests {
             page: false,
             group: None,
             dedup: Some(false),
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -8556,7 +9310,7 @@ mod tests {
             "second search of an unchanged file must hit"
         );
 
-        let languages = server.get_languages(Parameters(BudgetOnly {
+        let languages = server.get_lang(Parameters(BudgetOnly {
             root: None,
             index_root: None,
             budget_tokens: 200,
@@ -8598,6 +9352,7 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -8634,6 +9389,7 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -8661,6 +9417,7 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -8697,6 +9454,7 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -8774,6 +9532,8 @@ mod tests {
                 depth: 0,
                 budget_tokens: 2000,
                 offset: 0,
+                dedup: None,
+                agent_id: None,
             }));
             eprintln!("BENCH first call {q:?}: {:?}", t0.elapsed());
             let t = std::time::Instant::now();
@@ -8790,6 +9550,8 @@ mod tests {
                     depth: 0,
                     budget_tokens: 2000,
                     offset: 0,
+                    dedup: None,
+                    agent_id: None,
                 }));
                 last = r.content[0].as_text().unwrap().text.len();
             }
@@ -8837,6 +9599,8 @@ mod tests {
                 depth: 0,
                 budget_tokens: 300,
                 offset,
+                dedup: None,
+                agent_id: None,
             }));
             r.content[0].as_text().unwrap().text.clone()
         };
@@ -8909,6 +9673,7 @@ mod tests {
                 page: false,
                 group: None,
                 dedup: None,
+                agent_id: None,
                 aggregate: None,
                 exclude: None,
                 count_only: false,
@@ -8973,6 +9738,7 @@ mod tests {
                 page: false,
                 group: None,
                 dedup: None,
+                agent_id: None,
                 aggregate: None,
                 exclude: None,
                 count_only: false,
@@ -9057,6 +9823,7 @@ mod tests {
                 page: false,
                 group: None,
                 dedup: None,
+                agent_id: None,
                 aggregate: None,
                 exclude: None,
                 count_only: false,
@@ -9119,8 +9886,10 @@ mod tests {
         }
     }
 
-    fn numbered(n: usize) -> Arc<Vec<String>> {
-        Arc::new((1..=n).map(|i| format!("line{i}")).collect())
+    fn numbered(n: usize) -> Arc<CachedLines> {
+        Arc::new(CachedLines::from_lines(
+            (1..=n).map(|i| format!("line{i}")).collect(),
+        ))
     }
 
     #[test]
@@ -9188,6 +9957,7 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -9224,6 +9994,7 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -9260,6 +10031,7 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -9305,6 +10077,7 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -9383,6 +10156,8 @@ mod tests {
             depth: 0,
             budget_tokens: 2500,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         }
     }
 
@@ -9673,7 +10448,7 @@ mod tests {
             index_root: None,
             query: "send".into(),
             regex: false,
-            path_filter: Some("./relay/channel".into()),
+            path_filter: Some("./relay/chanel".into()),
             case_sensitive: None,
             budget_tokens: 2500,
             offset: 0,
@@ -9681,6 +10456,7 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -9693,6 +10469,41 @@ mod tests {
             "{}",
             fs_text(&result)
         );
+        // A leading `./` (and `.\`) is not an error any more: it is trimmed to
+        // the repo-relative spelling and matches.
+        for filter in ["./relay/channel", r".\relay\channel", "relay/channel"] {
+            let result = server.search_code(Parameters(SearchParams {
+                root: None,
+                index_root: None,
+                query: "send".into(),
+                regex: false,
+                path_filter: Some(filter.into()),
+                case_sensitive: None,
+                budget_tokens: 2500,
+                offset: 0,
+                context_lines: Some(0),
+                page: false,
+                group: None,
+                dedup: None,
+                agent_id: None,
+                aggregate: None,
+                exclude: None,
+                count_only: false,
+                skip_comments: false,
+                glob: None,
+            }));
+            assert_ne!(
+                result.is_error,
+                Some(true),
+                "{filter}: {}",
+                fs_text(&result)
+            );
+            assert!(
+                fs_text(&result).contains("relay/channel/openai.py"),
+                "{filter}: {}",
+                fs_text(&result)
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9723,6 +10534,8 @@ mod tests {
             depth: 0,
             budget_tokens: 1000,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         }));
         let named_text = named.content[0].as_text().unwrap().text.as_str();
         assert!(named_text.contains("(no matching symbols)"), "{named_text}");
@@ -9743,6 +10556,8 @@ mod tests {
             depth: 0,
             budget_tokens: 1000,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         }));
         let path_text = by_path.content[0].as_text().unwrap().text.as_str();
         assert!(path_text.contains("(no matching symbols)"), "{path_text}");
@@ -9777,6 +10592,8 @@ mod tests {
             depth: 0,
             budget_tokens: 300,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         }));
         let text = result.content[0].as_text().unwrap().text.as_str();
 
@@ -9816,7 +10633,7 @@ mod tests {
             match &*server.primary.state.read().unwrap() {
                 IndexState::Ready(_) => return,
                 IndexState::Failed(e) => panic!("index failed: {e}"),
-                IndexState::Building => {}
+                IndexState::Building | IndexState::Hibernated => {}
             }
             if start.elapsed() > timeout {
                 panic!("timeout waiting for Ready");
@@ -9831,7 +10648,7 @@ mod tests {
             match &*session.state.read().unwrap() {
                 IndexState::Ready(_) => return,
                 IndexState::Failed(e) => panic!("index failed: {e}"),
-                IndexState::Building => {}
+                IndexState::Building | IndexState::Hibernated => {}
             }
             if start.elapsed() > timeout {
                 panic!("timeout waiting for child Ready");
@@ -9842,6 +10659,93 @@ mod tests {
 
     fn git_marker(dir: &Path) {
         std::fs::create_dir_all(dir.join(".git")).unwrap();
+    }
+
+    #[test]
+    fn concurrent_tool_gates_wait_for_wake_instead_of_building_fallback() {
+        for search_gate in [false, true] {
+            let dir = unique_temp_dir();
+            std::fs::write(dir.join("a.py"), "def alpha():\n    return 1\n").unwrap();
+            let server = Arc::new(AstrolabeServer::new_with_knobs(
+                dir.clone(),
+                test_knobs(),
+                8 * 1024 * 1024,
+            ));
+            server.start_indexing();
+            wait_ready(&server, Duration::from_secs(20));
+            *server.primary.state.write().unwrap() = IndexState::Hibernated;
+            let entered = Arc::new(std::sync::Barrier::new(2));
+            let resume = Arc::new(std::sync::Barrier::new(2));
+            *server.primary.wake_before_publish.lock().unwrap() =
+                Some((Arc::clone(&entered), Arc::clone(&resume)));
+            assert!(server.primary.wake_if_hibernated());
+            entered.wait();
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            *server.primary.wake_wait_started.lock().unwrap() = Some(started_tx);
+            let request_server = Arc::clone(&server);
+            let request = std::thread::spawn(move || {
+                if search_gate {
+                    request_server.building_session("").is_none()
+                } else {
+                    request_server.wake_if_hibernated(&request_server.primary);
+                    request_server.primary.snapshot_ready().is_some()
+                }
+            });
+            let started = started_rx.recv_timeout(Duration::from_secs(2));
+            resume.wait();
+            let served = request.join().unwrap();
+            assert!(started.is_ok(), "tool gate must enter the warm-wake wait");
+            assert!(
+                served,
+                "restored index must be served rather than building fallback"
+            );
+            assert!(server.primary.wait_builds_idle(Duration::from_secs(5)));
+            server.stop_watching();
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// End-to-end two-stage idle wake: a hard-hibernated primary must
+    /// warm-start on the next routed tool call and serve real results, not
+    /// a "retry shortly" answer.
+    #[test]
+    fn hibernated_primary_wakes_on_the_next_tool_call() {
+        let dir = unique_temp_dir();
+        std::fs::write(dir.join("a.py"), "def alpha():\n    return 1\n").unwrap();
+        let mut server =
+            AstrolabeServer::new_with_knobs(dir.clone(), test_knobs(), 8 * 1024 * 1024);
+        server.structured_output = false;
+        server.start_indexing();
+        wait_ready(&server, Duration::from_secs(20));
+
+        // Simulate the hard stage: unload the index and leave it hibernated.
+        *server.primary.state.write().unwrap() = IndexState::Hibernated;
+        assert!(server.primary.snapshot_ready().is_none());
+
+        let text = first_text(server.find_symbol(Parameters(QueryParams {
+            root: None,
+            index_root: None,
+            query: "alpha".into(),
+            include_body: false,
+            substring: None,
+            path_filter: None,
+            kind: None,
+            depth: 0,
+            budget_tokens: 500,
+            offset: 0,
+            dedup: None,
+            agent_id: None,
+        })));
+        assert!(
+            text.contains("alpha"),
+            "a hibernated index must wake and serve, got {text}"
+        );
+        assert!(
+            matches!(&*server.primary.state.read().unwrap(), IndexState::Ready(_)),
+            "the wake must leave a Ready index behind"
+        );
+        server.stop_watching();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn test_knobs() -> crate::knobs::McpKnobs {
@@ -9926,6 +10830,8 @@ mod tests {
                 depth: 0,
                 budget_tokens: 500,
                 offset: 0,
+                dedup: None,
+                agent_id: None,
             })));
             if text.contains("during_build_xyz") {
                 break;
@@ -9960,6 +10866,8 @@ mod tests {
             depth: 0,
             budget_tokens: 500,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         })));
         assert!(text.contains("alpha"), "{text}");
         assert!(
@@ -9997,6 +10905,8 @@ mod tests {
             depth: 0,
             budget_tokens: 500,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         })));
         assert!(
             text.contains("alpha_v2"),
@@ -10030,6 +10940,8 @@ mod tests {
             depth: 0,
             budget_tokens: 500,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         })));
         assert!(
             text.contains("Index may be stale") && text.contains("confidence: unknown"),
@@ -10048,6 +10960,8 @@ mod tests {
                 depth: 0,
                 budget_tokens: 500,
                 offset: 0,
+                dedup: None,
+                agent_id: None,
             })));
             if probe.contains("alpha_v3") {
                 break;
@@ -10105,6 +11019,8 @@ mod tests {
             depth: 0,
             budget_tokens: 500,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         }));
         let start = std::time::Instant::now();
         while log.watermark() <= before {
@@ -10157,6 +11073,8 @@ mod tests {
             depth: 0,
             budget_tokens: 500,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         }));
         let priming_text = first_text(priming);
         if priming_text.contains("Index is building in the background") {
@@ -10186,9 +11104,14 @@ mod tests {
             depth: 0,
             budget_tokens: 500,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         })));
         assert!(
-            text.starts_with(&format!("index_root: {}", session.root.display())),
+            text.starts_with(&format!(
+                "index_root: {}",
+                astrolabe_core::paths::display_path(&session.root)
+            )),
             "dispatch must declare the child root, got {text}"
         );
         assert!(text.contains("alpha_unique"), "{text}");
@@ -10242,6 +11165,8 @@ mod tests {
             depth: 0,
             budget_tokens: 200,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         }));
         let alpha_key = alpha.canonicalize().unwrap_or(alpha.clone());
         let session = server
@@ -10273,6 +11198,8 @@ mod tests {
             depth: 0,
             budget_tokens: 200,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         }));
         let start = std::time::Instant::now();
         loop {
@@ -10322,6 +11249,8 @@ mod tests {
             depth: 0,
             budget_tokens: 500,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         })));
         assert!(text.contains("alpha") && text.contains("beta"), "{text}");
         assert!(text.contains("confidence: unknown"), "{text}");
@@ -10369,6 +11298,7 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -10414,6 +11344,7 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -10450,6 +11381,7 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -10484,6 +11416,8 @@ mod tests {
             path_filter: None,
             kind: None,
             include_body: false,
+            dedup: None,
+            agent_id: None,
         }));
         let symbol_text = symbol_miss.content[0].as_text().unwrap().text.as_str();
         assert!(
@@ -10495,8 +11429,8 @@ mod tests {
             "{symbol_text}"
         );
 
-        // 4. get_languages 首行 supported、末尾 unindexed 行
-        let langs_res = server.get_languages(Parameters(BudgetOnly {
+        // 4. get_lang 首行 supported、末尾 unindexed 行
+        let langs_res = server.get_lang(Parameters(BudgetOnly {
             root: None,
             index_root: None,
             budget_tokens: 2500,
@@ -10538,6 +11472,7 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -10575,6 +11510,7 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -10761,6 +11697,7 @@ mod tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -10789,6 +11726,8 @@ mod tests {
             path_filter: None,
             kind: None,
             include_body: false,
+            dedup: None,
+            agent_id: None,
         }));
         let symbol_text = symbol_miss.content[0].as_text().unwrap().text.as_str();
         assert!(
@@ -10800,8 +11739,8 @@ mod tests {
             "{symbol_text}"
         );
 
-        // get_languages: >=1 就显示统计，这里有 2 个 .scala 仍会显示
-        let langs_res = server.get_languages(Parameters(BudgetOnly {
+        // get_lang: >=1 就显示统计，这里有 2 个 .scala 仍会显示
+        let langs_res = server.get_lang(Parameters(BudgetOnly {
             root: None,
             index_root: None,
             budget_tokens: 2500,
@@ -10826,7 +11765,7 @@ mod tests {
         let index = crate::index::build(&dir).expect("index");
         *server.primary.state.write().unwrap() = IndexState::Ready(Arc::new(index));
 
-        let langs_res = server.get_languages(Parameters(BudgetOnly {
+        let langs_res = server.get_lang(Parameters(BudgetOnly {
             root: None,
             index_root: None,
             budget_tokens: 2500,
@@ -10935,6 +11874,8 @@ mod mcp_routing_tests {
             depth: 0,
             budget_tokens: 800,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         }
     }
 
@@ -10982,7 +11923,7 @@ mod mcp_routing_tests {
         });
         assert!(by_abs.contains("handler_core"), "{by_abs}");
         let langs = until_ready(|| {
-            server.get_languages(Parameters(BudgetOnly {
+            server.get_lang(Parameters(BudgetOnly {
                 root: Some("DOCS".into()),
                 index_root: None,
                 budget_tokens: 200,
@@ -11002,10 +11943,10 @@ mod mcp_routing_tests {
         let (server, parent) = multi_server(&["api", "web"]);
         let out = until_ready(|| {
             server.search_code(Parameters(SearchParams {
+                agent_id: None,
                 root: None,
                 index_root: None,
                 path_filter: Some("api/src".into()),
-                glob: None,
                 ..search_params("shared")
             }))
         });
@@ -11018,10 +11959,10 @@ mod mcp_routing_tests {
         // Bare sub-repo name routes and drops the (now empty) filter.
         let bare = until_ready(|| {
             server.search_code(Parameters(SearchParams {
+                agent_id: None,
                 root: None,
                 index_root: None,
                 path_filter: Some("web/".into()),
-                glob: None,
                 ..search_params("shared")
             }))
         });
@@ -11045,6 +11986,7 @@ mod mcp_routing_tests {
             page: false,
             group: None,
             dedup: None,
+            agent_id: None,
             aggregate: None,
             exclude: None,
             count_only: false,
@@ -11086,24 +12028,26 @@ mod mcp_routing_tests {
     fn task_text_routing_is_guessed_noted_and_ignores_generic_words() {
         let (server, parent) = multi_server(&["api", "web", "billing"]);
         // "web" is an everyday word: prose alone must not pick a repo.
-        let prose = text(&server.resolve_context(Parameters(ResolveContextParams {
+        let prose = text(&server.resolve_contx(Parameters(ResolveContextParams {
             root: None,
             index_root: None,
             task_description: "set up a web server".into(),
             budget_tokens: 400,
             dedup: None,
+            agent_id: None,
             offset: 0,
             path_filter: None,
         })));
         assert!(prose.contains("cannot route"), "{prose}");
         // A distinctive name routes, and the result says it was a guess.
         let guessed = until_ready(|| {
-            server.resolve_context(Parameters(ResolveContextParams {
+            server.resolve_contx(Parameters(ResolveContextParams {
                 root: None,
                 index_root: None,
                 task_description: "fix the invoice rounding in billing".into(),
                 budget_tokens: 400,
                 dedup: None,
+                agent_id: None,
                 offset: 0,
                 path_filter: None,
             }))
@@ -11121,8 +12065,8 @@ mod mcp_routing_tests {
     fn absolute_path_routes_precise_tools_to_the_owning_sub_repo() {
         let (server, parent) = multi_server(&["api", "web"]);
         let file = parent.join("web").join("src").join("lib.rs");
-        let out = text(&server.get_diagnostics(Parameters(
-            crate::precise_tools::GetDiagnosticsParams {
+        let out = text(
+            &server.get_diag(Parameters(crate::precise_tools::GetDiagParams {
                 root: None,
                 index_root: None,
                 path: file.to_string_lossy().into_owned(),
@@ -11130,8 +12074,8 @@ mod mcp_routing_tests {
                 budget_tokens: 300,
                 lsp: None,
                 toolchain: true,
-            },
-        )));
+            })),
+        );
         assert!(
             out.starts_with(&format!("index_root: {}", parent.join("web").display())),
             "{out}"
@@ -11180,13 +12124,15 @@ mod mcp_routing_tests {
                 depth: 0,
                 budget_tokens: 800,
                 offset: 0,
+                dedup: None,
+                agent_id: None,
             }))
         });
         assert!(on_a.contains("alpha_only"), "{on_a}");
         assert!(
             on_a.starts_with(&format!(
                 "index_root: {}",
-                a.canonicalize().unwrap().display()
+                astrolabe_core::paths::display_path(&a.canonicalize().unwrap())
             )),
             "{on_a}"
         );
@@ -11203,13 +12149,15 @@ mod mcp_routing_tests {
                 depth: 0,
                 budget_tokens: 800,
                 offset: 0,
+                dedup: None,
+                agent_id: None,
             }))
         });
         assert!(on_b.contains("beta_only"), "{on_b}");
         assert!(
             on_b.starts_with(&format!(
                 "index_root: {}",
-                b.canonicalize().unwrap().display()
+                astrolabe_core::paths::display_path(&b.canonicalize().unwrap())
             )),
             "{on_b}"
         );
@@ -11220,6 +12168,7 @@ mod mcp_routing_tests {
         std::env::set_current_dir(&parent).unwrap();
         let rel = until_ready(|| {
             server.search_code(Parameters(SearchParams {
+                agent_id: None,
                 root: None,
                 index_root: Some("repo_b".into()),
                 query: "beta_only".into(),
@@ -11230,7 +12179,7 @@ mod mcp_routing_tests {
         assert!(
             rel.starts_with(&format!(
                 "index_root: {}",
-                b.canonicalize().unwrap().display()
+                astrolabe_core::paths::display_path(&b.canonicalize().unwrap())
             )),
             "{rel}"
         );
@@ -11248,6 +12197,8 @@ mod mcp_routing_tests {
             depth: 0,
             budget_tokens: 200,
             offset: 0,
+            dedup: None,
+            agent_id: None,
         })));
         assert!(bad.contains("not an existing path"), "{bad}");
         assert!(bad.contains("confidence: unknown"), "{bad}");
@@ -11265,12 +12216,14 @@ mod mcp_routing_tests {
                 depth: 0,
                 budget_tokens: 800,
                 offset: 0,
+                dedup: None,
+                agent_id: None,
             }))
         });
         assert!(
             miss.starts_with(&format!(
                 "index_root: {}",
-                b.canonicalize().unwrap().display()
+                astrolabe_core::paths::display_path(&b.canonicalize().unwrap())
             )),
             "{miss}"
         );
@@ -11281,6 +12234,412 @@ mod mcp_routing_tests {
 
         server.stop_watching();
         let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn per_call_index_root_subdir_reuses_parent_session() {
+        // Startup indexes the repo root; index_root pointing at a subdirectory
+        // must reuse that session (no second cold build) and scope path_filter.
+        let parent = tmp("idxroot_subdir");
+        let repo = parent.join("repo");
+        std::fs::create_dir_all(repo.join("src").join("daemon")).unwrap();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(
+            repo.join("src").join("daemon").join("main.rs"),
+            "pub fn daemon_only() -> u8 { 1 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("src").join("lib.rs"),
+            "pub fn root_only() -> u8 { 2 }\n",
+        )
+        .unwrap();
+        let knobs = crate::knobs::McpKnobs {
+            watch_mode: None,
+            loop_guard: crate::loop_guard::LoopGuardConfig {
+                repeat_max: 0,
+                rate_max: 0,
+                ..Default::default()
+            },
+            ..crate::knobs::McpKnobs::default()
+        };
+        let mut server = AstrolabeServer::new_with_knobs(repo.clone(), knobs, 8 << 20);
+        server.structured_output = false;
+        server.start_indexing();
+
+        let ready = until_ready(|| {
+            server.find_symbol(Parameters(QueryParams {
+                root: None,
+                index_root: None,
+                query: "root_only".into(),
+                include_body: false,
+                substring: None,
+                kind: None,
+                path_filter: None,
+                depth: 0,
+                budget_tokens: 800,
+                offset: 0,
+                dedup: None,
+                agent_id: None,
+            }))
+        });
+        assert!(ready.contains("root_only"), "{ready}");
+        let canon = repo.canonicalize().unwrap();
+        let sessions_before = server
+            .dynamic_roots
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|d| d.sessions.lock().unwrap_or_else(|e| e.into_inner()).len())
+            .unwrap_or(0);
+
+        let sub = repo.join("src").join("daemon");
+        let route = server
+            .resolve_call_root(Some(sub.to_str().unwrap()), None, None, None)
+            .expect("subdir index_root should resolve");
+        assert_eq!(
+            route.hint,
+            canon.to_string_lossy().as_ref(),
+            "must reuse parent session root, got hint={}",
+            route.hint
+        );
+        assert_eq!(
+            route.path.as_deref(),
+            Some("src/daemon"),
+            "override subdir becomes path_filter"
+        );
+        assert!(
+            route.note.as_deref().is_some_and(|n| n.contains("reusing")),
+            "expected reuse note, got {:?}",
+            route.note
+        );
+
+        let hit = until_ready(|| {
+            server.find_symbol(Parameters(QueryParams {
+                root: None,
+                index_root: Some(sub.to_string_lossy().into_owned()),
+                query: "daemon_only".into(),
+                include_body: false,
+                substring: None,
+                kind: None,
+                path_filter: None,
+                depth: 0,
+                budget_tokens: 800,
+                offset: 0,
+                dedup: None,
+                agent_id: None,
+            }))
+        });
+        assert!(hit.contains("daemon_only"), "{hit}");
+        assert!(
+            hit.starts_with(&format!(
+                "index_root: {}",
+                astrolabe_core::paths::display_path(&canon)
+            )),
+            "{hit}"
+        );
+        // Still no dynamic extra root for the subdir.
+        let sessions_after = server
+            .dynamic_roots
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|d| d.sessions.lock().unwrap_or_else(|e| e.into_inner()).len())
+            .unwrap_or(0);
+        assert_eq!(
+            sessions_after, sessions_before,
+            "subdir index_root must not open a new RootSession"
+        );
+
+        server.stop_watching();
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn subroot_path_suggestions_round_trip_without_repeated_prefixes() {
+        let parent = tmp("subroot_suggestion_roundtrip");
+        let repo = parent.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        for scope in ["ai-proxy", "src/daemon"] {
+            let dir = repo.join(scope).join("relay/channel/antigravity");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("convert.rs"), "pub fn roundtrip_marker() {}\n").unwrap();
+        }
+        // A tempting suggestion outside either requested scope must not leak in.
+        std::fs::write(repo.join("convert.rs"), "pub fn outside_marker() {}\n").unwrap();
+        let knobs = crate::knobs::McpKnobs {
+            watch_mode: None,
+            loop_guard: crate::loop_guard::LoopGuardConfig {
+                repeat_max: 0,
+                rate_max: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut server = AstrolabeServer::new_with_knobs(repo.clone(), knobs, 8 << 20);
+        server.structured_output = false;
+        server.start_indexing();
+        let ready =
+            until_ready(|| server.find_symbol(Parameters(sym("outside_marker", None, None))));
+        assert!(ready.contains("outside_marker"), "{ready}");
+        for scope in ["ai-proxy", "src/daemon"] {
+            let root = repo.join(scope).to_string_lossy().into_owned();
+            let call = |filter: &str| {
+                server.search_code(Parameters(
+                    serde_json::from_value(json!({
+                        "index_root": root, "query": "roundtrip_marker", "path_filter": filter,
+                        "dedup": false
+                    }))
+                    .unwrap(),
+                ))
+            };
+            let error = until_ready(|| call("antigravity/convert.rs"));
+            let suggestion = error
+                .split("e.g. \"")
+                .nth(1)
+                .and_then(|s| s.split('"').next())
+                .expect(&error);
+            assert!(
+                !suggestion.starts_with(scope),
+                "suggestion must be relative to unchanged index_root: {error}"
+            );
+            let result = text(&call(suggestion));
+            assert!(
+                !result.contains("matches no indexed path"),
+                "suggestion failed to round-trip: {result}"
+            );
+            assert!(result.contains("roundtrip_marker"), "{result}");
+            assert!(!error.contains("outside_marker"), "{error}");
+        }
+        server.stop_watching();
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn windows_subroot_correction_suggestions_round_trip() {
+        let repo = tmp("windows-scoped-correction");
+        std::fs::create_dir_all(repo.join("AI-proxy/Relay/Antigravity")).unwrap();
+        std::fs::write(
+            repo.join("AI-proxy/Relay/Antigravity/convert.rs"),
+            "pub fn convert() {}\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("outside.rs"), "pub fn outside() {}\n").unwrap();
+        let mut index = crate::index::build(&repo).unwrap();
+        for (active, requested) in [
+            (r"C:\repo", r"C:\repo\AI-proxy"),
+            (r"\\?\C:\repo", r"c:\REPO\AI-proxy"),
+            (r"C:\repo", "//?/C:/repo/AI-proxy"),
+            (
+                r"\\?\UNC\server\share\repo",
+                r"\\SERVER\SHARE\repo\AI-proxy",
+            ),
+        ] {
+            index.root = PathBuf::from(active);
+            let requested = Path::new(requested);
+            let relative =
+                astrolabe_core::paths::strip_prefix_normalized(&index.root, requested).unwrap();
+            let bad_filter =
+                nest_path_under_rel(Some("Antigravity/convert.rs"), &relative).unwrap();
+            let error =
+                path_filter_error_at_root(&index, Some(&bad_filter), Some(requested)).unwrap();
+            let suggested = error
+                .split("e.g. \"")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap();
+            assert_eq!(suggested, "Relay/Antigravity/convert.rs", "{error}");
+            let normalized = path_relative_to_index_root(requested, Some(suggested)).unwrap();
+            let translated = nest_path_under_rel(normalized.as_deref(), &relative);
+            assert!(
+                path_filter_error_at_root(&index, translated.as_deref(), Some(requested)).is_none(),
+                "{error}"
+            );
+            let candidates = error
+                .split("Closest indexed paths: ")
+                .nth(1)
+                .unwrap()
+                .split(". Next:")
+                .next()
+                .unwrap();
+            assert!(!candidates.contains("outside.rs"), "{error}");
+        }
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn scoped_path_translation_preserves_contract_on_unix_and_windows() {
+        for (root, absolute) in [
+            ("/repo/ai-proxy", "/repo/ai-proxy/Relay/convert.rs"),
+            (r"C:\repo\ai-proxy", r"C:\repo\ai-proxy\Relay\convert.rs"),
+            (
+                r"\\?\C:\repo\ai-proxy",
+                r"c:/REPO/ai-proxy/Relay/convert.rs",
+            ),
+            (
+                r"C:\repo\ai-proxy",
+                r"\\?\C:\repo\ai-proxy\Relay\convert.rs",
+            ),
+            (r"C:\repo\ai-proxy", "//?/C:/repo/ai-proxy/Relay/convert.rs"),
+            (
+                r"\\?\UNC\server\share\repo\ai-proxy",
+                r"\\SERVER\SHARE\repo\ai-proxy\Relay\convert.rs",
+            ),
+        ] {
+            let root = Path::new(root);
+            for input in [r".\Relay\convert.rs", "Relay/convert.rs", absolute] {
+                let caller = path_relative_to_index_root(root, Some(input)).unwrap();
+                assert_eq!(caller.as_deref(), Some("Relay/convert.rs"), "{input}");
+                assert_eq!(
+                    nest_path_under_rel(caller.as_deref(), Path::new("ai-proxy")).as_deref(),
+                    Some("ai-proxy/Relay/convert.rs"),
+                    "{input}"
+                );
+            }
+            assert!(path_relative_to_index_root(root, Some("../outside.rs")).is_err());
+            assert!(path_relative_to_index_root(root, Some("Relay/../../outside.rs")).is_err());
+            assert!(path_relative_to_index_root(root, Some("/outside/convert.rs")).is_err());
+            assert!(path_relative_to_index_root(root, Some(r"D:\outside\convert.rs")).is_err());
+            assert!(path_relative_to_index_root(root, Some("."))
+                .unwrap()
+                .is_none());
+        }
+        // Never guess that an already-prefixed relative path should be stripped:
+        // a same-named directory INSIDE the requested root is legitimate.
+        let caller =
+            path_relative_to_index_root(Path::new("/repo/ai-proxy"), Some("ai-proxy/convert.rs"))
+                .unwrap();
+        assert_eq!(
+            nest_path_under_rel(caller.as_deref(), Path::new("ai-proxy")).as_deref(),
+            Some("ai-proxy/ai-proxy/convert.rs")
+        );
+    }
+
+    #[test]
+    fn nest_path_under_rel_joins_caller_filter() {
+        assert_eq!(nest_path_under_rel(None, Path::new("")), None);
+        assert_eq!(
+            nest_path_under_rel(None, Path::new("src/daemon")).as_deref(),
+            Some("src/daemon")
+        );
+        assert_eq!(
+            nest_path_under_rel(Some("main.rs"), Path::new("src/daemon")).as_deref(),
+            Some("src/daemon/main.rs")
+        );
+        assert_eq!(
+            nest_path_under_rel(Some("main.rs"), Path::new("")).as_deref(),
+            Some("main.rs")
+        );
+        // A Windows-style caller path keeps `/` separators in the folded
+        // filter, and a backslash-only caller path is slash-normalized too.
+        assert_eq!(
+            nest_path_under_rel(Some(r"src\daemon"), Path::new("crates")).as_deref(),
+            Some("crates/src/daemon")
+        );
+        assert_eq!(
+            nest_path_under_rel(Some(r"src\daemon"), Path::new("")).as_deref(),
+            Some("src/daemon")
+        );
+        assert_eq!(
+            nest_path_under_rel(Some(r"src\daemon"), Path::new("crates/")).as_deref(),
+            Some("crates/src/daemon")
+        );
+    }
+
+    /// Windows clients send `crates\astrolabe-mcp` (or an absolute
+    /// `C:\…\crates\astrolabe-mcp`) while index paths use `/`; both must match
+    /// in `search_code` and `find_symbol` instead of returning 0 hits /
+    /// "path_filter matches no indexed path".
+    #[test]
+    fn windows_backslash_path_filter_matches_indexed_paths() {
+        let repo = tmp("win-filter");
+        std::fs::create_dir_all(repo.join("crates").join("astrolabe-mcp").join("src")).unwrap();
+        std::fs::write(
+            repo.join("crates")
+                .join("astrolabe-mcp")
+                .join("src")
+                .join("server.rs"),
+            "pub fn backslash_probe() -> u8 {\n    1\n}\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("elsewhere.rs"), "pub fn elsewhere() {}\n").unwrap();
+        let mut server = AstrolabeServer::new_with_cache_budget(repo.clone(), 8 << 20);
+        let index = crate::index::build(&repo).expect("index");
+        *server.primary.state.write().unwrap() = IndexState::Ready(Arc::new(index));
+        server.structured_output = false;
+
+        let check = |filter: &str, label: &str| {
+            let searched = text(&server.search_code(Parameters(SearchParams {
+                agent_id: None,
+                path_filter: Some(filter.to_string()),
+                ..search_params("backslash_probe")
+            })));
+            assert!(
+                searched.contains("crates/astrolabe-mcp/src/server.rs"),
+                "search_code {label} ({filter}): {searched}"
+            );
+            assert!(
+                !searched.contains("matches no indexed path"),
+                "search_code {label} ({filter}): {searched}"
+            );
+            assert!(
+                !searched.contains("elsewhere.rs"),
+                "search_code {label} ({filter}) leaked outside the filter: {searched}"
+            );
+            let found =
+                text(&server.find_symbol(Parameters(sym("backslash_probe", None, Some(filter)))));
+            assert!(
+                found.contains("crates/astrolabe-mcp/src/server.rs"),
+                "find_symbol {label} ({filter}): {found}"
+            );
+            assert!(
+                !found.contains("matches no indexed path"),
+                "find_symbol {label} ({filter}): {found}"
+            );
+        };
+
+        check(r"crates\astrolabe-mcp", "backslashes");
+        check(r".\crates\astrolabe-mcp", "dot-backslashes");
+        check("crates/astrolabe-mcp", "slashes");
+        check(
+            r"crates\astrolabe-mcp\src\server.rs",
+            "backslashes to a file",
+        );
+        // Absolute Windows paths, verbatim (as `canonicalize` returns) and
+        // plain, are trimmed to repo-relative.
+        check(
+            &repo.join("crates").join("astrolabe-mcp").to_string_lossy(),
+            "absolute verbatim",
+        );
+        let plain_abs = astrolabe_core::paths::display_path(&repo).replace('/', r"\")
+            + r"\crates\astrolabe-mcp";
+        check(&plain_abs, "absolute plain");
+
+        server.stop_watching();
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// The zero-hit diagnostic must see through backslashes too: a filter that
+    /// matches nothing is still reported as such (not silently 0 hits).
+    #[test]
+    fn windows_backslash_filter_error_still_reports_unknown_paths() {
+        let server = AstrolabeServer::new(tmp("win-filter-miss"));
+        let index = crate::index::build(server.primary.root.as_path()).expect("index");
+        *server.primary.state.write().unwrap() = IndexState::Ready(Arc::new(index));
+        let index = {
+            let state = server.primary.state.read().unwrap();
+            let IndexState::Ready(index) = &*state else {
+                panic!("index not ready")
+            };
+            Arc::clone(index)
+        };
+        let message = path_filter_error(&index, Some(r"no-such\dir"), None)
+            .expect("an unmatched filter must produce an explicit error");
+        assert!(message.contains("matches no indexed path"), "{message}");
+        assert!(path_filter_error(&index, Some("no-such/dir"), None).is_some());
+        server.stop_watching();
     }
 
     #[test]
@@ -11367,7 +12726,7 @@ mod mcp_routing_tests {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         let want = vec![
             (
-                "find_references".to_string(),
+                "find_refs".to_string(),
                 s(&["index_root", "line", "path", "symbol"]),
                 s(&["symbol"]),
             ),
@@ -11377,18 +12736,18 @@ mod mcp_routing_tests {
                 s(&["query"]),
             ),
             (
-                "get_diagnostics".to_string(),
+                "get_diag".to_string(),
                 s(&["index_root", "path"]),
                 s(&["path"]),
             ),
-            ("get_languages".to_string(), s(&["index_root"]), s(&[])),
+            ("get_lang".to_string(), s(&["index_root"]), s(&[])),
             (
-                "goto_definition".to_string(),
+                "goto_def".to_string(),
                 s(&["index_root", "line", "path", "symbol"]),
                 s(&["path"]),
             ),
             (
-                "resolve_context".to_string(),
+                "resolve_contx".to_string(),
                 s(&["index_root", "path_filter", "task_description"]),
                 s(&["task_description"]),
             ),
@@ -11433,10 +12792,13 @@ mod mcp_routing_tests {
     fn unadvertised_params_are_still_accepted() {
         let q: QueryParams = serde_json::from_value(json!({
             "query": "x", "root": "r", "kind": "function", "depth": 1,
-            "substring": true, "budget_tokens": 900, "offset": 3
+            "substring": true, "budget_tokens": 900, "offset": 3,
+            "dedup": false, "agent_id": "sub-a"
         }))
         .unwrap();
         assert_eq!((q.depth, q.budget_tokens, q.offset), (1, 900, 3));
+        assert_eq!(q.dedup, Some(false));
+        assert_eq!(q.agent_id.as_deref(), Some("sub-a"));
         let sp: SearchParams = serde_json::from_value(json!({
             "query": "x", "regex": true, "budget_tokens": 900, "offset": 2,
             "context_lines": 1, "page": true, "group": false, "dedup": false,
@@ -11444,14 +12806,14 @@ mod mcp_routing_tests {
         }))
         .unwrap();
         assert!(sp.regex && sp.page && sp.count_only);
-        let r: crate::precise_tools::FindReferencesParams = serde_json::from_value(json!({
+        let r: crate::precise_tools::FindRefsParams = serde_json::from_value(json!({
             "symbol": "X", "character": 2, "budget_tokens": 10, "offset": 1,
             "dry_run_rename": "Y"
         }))
         .unwrap();
         assert!(r.path.is_none(), "path is optional");
         assert_eq!(r.dry_run_rename.as_deref(), Some("Y"));
-        let d: crate::precise_tools::GetDiagnosticsParams =
+        let d: crate::precise_tools::GetDiagParams =
             serde_json::from_value(json!({ "path": "a.go", "severity": "error" })).unwrap();
         assert_eq!(d.severity.as_deref(), Some("error"));
         let c: ResolveContextParams = serde_json::from_value(json!({
@@ -11583,10 +12945,10 @@ mod mcp_routing_tests {
         assert!(out.contains("2 hits / 2 files"), "{out}");
         // path_filter and count_only apply.
         let counted = text(&server.search_code(Parameters(SearchParams {
+            agent_id: None,
             index_root: None,
             path_filter: Some("a.py".into()),
             count_only: true,
-            glob: None,
             ..search_params("needle_text")
         })));
         assert!(counted.contains("1 hit / 1 file"), "{counted}");

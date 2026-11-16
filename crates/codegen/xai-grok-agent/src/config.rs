@@ -141,6 +141,22 @@ fn wait_tasks_tool_config() -> ToolConfig {
 fn kill_task_tool_config() -> ToolConfig {
     ToolConfig::from(&grok_build::KillTaskTool).with_name("kill_command_or_subagent")
 }
+/// The xAI Imagine media tools, as shipped by the static toolsets that name them.
+/// Gated by the product build policy: a build with `IMAGINE_TOOLS_ALLOWED == false`
+/// (the community default — it has no Imagine credentials) gets an empty list, so
+/// the tools vanish from every static toolset, the workspace catalog, and
+/// `/imagine`'s `required_tools()` visibility, and no config tier can bring them back.
+fn imagine_tool_configs() -> Vec<ToolConfig> {
+    if xai_grok_product::IMAGINE_TOOLS_ALLOWED {
+        vec![
+            (&grok_build::ImageGenTool).into(),
+            (&grok_build::ImageToVideoTool).into(),
+            (&grok_build::ReferenceToVideoTool).into(),
+        ]
+    } else {
+        Vec::new()
+    }
+}
 /// Complete workspace-executable toolset for hub registration.
 /// Extends `default_grok_build_toolset()` with tools injected by `AgentBuilder` or available only in specific modes.
 /// In proxy mode the workspace server executes all tools; the shell has zero local dispatch.
@@ -150,10 +166,7 @@ pub fn workspace_grok_build_toolset() -> ToolServerConfig {
     tools.push((&grok_build::EnterPlanModeTool).into());
     tools.push((&grok_build::ExitPlanModeTool).into());
     tools.push((&grok_build::AskUserQuestionTool).into());
-    tools.push((&grok_build::WebSearchTool).into());
-    tools.push((&grok_build::ImageGenTool).into());
-    tools.push((&grok_build::ImageToVideoTool).into());
-    tools.push((&grok_build::ReferenceToVideoTool).into());
+    tools.extend(imagine_tool_configs());
     tools.push((&grok_build::WebFetchTool).into());
     tools.push((&memory::search_tool::MemorySearchImpl).into());
     tools.push((&memory::get_tool::MemoryGetImpl).into());
@@ -170,15 +183,14 @@ pub fn workspace_grok_build_toolset() -> ToolServerConfig {
 }
 /// Fully qualified ids of the workspace tools that call the Grok API with the workspace server's own credential.
 /// A server whose credential only serves the hub cannot run them, so it neither advertises nor serves them.
+/// Sourced from the static `IMAGINE_TOOL_IDS` inventory instead of the shipped toolset: the
+/// community build policy compiles the Imagine tools out of every catalog, and a policy-empty
+/// list would let the registry's still-registered handlers slip through the hub-only filter.
 pub fn api_backed_tool_ids() -> Vec<String> {
-    #[allow(unused_mut)]
-    let mut ids = vec![
-        ToolConfig::from(&grok_build::WebSearchTool).id,
-        ToolConfig::from(&grok_build::ImageGenTool).id,
-        ToolConfig::from(&grok_build::ImageToVideoTool).id,
-        ToolConfig::from(&grok_build::ReferenceToVideoTool).id,
-    ];
-    ids
+    xai_grok_tools::implementations::grok_build::IMAGINE_TOOL_IDS
+        .iter()
+        .map(|id| id.to_string())
+        .collect()
 }
 /// Toolset for the `grok-computer` (workspace/sandbox) preset.
 fn grok_computer_toolset() -> ToolServerConfig {
@@ -248,23 +260,17 @@ pub fn toolset_for_preset(preset: &str) -> Option<ToolServerConfig> {
         .or_else(|| registered_toolset_preset(&normalized))
 }
 fn default_grok_build_toolset() -> ToolServerConfig {
-    grok_build_core_toolset_with(true, true)
+    grok_build_core_toolset_with(true)
 }
 fn default_agent_toolset() -> ToolServerConfig {
-    grok_build_core_toolset(true)
+    grok_build_core_toolset_with(true)
 }
 /// Same as the parent grok-build list, without `workflow`.
 /// The usual `general-purpose` spawn path must not add that tool and then strip it.
 fn general_purpose_toolset() -> ToolServerConfig {
-    grok_build_core_toolset(false)
+    grok_build_core_toolset_with(false)
 }
-fn grok_build_core_toolset(include_workflow: bool) -> ToolServerConfig {
-    grok_build_core_toolset_with(include_workflow, false)
-}
-fn grok_build_core_toolset_with(
-    include_workflow: bool,
-    include_send_feedback: bool,
-) -> ToolServerConfig {
+fn grok_build_core_toolset_with(include_workflow: bool) -> ToolServerConfig {
     let mut tools = vec![
         // Index-layer tools come first. `by_kind.search` is first-come, so
         // `search_code` leads (content-search templates and
@@ -299,9 +305,6 @@ fn grok_build_core_toolset_with(
     ];
     if include_workflow {
         tools.push((&grok_build::WorkflowTool).into());
-    }
-    if include_send_feedback {
-        tools.push((&grok_build::SendFeedbackTool).into());
     }
     ToolServerConfig {
         tools,
@@ -345,7 +348,6 @@ pub fn grok_build_hashline_toolset(
         task_output_tool_config(),
         wait_tasks_tool_config(),
         task_tool_config(),
-        (&grok_build::WebSearchTool).into(),
         (&grok_build::SchedulerCreateTool).into(),
         (&grok_build::SchedulerDeleteTool).into(),
         (&grok_build::SchedulerListTool).into(),
@@ -501,19 +503,19 @@ fn orchestrator_toolset() -> ToolServerConfig {
             (&grok_build::SchedulerListTool).into(),
             (&grok_build::MonitorTool).into(),
             // Web tools
-            (&grok_build::WebSearchTool).into(),
             (&grok_build::WebFetchTool).into(),
-            // Imagine
-            (&grok_build::ImageGenTool).into(),
-            (&grok_build::ImageToVideoTool).into(),
-            (&grok_build::ReferenceToVideoTool).into(),
+        ]
+        .into_iter()
+        .chain(imagine_tool_configs())
+        .chain([
             // Memory
             (&memory::MemorySearchImpl).into(),
             (&memory::MemoryGetImpl).into(),
-            // Intentionally excluded:
-            // - SearchReplaceTool (no file editing; delegate to subagents)
-            // - OpenCodeWriteTool (no file writing; delegate to subagents)
-        ],
+        ])
+        // Intentionally excluded:
+        // - SearchReplaceTool (no file editing; delegate to subagents)
+        // - OpenCodeWriteTool (no file writing; delegate to subagents)
+        .collect(),
         behavior_preset: None,
     }
 }
@@ -1944,13 +1946,6 @@ mod tests {
         );
     }
 
-    fn feedback_tool_id() -> String {
-        ToolConfig::from(&grok_build::SendFeedbackTool).id
-    }
-    fn contains_feedback(config: &ToolServerConfig) -> bool {
-        let id = feedback_tool_id();
-        config.tools.iter().any(|tool| tool.id == id)
-    }
     fn grok_computer_exclusive_ids() -> Vec<String> {
         #[allow(unused_mut)]
         let mut ids: Vec<String> = vec![
@@ -1958,85 +1953,6 @@ mod tests {
             ToolConfig::from(&grok_build::KillTerminalCommandTool).id,
         ];
         ids
-    }
-    #[test]
-    fn send_feedback_exposure_is_grok_build_only() {
-        use strum::IntoEnumIterator;
-        let presets = all_toolset_presets();
-        for (name, config) in &presets {
-            let expected = name == "grok-build";
-            let count = config
-                .tools
-                .iter()
-                .filter(|tool| tool.id == feedback_tool_id())
-                .count();
-            assert_eq!(
-                count,
-                usize::from(expected),
-                "preset `{name}` has the wrong send_feedback exposure"
-            );
-        }
-        for builtin in BuiltinAgentName::iter() {
-            let expected = match builtin {
-                BuiltinAgentName::GrokBuild => true,
-                BuiltinAgentName::GrokBuildConcise
-                | BuiltinAgentName::GrokBuildPlan
-                | BuiltinAgentName::GrokBuildPlanNoSubagents
-                | BuiltinAgentName::GrokBuildAskUser
-                | BuiltinAgentName::Codex
-                | BuiltinAgentName::Opencode
-                | BuiltinAgentName::GeneralPurpose
-                | BuiltinAgentName::Explore
-                | BuiltinAgentName::Plan
-                | BuiltinAgentName::Implementer
-                | BuiltinAgentName::BrowserUse
-                | BuiltinAgentName::GrokBuildOrchestrator => false,
-            };
-            assert_eq!(
-                contains_feedback(&builtin.definition().tool_config),
-                expected,
-                "builtin `{builtin}` has the wrong send_feedback exposure"
-            );
-        }
-        for (name, config) in [
-            ("core", grok_build_core_toolset(true)),
-            ("general-purpose", general_purpose_toolset()),
-            ("hashline", grok_build_hashline_toolset(vec![])),
-        ] {
-            assert!(
-                !contains_feedback(&config),
-                "toolset `{name}` leaked send_feedback"
-            );
-        }
-        let workspace = workspace_grok_build_toolset();
-        assert_eq!(
-            workspace
-                .tools
-                .iter()
-                .filter(|tool| tool.id == feedback_tool_id())
-                .count(),
-            1
-        );
-    }
-    #[test]
-    fn defaulted_agent_definitions_omit_send_feedback() {
-        let builtins = AgentDefinition::builtin_defaults("external", "External definition");
-        assert!(!contains_feedback(&builtins.tool_config));
-        assert!(!contains_feedback(
-            &AgentDefinition::browser_use().tool_config
-        ));
-        let serde_default: AgentDefinition = serde_json::from_value(serde_json::json!({
-            "name": "external",
-            "description": "External definition"
-        }))
-        .unwrap();
-        assert!(!contains_feedback(&serde_default.tool_config));
-        let acp = AgentDefinition::from_json(&serde_json::json!({
-            "name": "external",
-            "description": "External definition"
-        }))
-        .unwrap();
-        assert!(!contains_feedback(&acp.tool_config));
     }
     #[test]
     fn grok_computer_preset_is_curated_grok_build_subset() {

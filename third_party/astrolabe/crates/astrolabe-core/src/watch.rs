@@ -1059,13 +1059,10 @@ trait EventFeed {
 struct NotifyFeed {
     rx: Receiver<Result<notify::Event, notify::Error>>,
     overflow: Arc<AtomicBool>,
-    /// Non-selective backends (Windows ReadDirectoryChangesW, macOS FSEvents)
-    /// keep the watcher here: dropping it drops the callback sender, and the
-    /// feed then reports `Disconnected` and falls back to polling on every
-    /// start.
-    watcher: Option<notify::RecommendedWatcher>,
-    /// Present only in selective (per-directory) mode; owns the watcher so
-    /// new directories can be registered from the consumer thread.
+    /// Keep the native backend alive in both recursive and selective modes.
+    /// Dropping it disconnects `rx` and silently degrades to polling.
+    watcher: notify::RecommendedWatcher,
+    /// Per-directory registration state, used only in selective mode.
     selective: Option<Selective>,
 }
 
@@ -1073,7 +1070,6 @@ struct NotifyFeed {
 /// trees (node_modules, target, ...), so their files cost no kernel watches
 /// or events.
 struct Selective {
-    watcher: notify::RecommendedWatcher,
     root: PathBuf,
     extra: Vec<String>,
     dirs: HashSet<PathBuf>,
@@ -1084,6 +1080,7 @@ impl Selective {
     /// it. Files seen are appended to `found`. Err on registration failure.
     fn register_tree(
         &mut self,
+        watcher: &mut notify::RecommendedWatcher,
         start: &Path,
         found: &mut Vec<PathBuf>,
     ) -> Result<(), notify::Error> {
@@ -1100,7 +1097,7 @@ impl Selective {
             if self.dirs.contains(&d) {
                 continue;
             }
-            self.watcher.watch(&d, RecursiveMode::NonRecursive)?;
+            watcher.watch(&d, RecursiveMode::NonRecursive)?;
             self.dirs.insert(d.clone());
             let Ok(rd) = fs::read_dir(&d) else { continue };
             for ent in rd.flatten() {
@@ -1117,14 +1114,19 @@ impl Selective {
 
     /// Register directories newly appearing among `paths`; returns the files
     /// found inside them (they may have been created before the watch).
-    fn adopt(&mut self, paths: &[PathBuf], overflow: &AtomicBool) -> Vec<PathBuf> {
+    fn adopt(
+        &mut self,
+        watcher: &mut notify::RecommendedWatcher,
+        paths: &[PathBuf],
+        overflow: &AtomicBool,
+    ) -> Vec<PathBuf> {
         let mut found = Vec::new();
         for p in paths {
             let is_new_dir = fs::symlink_metadata(p)
                 .map(|m| m.file_type().is_dir())
                 .unwrap_or(false);
             if is_new_dir && !self.dirs.contains(p) && p.starts_with(&self.root) {
-                if let Err(e) = self.register_tree(p, &mut found) {
+                if let Err(e) = self.register_tree(watcher, p, &mut found) {
                     tracing::warn!(%e, dir = %p.display(), "failed to watch new directory");
                     overflow.store(true, Ordering::SeqCst);
                 }
@@ -1149,15 +1151,12 @@ impl EventFeed for NotifyFeed {
                     Vec::new()
                 };
                 if let Some(sel) = self.selective.as_mut() {
-                    let found = sel.adopt(&paths, &self.overflow);
+                    let found = sel.adopt(&mut self.watcher, &paths, &self.overflow);
                     paths.extend(found);
                 }
                 Ok(FeedWake::Events { paths, overflow })
             }
-            Ok(Err(e)) => {
-                tracing::warn!(%e, "watch backend error; falling back to polling");
-                Ok(FeedWake::Error)
-            }
+            Ok(Err(_)) => Ok(FeedWake::Error),
             Err(e) => {
                 if self.overflow.swap(false, Ordering::SeqCst) {
                     Ok(FeedWake::Events {
@@ -1220,33 +1219,32 @@ fn init_notify(root: &Path, scan: &ScanOptions, selective: bool) -> Option<(Noti
             NotifyFeed {
                 rx,
                 overflow,
-                watcher: Some(watcher),
+                watcher,
                 selective: None,
             },
             (),
         ));
     }
     let mut sel = Selective {
-        watcher,
         root: root.to_path_buf(),
         extra: scan.extra_excludes.clone(),
         dirs: HashSet::new(),
     };
     let mut ignored = Vec::new();
-    if let Err(e) = sel.register_tree(root, &mut ignored) {
+    if let Err(e) = sel.register_tree(&mut watcher, root, &mut ignored) {
         tracing::warn!(%e, root = %root.display(), "failed to register notify watches");
         return None;
     }
     // `.git/info/exclude` changes the admitted set; `.git` itself is excluded.
     let info = root.join(".git").join("info");
     if info.is_dir() {
-        let _ = sel.watcher.watch(&info, RecursiveMode::NonRecursive);
+        let _ = watcher.watch(&info, RecursiveMode::NonRecursive);
     }
     Some((
         NotifyFeed {
             rx,
             overflow,
-            watcher: None,
+            watcher,
             selective: Some(sel),
         },
         (),
@@ -1377,7 +1375,9 @@ impl Intake {
             self.freshness.note_distrust();
         }
         for p in paths {
-            if p.is_absolute() && !p.starts_with(&self.root) {
+            // Compare after stripping Windows `\\?\` so notify's `C:\…`
+            // events still count as under a canonicalize()'d `\\?\C:\…` root.
+            if p.is_absolute() && !crate::paths::is_under_normalized(&self.root, &p) {
                 self.foreign_events += 1;
             } else {
                 self.rooted_events += 1;
@@ -1943,7 +1943,9 @@ fn crosses_symlink_dir(root: &Path, abs: &Path) -> bool {
 }
 
 fn relativize(root: &Path, path: &Path) -> Option<RelPath> {
-    let stripped = path.strip_prefix(root).ok()?;
+    // Strip Windows verbatim prefixes so `\\?\C:\root` and `C:\root\file`
+    // still relativize (notify events omit the prefix canonicalize adds).
+    let stripped = crate::paths::strip_prefix_normalized(root, path)?;
     if stripped.as_os_str().is_empty() {
         return None;
     }
@@ -2175,6 +2177,32 @@ mod tests {
             audit_ignored: false,
             ..ScanOptions::default()
         }
+    }
+
+    #[test]
+    fn recursive_notify_feed_keeps_native_watcher_alive() {
+        let dir = TestDir::new();
+        // Force the recursive path even on Linux, where production normally
+        // uses selective watches. No event loop or polling can satisfy this.
+        let (mut feed, ()) =
+            init_notify(dir.path(), &test_scan(), false).expect("initialize native watcher");
+        let path = dir.abs("native-watch-lifetime.rs");
+        dir.write("native-watch-lifetime.rs", "fn native_event() {}\n");
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(2);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "native event did not arrive within 2s"
+            );
+            match feed.recv_timeout(remaining) {
+                Ok(FeedWake::Events { paths, .. }) if paths.contains(&path) => break,
+                Ok(FeedWake::Events { .. }) => continue,
+                wake => panic!("native watcher stopped before delivering the write: {wake:?}"),
+            }
+        }
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     fn watcher(dir: &TestDir) -> Watcher {
@@ -3725,34 +3753,6 @@ mod tests {
     }
 
     #[test]
-    fn non_selective_feed_keeps_the_os_watcher_alive() {
-        let dir = TestDir::new();
-        dir.write("a.rs", "fn a() {}");
-        let (mut feed, ()) =
-            init_notify(dir.path(), &ScanOptions::default(), false).expect("notify backend");
-        // Drain whatever the registration itself produced.
-        let drain_until = Instant::now() + Duration::from_millis(150);
-        while Instant::now() < drain_until {
-            let _ = feed.recv_timeout(Duration::from_millis(20));
-        }
-
-        dir.write("b.rs", "fn b() {}");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            match feed.recv_timeout(Duration::from_millis(100)) {
-                Ok(FeedWake::Events { paths, .. }) if paths.iter().any(|p| p.ends_with("b.rs")) => {
-                    break;
-                }
-                Ok(_) | Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => {
-                    panic!("feed disconnected: the non-selective watcher must be retained")
-                }
-            }
-            assert!(Instant::now() < deadline, "no event for b.rs");
-        }
-    }
-
-    #[test]
     fn default_poll_interval_is_shorter_on_windows() {
         let expected = if cfg!(windows) {
             Duration::from_secs(2)
@@ -3792,5 +3792,57 @@ mod tests {
         assert_eq!(log.poll_cycle(), None, "event mode clears the poll cycle");
         stop.store(true, Ordering::SeqCst);
         let _ = thread.join();
+    }
+
+    #[test]
+    fn relativize_accepts_mixed_windows_verbatim_prefix() {
+        let root = PathBuf::from(r"\\?\C:\proj");
+        let file = PathBuf::from(r"C:\proj\src\main.rs");
+        let rel = relativize(&root, &file).expect("relativize across prefix forms");
+        assert_eq!(rel.as_str().replace('\\', "/"), "src/main.rs");
+    }
+
+    #[test]
+    fn absorb_counts_non_verbatim_event_under_verbatim_root_as_rooted() {
+        // Membership helper (used by absorb) must treat mixed prefix forms as under.
+        let root = PathBuf::from(r"\\?\C:\proj");
+        let event = PathBuf::from(r"C:\proj\src\a.rs");
+        assert!(
+            crate::paths::is_under_normalized(&root, &event),
+            "non-verbatim child of verbatim root must count as under"
+        );
+        assert!(!crate::paths::is_under_normalized(
+            &root,
+            &PathBuf::from(r"C:\other\a.rs")
+        ));
+        // On Windows, Path::is_absolute is true for `C:\…`, so absorb exercises
+        // the foreign/rooted counters and keep_event_path. On Unix those strings
+        // are not absolute, so only assert the helper + relativize path.
+        #[cfg(windows)]
+        {
+            let mut intake = Intake {
+                root: root.clone(),
+                scan: ScanOptions::default(),
+                freshness: Arc::new(FreshnessLog::new()),
+                storm_paths: 5000,
+                pending: HashSet::new(),
+                all_dirty: false,
+                foreign_events: 0,
+                rooted_events: 0,
+                last_event: None,
+                first_event: None,
+            };
+            intake.absorb(vec![event], false);
+            assert_eq!(
+                intake.rooted_events, 1,
+                "same logical path must not look foreign"
+            );
+            assert_eq!(intake.foreign_events, 0);
+            assert!(
+                !intake.pending.is_empty(),
+                "event under root should be kept"
+            );
+            assert!(!intake.only_foreign());
+        }
     }
 }

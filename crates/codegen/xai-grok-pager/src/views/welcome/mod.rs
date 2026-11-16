@@ -164,7 +164,7 @@ pub(super) fn render_pending_hint(
     let action_style = Style::default().fg(theme.gray);
     let label = locale
         .named_text("welcome.pending.press_again", "press again to {action}")
-        .replace("{action}", &pending.label);
+        .replace("{action}", pending.label);
     let line = Line::from(vec![
         Span::styled(format!("  {}", pending.shortcut.display()), key_style),
         Span::styled(":", action_style),
@@ -775,7 +775,7 @@ fn render_prompt_and_version(
         let key_text = pending.shortcut.display();
         let label = locale
             .named_text("welcome.pending.press_again", "press again to {action}")
-            .replace("{action}", &pending.label);
+            .replace("{action}", pending.label);
         let line = Line::from(vec![
             Span::styled(format!("  {key_text}"), key_style),
             Span::styled(":", action_style),

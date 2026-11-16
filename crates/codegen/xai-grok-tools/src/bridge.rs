@@ -175,9 +175,9 @@ impl ToolBridge {
     /// build, so `xai/mcp/tools_changed` cycles are reflected.
     async fn apply_codemode_namespace_listing(&self, defs: &mut [ToolDefinition]) {
         use crate::implementations::codemode::{CodemodeParams, render_namespace_listing};
-        let Some(pos) = defs
-            .iter()
-            .position(|d| d.function.name == crate::implementations::codemode::CODEMODE_NAME)
+        let Some(def) = defs
+            .iter_mut()
+            .find(|d| d.function.name == crate::implementations::codemode::CODEMODE_NAME)
         else {
             return;
         };
@@ -193,9 +193,8 @@ impl ToolBridge {
         if catalog.is_empty() {
             return;
         }
-        let base = defs[pos].function.description.clone().unwrap_or_default();
-        defs[pos].function.description =
-            Some(render_namespace_listing(&base, &catalog, budget_bytes));
+        let base = def.function.description.clone().unwrap_or_default();
+        def.function.description = Some(render_namespace_listing(&base, &catalog, budget_bytes));
     }
 
     /// Clone the session-scoped `DeclaredMcpTools` resource, if present.

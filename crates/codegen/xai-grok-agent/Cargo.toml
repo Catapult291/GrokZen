@@ -25,6 +25,7 @@ chrono = { workspace = true }
 fs2 = { workspace = true }
 ignore = { workspace = true }
 xai-grok-config = { workspace = true }
+xai-grok-product = { path = "../xai-grok-product" }
 xai-dirs = { workspace = true }
 xai-grok-permission-rules = { workspace = true }
 sha2 = { workspace = true }

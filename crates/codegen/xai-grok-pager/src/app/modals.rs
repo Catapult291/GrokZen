@@ -863,10 +863,6 @@ impl AgentView {
                                 self.active_modal = None;
                                 InputOutcome::Action(Action::OpenConfigAgentsModal(None))
                             }
-                            PaletteCommand::OpenFeedbackModal => {
-                                self.active_modal = None;
-                                InputOutcome::Action(Action::OpenFeedbackModal(Default::default()))
-                            }
                             PaletteCommand::EditPromptExternal => {
                                 self.active_modal = None;
                                 InputOutcome::Action(Action::EditPromptExternal)
@@ -1896,11 +1892,13 @@ impl AgentView {
                     .collect();
                 let picker_entries: Vec<PickerEntry> = items
                     .iter()
+                    .zip(&localized_displays)
+                    .zip(&localized_descriptions)
                     .enumerate()
-                    .map(|(i, _item)| {
+                    .map(|(i, ((_item, display), description))| {
                         PickerEntry::Row(PickerRow {
-                            label: &localized_displays[i],
-                            right_label: &localized_descriptions[i],
+                            label: display,
+                            right_label: description,
                             selected: state.hovered == Some(i)
                                 || (state.hovered.is_none() && i == state.selected),
                             expanded: false,

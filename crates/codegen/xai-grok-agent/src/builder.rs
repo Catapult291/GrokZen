@@ -59,7 +59,6 @@ pub struct AgentBuilder {
     session_env: Option<Arc<HashMap<String, String>>>,
     state_path: Option<PathBuf>,
     memory_backend: Option<Arc<dyn xai_grok_tools::types::memory_backend::MemoryBackend>>,
-    web_search_config: xai_grok_tools::implementations::web_search::WebSearchConfig,
     /// When true, web search and X search go to the agentic sampler as native server-side tools instead of registering as local Function tools.
     backend_search: bool,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
@@ -391,7 +390,6 @@ impl AgentBuilder {
             session_env: None,
             state_path: None,
             memory_backend: None,
-            web_search_config: Default::default(),
             backend_search: false,
             web_fetch_config: Default::default(),
             lsp: None,
@@ -586,14 +584,6 @@ impl AgentBuilder {
         handle: xai_grok_tools::implementations::grok_build::scheduler::types::SchedulerHandle,
     ) -> Self {
         self.parent_scheduler_handle = Some(handle);
-        self
-    }
-    /// `Enabled` injects a `WebSearchClient` resource so `web_search` can call the Responses API; `Disabled` returns a graceful error.
-    pub fn with_web_search_config(
-        mut self,
-        config: xai_grok_tools::implementations::web_search::WebSearchConfig,
-    ) -> Self {
-        self.web_search_config = config;
         self
     }
     /// Per-model gating is applied at request time, not here.
@@ -852,17 +842,7 @@ impl AgentBuilder {
                     | BuiltinAgentName::GrokBuildAskUser
             )
         );
-        if self.prompt_audience == PromptAudience::Primary
-            && is_parent_grok_build
-            && !tool_config
-                .tools
-                .iter()
-                .any(|tool| tool.kind == Some(ToolKind::Feedback))
-        {
-            tool_config
-                .tools
-                .push((&xai_grok_tools::implementations::grok_build::SendFeedbackTool).into());
-        }
+        let _ = is_parent_grok_build;
         if definition.inject_default_tools {
             if self.memory_backend.is_some() {
                 use xai_grok_tools::implementations::memory;
@@ -872,10 +852,6 @@ impl AgentBuilder {
                 tool_config
                     .tools
                     .push((&memory::get_tool::MemoryGetImpl).into());
-            }
-            if self.web_search_config.is_enabled() {
-                use xai_grok_tools::implementations::grok_build;
-                tool_config.tools.push((&grok_build::WebSearchTool).into());
             }
             if self.web_fetch_config.is_enabled() {
                 use xai_grok_tools::implementations::grok_build;
@@ -912,6 +888,15 @@ impl AgentBuilder {
                 tool_config.tools.push(
                     (&xai_grok_tools::implementations::grok_build::ReferenceToVideoTool).into(),
                 );
+            }
+            if !xai_grok_product::IMAGINE_TOOLS_ALLOWED {
+                // Build policy (community distribution: no Imagine credentials).
+                // Retain, don't gate the pushes: static toolsets and custom profiles
+                // may already carry the tools, and no config tier may re-add them.
+                tool_config.tools.retain(|tc| {
+                    !xai_grok_tools::implementations::grok_build::IMAGINE_TOOL_IDS
+                        .contains(&tc.id.as_str())
+                });
             }
             let has_write_tool = tool_config
                 .tools
@@ -968,22 +953,11 @@ impl AgentBuilder {
                 .retain(|tc| tc.id != mem_search_id && tc.id != mem_get_id);
         }
         if self.prompt_audience == crate::prompt::context::PromptAudience::Subagent {
-            let feedback_id = xai_grok_tools::registry::types::ToolConfig::for_tool::<
-                xai_grok_tools::implementations::grok_build::SendFeedbackTool,
-            >()
-            .id;
-            let feedback_name =
-                xai_grok_tools::implementations::grok_build::SEND_FEEDBACK_TOOL_NAME;
             tool_config.tools.retain(|tool| {
                 !matches!(
                     tool.kind,
-                    Some(
-                        xai_grok_tools::types::tool::ToolKind::AskUser
-                            | xai_grok_tools::types::tool::ToolKind::Feedback
-                    )
-                ) && tool.id != feedback_id
-                    && tool.id != feedback_name
-                    && tool.name_override.as_deref() != Some(feedback_name)
+                    Some(xai_grok_tools::types::tool::ToolKind::AskUser)
+                )
             });
         } else if !self.ask_user_question_enabled {
             let ask_user_id = format!(
@@ -1246,7 +1220,6 @@ impl AgentBuilder {
             &mut tool_config,
         );
         let use_backend_search = self.backend_search;
-        let web_search_enabled = self.web_search_config.is_enabled();
         let (tool_registry_timer, tool_registry_span) = build_await_step!("tool_registry");
         let tool_bridge = ToolBridge::finalize_builder(
             tool_bridge_builder,
@@ -1267,7 +1240,6 @@ impl AgentBuilder {
                 skills: skill_info.clone(),
                 state_path,
                 memory_backend: self.memory_backend,
-                web_search_config: self.web_search_config,
                 web_fetch_config: self.web_fetch_config,
                 lsp: self.lsp,
                 image_gen_config: self.image_gen_config,
@@ -1436,7 +1408,7 @@ impl AgentBuilder {
         }
         let mut hosted_tools = Vec::new();
         if use_backend_search {
-            if web_search_enabled && definition.hosted_tool_allowed("web_search") {
+            if definition.hosted_tool_allowed("web_search") {
                 hosted_tools.push(xai_grok_sampling_types::HostedTool::WebSearch { options: None });
             }
             if definition.hosted_tool_allowed("x_search") {
@@ -2058,14 +2030,6 @@ mod tests {
                 "[{label}] rendered descriptions must not leak template markers"
             );
             assert!(
-                names.contains(&"send_feedback"),
-                "[{label}] parent grok-build sessions must advertise send_feedback; got tools: {names:?}"
-            );
-            assert!(
-                builtin_names.contains(&"send_feedback"),
-                "[{label}] parent grok-build built-in definitions must advertise send_feedback; got tools: {builtin_names:?}"
-            );
-            assert!(
                 names.contains(&"enter_plan_mode"),
                 "[{label}] enter_plan_mode must always be present (TUI plan-mode keybind needs it); got tools: {names:?}"
             );
@@ -2195,23 +2159,9 @@ mod tests {
         use xai_grok_tools::computer::local::LocalTerminalBackend;
         use xai_grok_tools::notification::ToolNotificationHandle;
         use xai_grok_tools::registry::types::ToolConfig;
-        let feedback_id =
-            ToolConfig::for_tool::<xai_grok_tools::implementations::grok_build::SendFeedbackTool>()
-                .id;
-        let mut kindless_feedback_id = crate::config::AgentDefinition::default_grok_build();
-        kindless_feedback_id.tool_config.tools = vec![ToolConfig::from_id(&feedback_id)];
-        kindless_feedback_id.inject_default_tools = false;
-        let mut kindless_feedback_name = crate::config::AgentDefinition::default_grok_build();
-        kindless_feedback_name.tool_config.tools = vec![
-            ToolConfig::from_id("custom:tool")
-                .with_name(xai_grok_tools::implementations::grok_build::SEND_FEEDBACK_TOOL_NAME),
-        ];
-        kindless_feedback_name.inject_default_tools = false;
         for definition in [
             crate::config::AgentDefinition::default_grok_build(),
             crate::config::AgentDefinition::grok_build_ask_user(),
-            kindless_feedback_id,
-            kindless_feedback_name,
         ] {
             let agent = AgentBuilder::new(
                 std::env::temp_dir(),
@@ -2230,7 +2180,7 @@ mod tests {
                 .into_iter()
                 .map(|definition| definition.function.name)
                 .collect();
-            for parent_only in ["ask_user_question", "send_feedback"] {
+            for parent_only in ["ask_user_question"] {
                 assert!(
                     !names.iter().any(|name| name == parent_only),
                     "subagents must not receive {parent_only}: {names:?}"
@@ -2346,11 +2296,7 @@ mod tests {
             lost.iter().all(|name| {
                 matches!(
                     name.as_str(),
-                    "workflow"
-                        | "ask_user_question"
-                        | "send_feedback"
-                        | "enter_plan_mode"
-                        | "exit_plan_mode"
+                    "workflow" | "ask_user_question" | "enter_plan_mode" | "exit_plan_mode"
                 )
             }),
             "child strip must not drop unrelated tools: lost={lost:?}"
@@ -3174,14 +3120,12 @@ mod tests {
     async fn requested_enabled_web_tools_survive_allowlist() {
         use xai_grok_tools::computer::local::LocalTerminalBackend;
         use xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig;
-        use xai_grok_tools::implementations::web_search::WebSearchConfig;
         use xai_grok_tools::notification::ToolNotificationHandle;
         let mut definition = crate::config::AgentDefinition::default_grok_build();
         definition.tools = vec![
             "read_file".into(),
             "search_code".into(),
             "list_dir".into(),
-            "web_search".into(),
             "web_fetch".into(),
         ];
         let agent = AgentBuilder::new(
@@ -3190,15 +3134,6 @@ mod tests {
             ToolNotificationHandle::noop(),
         )
         .from_definition(definition)
-        .with_web_search_config(WebSearchConfig::Enabled {
-            api_key: "test-key".into(),
-            base_url: "https://api.x.ai/v1".into(),
-            model: "test-web-search-model".into(),
-            extra_headers: Default::default(),
-            alpha_test_key: None,
-            allowed_domains: None,
-            excluded_domains: None,
-        })
         .with_web_fetch_config(WebFetchConfig::Enabled {
             params: Default::default(),
         })
@@ -3211,13 +3146,7 @@ mod tests {
             .iter()
             .map(|d| d.function.name.clone())
             .collect();
-        for kept in [
-            "read_file",
-            "search_code",
-            "list_dir",
-            "web_search",
-            "web_fetch",
-        ] {
+        for kept in ["read_file", "search_code", "list_dir", "web_fetch"] {
             assert!(names.contains(&kept.to_string()), "got: {names:?}");
         }
         for excluded in ["run_terminal_command", "search_replace"] {
@@ -3304,28 +3233,13 @@ mod tests {
             "no full-toolset fallback — Edit must be excluded; got: {names:?}"
         );
     }
-    async fn build_with_web_search(
-        web_search_enabled: bool,
+    async fn build_with_backend_search(
         backend_search_enabled: bool,
         disallowed_tools: &[&str],
         tool_overrides: Option<xai_grok_sampling_types::ToolOverrides>,
     ) -> crate::agent::Agent {
         use xai_grok_tools::computer::local::LocalTerminalBackend;
-        use xai_grok_tools::implementations::web_search::WebSearchConfig;
         use xai_grok_tools::notification::ToolNotificationHandle;
-        let web_search_config = if web_search_enabled {
-            WebSearchConfig::Enabled {
-                api_key: "test-key".into(),
-                base_url: "https://api.x.ai/v1".into(),
-                model: "test-web-search-model".into(),
-                extra_headers: Default::default(),
-                alpha_test_key: None,
-                allowed_domains: None,
-                excluded_domains: None,
-            }
-        } else {
-            WebSearchConfig::Disabled
-        };
         let mut def = crate::config::AgentDefinition::default_grok_build();
         def.disallowed_tools = disallowed_tools.iter().map(|s| s.to_string()).collect();
         def.tool_overrides = tool_overrides;
@@ -3335,15 +3249,14 @@ mod tests {
             ToolNotificationHandle::noop(),
         )
         .from_definition(def)
-        .with_web_search_config(web_search_config)
         .with_backend_search(backend_search_enabled)
         .build()
         .await
         .expect("agent should build for backend-search test case")
     }
     #[tokio::test]
-    async fn disallowed_web_search_strips_function_and_hosted_tools() {
-        let agent = build_with_web_search(true, true, &["web_search"], None).await;
+    async fn disallowed_web_search_strips_hosted_tool() {
+        let agent = build_with_backend_search(true, &["web_search"], None).await;
         let hosted = agent.hosted_tools();
         assert!(
             !hosted
@@ -3357,19 +3270,10 @@ mod tests {
                 .any(|t| matches!(t, xai_grok_sampling_types::HostedTool::XSearch { .. })),
             "XSearch must remain when only web_search is disallowed, got: {hosted:?}"
         );
-        let has_web_search_fn = agent
-            .tool_definitions()
-            .await
-            .iter()
-            .any(|td| short_tool_name(&td.function.name) == "web_search");
-        assert!(
-            !has_web_search_fn,
-            "function web_search tool must be removed when disallowed"
-        );
     }
     #[tokio::test]
-    async fn hosted_tools_populated_when_backend_search_and_web_search_enabled() {
-        let agent = build_with_web_search(true, true, &[], None).await;
+    async fn hosted_tools_populated_when_backend_search_enabled() {
+        let agent = build_with_backend_search(true, &[], None).await;
         assert!(agent.backend_search_enabled());
         let hosted = agent.hosted_tools();
         assert!(
@@ -3386,15 +3290,9 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn hosted_tools_only_xsearch_when_web_search_disabled() {
-        let agent = build_with_web_search(false, true, &[], None).await;
+    async fn hosted_tools_populate_xsearch_for_backend_search() {
+        let agent = build_with_backend_search(true, &[], None).await;
         let hosted = agent.hosted_tools();
-        assert!(
-            !hosted
-                .iter()
-                .any(|t| matches!(t, xai_grok_sampling_types::HostedTool::WebSearch { .. })),
-            "WebSearch must NOT appear when web_search is disabled, got: {hosted:?}"
-        );
         assert!(
             hosted
                 .iter()
@@ -3404,7 +3302,7 @@ mod tests {
     }
     #[tokio::test]
     async fn hosted_tools_empty_when_backend_search_disabled() {
-        let agent = build_with_web_search(true, false, &[], None).await;
+        let agent = build_with_backend_search(false, &[], None).await;
         assert!(!agent.backend_search_enabled());
         assert!(agent.hosted_tools().is_empty());
     }
@@ -3416,8 +3314,7 @@ mod tests {
                     .unwrap(),
             ),
         };
-        let agent = build_with_web_search(
-            true,
+        let agent = build_with_backend_search(
             true,
             &[],
             Some(xai_grok_sampling_types::ToolOverrides {

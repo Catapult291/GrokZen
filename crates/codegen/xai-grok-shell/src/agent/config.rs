@@ -354,7 +354,6 @@ pub struct RuntimeResolutionContext<'a> {
     /// `Some(false)` means the CLI explicitly disabled it (`--no-subagents`), `Some(true)` explicitly enabled it; `None` defers to env/config/default.
     /// Every entrypoint (TUI, `grok agent stdio`, headless) passes `None` unless a flag was given, so they resolve identically.
     pub cli_subagents: Option<bool>,
-    pub cli_web_search_model: Option<&'a str>,
     pub cli_session_summary_model: Option<&'a str>,
     /// CLI memory override set by a legacy compatibility flag.
     pub memory_enabled_override: Option<bool>,
@@ -884,9 +883,6 @@ pub struct Config {
     /// CLI override for reasoning effort.
     #[serde(skip)]
     pub reasoning_effort_override: Option<ReasoningEffort>,
-    /// CLI override for the web search model ID.
-    #[serde(skip)]
-    pub web_search_model_override: Option<String>,
     /// CLI override for the session summary model ID.
     #[serde(skip)]
     pub session_summary_model_override: Option<String>,
@@ -1017,8 +1013,6 @@ pub struct Config {
     /// Enforced requirement pins from `requirements.toml`.
     #[serde(skip)]
     pub requirements: Requirements,
-    #[serde(skip)]
-    pub web_search_model: String,
     /// Session title model.
     /// Resolved to the compiled default (`default_session_summary_model`) when unset; see `ModelOverrideConfig::resolve`.
     #[serde(skip)]
@@ -1211,7 +1205,6 @@ impl Default for Config {
             storage_mode: StorageMode::resolve(None, None),
             default_model_override: None,
             reasoning_effort_override: None,
-            web_search_model_override: None,
             session_summary_model_override: None,
             default_yolo_mode: false,
             default_auto_mode: false,
@@ -1253,7 +1246,6 @@ impl Default for Config {
             managed_mcp_gateway_tools_enabled: false,
             compat_resolved: CompatConfig::default(),
             requirements: Requirements::default(),
-            web_search_model: crate::models::default_web_search_model().to_owned(),
             session_summary_model: None,
             image_description_model: None,
             prompt_suggest_model_pin: crate::config::PromptSuggestModelPin::Unpinned,
@@ -1646,9 +1638,7 @@ impl Config {
         if config.client_version.is_none() {
             config.client_version = Self::default().client_version;
         }
-        let model_overrides =
-            crate::config::ModelOverrideConfig::resolve(None, None, raw_config, None);
-        config.web_search_model = model_overrides.web_search;
+        let model_overrides = crate::config::ModelOverrideConfig::resolve(None, raw_config, None);
         config.session_summary_model = model_overrides.session_summary;
         config.image_description_model = model_overrides.image_description;
         config.prompt_suggest_model_pin = model_overrides.prompt_suggestion;
@@ -1720,7 +1710,6 @@ impl Config {
     /// Note: `worktree_type` is resolved directly in `MvpAgent::new` via `resolve_worktree_type` since it's an agent-level field, not a Config field.
     pub fn resolve_runtime_fields(&mut self, ctx: &RuntimeResolutionContext<'_>) {
         self.cli_subagents = ctx.cli_subagents;
-        self.web_search_model_override = ctx.cli_web_search_model.map(|s| s.to_owned());
         self.session_summary_model_override = ctx.cli_session_summary_model.map(|s| s.to_owned());
         self.resolve_subagents(ctx.cli_subagents, ctx.raw_config);
         let env = std::env::var(crate::config::SubagentsConfig::ENV_MAX_DEPTH).ok();
@@ -1790,12 +1779,10 @@ impl Config {
         self.managed_mcps_enabled = mcps.enabled;
         self.managed_mcp_gateway_tools_enabled = mcps.gateway_tools_enabled;
         let models = crate::config::ModelOverrideConfig::resolve(
-            ctx.cli_web_search_model,
             ctx.cli_session_summary_model,
             ctx.raw_config,
             ctx.remote_settings,
         );
-        self.web_search_model = models.web_search;
         self.session_summary_model = models.session_summary;
         self.image_description_model = models.image_description;
         self.prompt_suggest_model_pin = models.prompt_suggestion;
@@ -1851,7 +1838,6 @@ impl Config {
             }
         }
         let remote_settings = self.remote_settings.clone();
-        let cli_web_search_model = self.web_search_model_override.clone();
         let cli_session_summary_model = self.session_summary_model_override.clone();
         let laziness_debug_log = self.laziness_debug_log.clone();
         let ctx = RuntimeResolutionContext {
@@ -1859,7 +1845,6 @@ impl Config {
             remote_settings: remote_settings.as_ref(),
             is_headless: self.mode == AgentMode::Headless,
             cli_subagents: self.cli_subagents,
-            cli_web_search_model: cli_web_search_model.as_deref(),
             cli_session_summary_model: cli_session_summary_model.as_deref(),
             memory_enabled_override: self.memory_enabled_override,
             disable_web_search: self.disable_web_search,
@@ -2193,9 +2178,15 @@ impl Config {
     }
     /// `image_gen` (and `/imagine`). Default on.
     /// `imagine_tools_disabled` is a remote force-off (env/config cannot re-enable).
+    /// A build with the Imagine policy off (community distribution: no Imagine
+    /// credentials) force-offs first — no requirement, env, config, or remote tier
+    /// can re-enable, matching the toolset-level compile-out.
     /// Otherwise: requirement > env > `[features]` > remote > default.
     pub(crate) fn resolve_image_gen(&self) -> Resolved<bool> {
         use xai_grok_tools::implementations::grok_build::IMAGE_GEN_TOOL_NAME;
+        if !xai_grok_product::IMAGINE_TOOLS_ALLOWED {
+            return Resolved::new(false, ConfigSource::BuildPolicy);
+        }
         if let Some(pinned) = self.requirements.image_gen.pinned() {
             return Resolved::new(pinned, ConfigSource::Requirement);
         }
@@ -2220,6 +2211,9 @@ impl Config {
     /// Same denylist / requirement pattern as [`Self::resolve_image_gen`]; no `[features]` key (defaults on).
     pub(crate) fn resolve_image_edit(&self) -> Resolved<bool> {
         use xai_grok_tools::implementations::grok_build::IMAGE_EDIT_TOOL_NAME;
+        if !xai_grok_product::IMAGINE_TOOLS_ALLOWED {
+            return Resolved::new(false, ConfigSource::BuildPolicy);
+        }
         if let Some(pinned) = self.requirements.image_edit.pinned() {
             return Resolved::new(pinned, ConfigSource::Requirement);
         }
@@ -2234,11 +2228,15 @@ impl Config {
     }
     /// `image_to_video` / `reference_to_video` (and `/imagine-video`). Default on.
     /// Registered as a pair; denylisting either tool name (or `video_gen`) disables both.
+    /// The Imagine build policy (community distribution) force-offs first; see [`Self::resolve_image_gen`].
     /// Otherwise same precedence as [`Self::resolve_image_gen`].
     pub(crate) fn resolve_video_gen(&self) -> Resolved<bool> {
         use xai_grok_tools::implementations::grok_build::{
             IMAGE_TO_VIDEO_TOOL_NAME, REFERENCE_TO_VIDEO_TOOL_NAME,
         };
+        if !xai_grok_product::IMAGINE_TOOLS_ALLOWED {
+            return Resolved::new(false, ConfigSource::BuildPolicy);
+        }
         if let Some(pinned) = self.requirements.video_gen.pinned() {
             return Resolved::new(pinned, ConfigSource::Requirement);
         }
@@ -4948,121 +4946,6 @@ pub(crate) fn inject_url_derived_headers(
         .entry(crate::http::CLIENT_MODE_HEADER.to_string())
         .or_insert_with(|| crate::http::process_client_mode().to_string());
     let _ = (alpha_test_key, base_url);
-}
-fn resolve_hidden_default_web_search_sampling_config(
-    model_id: &str,
-    session_key: Option<&str>,
-    disable_api_key_auth: bool,
-    alpha_test_key: Option<String>,
-    client_version: Option<String>,
-    endpoints: &EndpointsConfig,
-) -> SamplerConfig {
-    let entry = ModelEntry {
-        bundled_catalog_entry: false,
-        official_catalog_entry: false,
-        info: ModelInfo {
-            id: None,
-            model_family: None,
-            model: model_id.to_owned(),
-            base_url: endpoints.resolve_inference_base_url(),
-            name: None,
-            description: None,
-            notice: None,
-            max_completion_tokens: None,
-            temperature: None,
-            top_p: None,
-            api_backend: ApiBackend::Responses,
-            auth_scheme: Default::default(),
-            extra_headers: IndexMap::new(),
-            query_params: IndexMap::new(),
-            env_http_headers: IndexMap::new(),
-            context_window: NonZeroU64::new(200_000).unwrap(),
-            context_windows: Vec::new(),
-            max_request_bytes: None,
-            system_prompt_label: None,
-            use_concise: false,
-            agent_type: default_agent_type(),
-            inference_idle_timeout_secs: None,
-            max_retries: None,
-            rate_limit_retry_threshold: None,
-            subagent_rate_limit_max_attempts: None,
-            hidden: true,
-            user_selectable: false,
-            supported_in_api: true,
-            reasoning_effort: None,
-            supports_reasoning_effort: false,
-            reasoning_efforts: Vec::new(),
-            reasoning_effort_server_default: false,
-            variants: Vec::new(),
-            supports_backend_search: false,
-            compactions_remaining: None,
-            compaction_at_tokens: None,
-            show_model_fingerprint: false,
-            stream_tool_calls: None,
-            reasoning_summary: None,
-            laziness_detector: LazinessDetectorPerModelConfig::default(),
-        },
-        mtls_cert_dir: None,
-        api_key: None,
-        env_key: None,
-        auth_provider: None,
-        api_base_url: None,
-    };
-    let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
-    sampling_config_for_model(
-        &entry,
-        credentials,
-        alpha_test_key,
-        client_version,
-        None,
-        None,
-    )
-}
-pub(crate) fn resolve_web_search_sampling_config(
-    model_id: &str,
-    models: &IndexMap<String, ModelEntry>,
-    session_key: Option<&str>,
-    disable_api_key_auth: bool,
-    alpha_test_key: Option<String>,
-    client_version: Option<String>,
-    endpoints: &EndpointsConfig,
-) -> Option<SamplerConfig> {
-    let resolved = if let Some(entry) = find_model_by_id(models, model_id).cloned() {
-        let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
-        if credentials.api_key.is_none() && entry.effective_auth_provider().is_some() {
-            tracing::warn!(
-                web_search_model = %model_id,
-                "web search model uses an auth provider with no cached token; disabling web search"
-            );
-            return None;
-        }
-        Some(sampling_config_for_model(
-            &entry,
-            credentials,
-            alpha_test_key,
-            client_version,
-            None,
-            None,
-        ))
-    } else if model_id == crate::models::default_web_search_model() {
-        Some(resolve_hidden_default_web_search_sampling_config(
-            model_id,
-            session_key,
-            disable_api_key_auth,
-            alpha_test_key,
-            client_version,
-            endpoints,
-        ))
-    } else {
-        None
-    };
-    if resolved.is_none() {
-        tracing::warn!(
-            web_search_model = %model_id,
-            "configured web_search model not found; disabling web search"
-        );
-    }
-    resolved.map(crate::tools::config::web_search_sampling_config)
 }
 pub(crate) fn to_acp_model_info(
     models: &IndexMap<String, ModelEntry>,

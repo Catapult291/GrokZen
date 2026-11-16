@@ -765,9 +765,9 @@ pub fn current_value_for(
         // build the value is locked to opt-out, so never surface an
         // opt-in canonical that no longer exists in the catalog.
         "coding_data_sharing" => Some(SettingValue::Enum(
-            if xai_grok_version::coding_data_retention_locked_opt_out() {
-                "opt-out"
-            } else if pager.coding_data_sharing_opt_out {
+            if xai_grok_version::coding_data_retention_locked_opt_out()
+                || pager.coding_data_sharing_opt_out
+            {
                 "opt-out"
             } else {
                 "opt-in"

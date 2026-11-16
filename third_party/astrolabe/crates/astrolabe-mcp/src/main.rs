@@ -11,9 +11,9 @@
 //! plus a short text summary.
 //!
 //! Keep the tool surface small. Seven tools ([`astrolabe_mcp::TOOL_COUNT`]):
-//! `resolve_context`, `search_code`, `find_symbol`, `get_languages`,
-//! `find_references`, `goto_definition`, `get_diagnostics`.
-//! `resolve_context` is the front door.
+//! `resolve_contx`, `search_code`, `find_symbol`, `get_lang`,
+//! `find_refs`, `goto_def`, `get_diag`.
+//! `resolve_contx` is the front door.
 //!
 //! Declare a generous `ttlMs` on `tools/list` so clients stop re-fetching the
 //! tool definitions every session.
@@ -26,6 +26,14 @@ use astrolabe_mcp::{
 use rmcp::{service::serve_directly, RoleServer};
 use std::io::IsTerminal;
 use std::path::Path;
+
+/// mimalloc instead of the system allocator: a large index build spawns one
+/// rayon arena per core full of parse temporaries, and the system allocator
+/// holds most of that freed memory in per-thread caches. mimalloc purges its
+/// free pages on `mi_collect(true)`, which `alloc::release_free_memory`
+/// calls after each index swap.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// Startup failure: the message and the process exit code to use once the
 /// client has gone away.
@@ -94,12 +102,28 @@ async fn main() -> anyhow::Result<()> {
             // Interactive MCP client setup ships with the npm package (Node).
             // Prefer re-exec via npx so cargo-only installs still work when
             // network/npm is available; otherwise print the install hint.
-            let status = std::process::Command::new("npx")
+            // Pass this binary's absolute path so the generated Cursor config
+            // never falls back to a PATH-relative `astrolabe` (which the client
+            // may not inherit). An explicit --command from the user wins.
+            let user_has_command = args.iter().any(|arg| {
+                let arg = arg.to_string_lossy();
+                arg == "--command" || arg.starts_with("--command=")
+            });
+            let current_exe = if user_has_command {
+                None
+            } else {
+                std::env::current_exe().ok()
+            };
+            let mut command = std::process::Command::new("npx");
+            command
                 .arg("-y")
                 .arg("@zlnap/astrolabe")
                 .arg("setup")
-                .args(&args)
-                .status();
+                .args(&args);
+            if let Some(exe) = current_exe {
+                command.arg("--command").arg(exe);
+            }
+            let status = command.status();
             match status {
                 Ok(status) => std::process::exit(status.code().unwrap_or(1)),
                 Err(err) => {

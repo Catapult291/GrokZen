@@ -724,7 +724,6 @@ impl AgentView {
                 || self.gboom.is_some()
                 || self.block_viewer.is_some()
                 || self.extensions_modal.is_some()
-                || self.feedback_modal.is_some()
                 || self.agents_modal.is_some()
                 || self.btw_state.is_some()
                 || self.line_viewer.is_some()
@@ -4214,24 +4213,6 @@ impl AgentView {
             self.pane_areas = layout.pane_areas();
             return (None, crate::terminal::overlay::clear().map(Into::into));
         }
-        if let Some(ref mut modal_state) = self.feedback_modal {
-            let overlay_area = Rect {
-                x: area.x,
-                y: area.y,
-                width: area.width,
-                height: layout.shortcuts.y.saturating_sub(area.y).saturating_sub(1),
-            };
-            let compact = self.scrollback.appearance().prompt.compact;
-            let rendered = modal_state.render(buf, overlay_area, &theme, compact);
-            let (cursor, post_flush) = match rendered {
-                Some(frame) => (frame.cursor, frame.post_flush),
-                None => (None, None),
-            };
-            let post_flush =
-                post_flush.or_else(|| crate::terminal::overlay::clear().map(Into::into));
-            self.pane_areas = layout.pane_areas();
-            return (cursor, post_flush);
-        }
         if let Some(ref mut modal_state) = self.extensions_modal {
             use crate::views::extensions_modal::render_extensions_modal_with_locale;
             use crate::views::shortcuts_bar::HintItem;
@@ -4726,7 +4707,7 @@ fn follow_indicator_row(layout: &mut AgentViewLayout) -> Option<u16> {
     .filter(|rect| rect.height > 0)
     .map(|rect| rect.y)
     .min();
-    if !next_pane_y.is_some_and(|y| y <= gap_y) {
+    if next_pane_y.is_none_or(|y| y > gap_y) {
         return Some(gap_y);
     }
     // Never take the scrollback's only row: an empty transcript is a worse trade than a missing arrow.
