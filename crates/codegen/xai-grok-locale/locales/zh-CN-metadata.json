@@ -71,6 +71,8 @@
   "plan.approval.empty_title": "plan.md（空）",
   "plan.approval.revision_sent": "计划修改已发送。",
   "plan.approval.type_revision": "请输入修改说明，或按 a 批准。",
+  "plan.feedback.no_comments": "没有可发送的评论。",
+  "plan.feedback.sent": "计划反馈已发送。",
   "panel.resume_title": "恢复会话",
   "panel.resume_footer": "↑/↓ 导航 · Enter 确认 · Esc 取消",
   "panel.mcps_title": "管理 MCP 服务器",

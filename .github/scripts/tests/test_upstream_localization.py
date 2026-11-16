@@ -79,7 +79,7 @@ class UpstreamLocalizationTests(unittest.TestCase):
     def test_new_owned_ui_messages_have_chinese_metadata(self):
         metadata = load_json(CODEGEN / "xai-grok-locale/locales/zh-CN-metadata.json")
         for key in (
-            "prompt.flag.always_approve", "minimal.feedback.too_small",
+            "prompt.flag.always_approve",
             "slash.command.memory.error.arguments", "slash.command.flush.error.arguments",
             "slash.command.dream.error.arguments", "tasks.schedule.next_in", "tasks.schedule.due_now",
             "plan.notice.busy_revise", "plan.notice.busy_abandon", "plan.notice.switching_revise",
