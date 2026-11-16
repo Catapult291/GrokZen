@@ -1,32 +1,22 @@
 [
   {
-    "category": "fixes",
-    "description": "**Tab navigation** in the pager now cycles cleanly among prompt, scrollback, and the entire dock instead of stopping at every dock section.",
+    "category": "features",
+    "description": "**Astrolabe 0.17.9** — the search engine is vendored at 0.17.9, and tool execution returns to direct dispatch.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Imagine build strategy** — media tools can be compiled out by the Imagine build strategy via the `IMAGINE_TOOL_IDS` manifest.",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "**Ctrl+G** now hides or shows the dock in the pager; focus returns to scrollback when hiding.",
-    "breaking_change": false
-  },
-  {
-    "category": "performance",
-    "description": "**Agent dashboard** no longer wastes CPU repainting identical frames when only idle spinners or hidden rows are present.",
+    "description": "**Removed built-ins** — the built-in web_search tool is removed and web retrieval goes through MCP servers; the send_feedback tool and the /feedback command are removed.",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "**Multiple concurrent `grok agent stdio`** processes against the same GROK_HOME no longer crash at startup.",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**MCP server connections** no longer fail against modern 2026-07-28 servers.",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**Fixed startup crash** on Windows when the Client-ProjFS optional feature is disabled.",
+    "description": "**Safer indexing** — indexing access hardened across pager/shell/update/tools (`indexing_slicing` cleared); workspace clippy warnings at zero.",
     "breaking_change": false
   }
 ]

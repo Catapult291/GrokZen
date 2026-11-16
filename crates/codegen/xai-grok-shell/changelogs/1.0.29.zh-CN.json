@@ -1,32 +1,22 @@
 [
   {
-    "category": "fixes",
-    "description": "界面中的 **Tab 导航**现在会在输入框、回滚区和整个停靠面板之间顺畅循环，不再逐个停在每个停靠分区。",
+    "category": "features",
+    "description": "**Astrolabe 0.17.9** —— 检索引擎 vendor 升级至 0.17.9，工具执行恢复直接调度。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Imagine 构建策略** —— 媒体工具可按 Imagine 构建策略编译剔除，配合 IMAGINE_TOOL_IDS 清单。",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "**Ctrl+G** 现在可以隐藏或显示停靠面板；隐藏后焦点返回回滚区。",
-    "breaking_change": false
-  },
-  {
-    "category": "performance",
-    "description": "**智能体仪表盘**在只有空闲加载动画或隐藏行时，不再浪费 CPU 重绘相同帧。",
+    "description": "**内置工具清退** —— 移除内置 web_search 工具，联网检索改走 MCP 服务器；移除 send_feedback 工具与 /feedback 反馈命令。",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "多个并发的 **`grok agent stdio` 进程**使用同一个 GROK_HOME 时，不再在启动阶段崩溃。",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**MCP 服务器连接**不再因服务器采用 2026-07-28 协议版本而失败。",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "修复 Windows 未启用 Client-ProjFS 可选功能时出现的**启动崩溃**。",
+    "description": "**索引安全化** —— pager/shell/update/tools 等链路索引访问安全化（indexing_slicing 清零），全仓 clippy 警告清零。",
     "breaking_change": false
   }
 ]
