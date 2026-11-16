@@ -898,7 +898,11 @@ fn split_command_segments(command: &str) -> Vec<String> {
 fn first_command_word(segment: &str) -> Option<&str> {
     let mut s = segment.trim_start();
     loop {
-        if !s.as_bytes().first().is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_') {
+        if !s
+            .as_bytes()
+            .first()
+            .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+        {
             break;
         }
         let eq = s.find('=');
@@ -1564,7 +1568,10 @@ impl BashTool {
         if let Some(param) = param
             && let Some(ctx) = ctx.as_object_mut()
         {
-            ctx.insert("param".to_string(), serde_json::Value::String(param.to_owned()));
+            ctx.insert(
+                "param".to_string(),
+                serde_json::Value::String(param.to_owned()),
+            );
         }
         xai_grok_telemetry::unified_log::debug(
             "shell.bash.background_finalize.step",

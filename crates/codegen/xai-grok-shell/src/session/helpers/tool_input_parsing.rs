@@ -239,9 +239,7 @@ fn repair_truncated_json_impl(
                     _ => break,
                 }
                 let start = i;
-                while i < bytes.len()
-                    && bytes.get(i).is_some_and(|b| b.is_ascii_alphabetic())
-                {
+                while i < bytes.len() && bytes.get(i).is_some_and(|b| b.is_ascii_alphabetic()) {
                     i += 1;
                 }
                 match std::str::from_utf8(bytes.get(start..i).unwrap_or(&[])).ok() {

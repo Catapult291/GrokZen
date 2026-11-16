@@ -37,7 +37,9 @@ pub(crate) fn dest_path_contains(parent: &Path, child: &Path) -> bool {
     let parent = folded_components(parent);
     let child = folded_components(child);
     child.len() >= parent.len()
-        && child.get(..parent.len()).is_some_and(|c| c == parent.as_slice())
+        && child
+            .get(..parent.len())
+            .is_some_and(|c| c == parent.as_slice())
 }
 
 #[cfg(not(windows))]
