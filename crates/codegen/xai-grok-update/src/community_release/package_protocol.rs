@@ -38,6 +38,9 @@ impl PackageProtocol {
             .enumerate()
             .filter(|(_, line)| **line == END)
             .collect();
+        if starts.len() != 1 || ends.len() != 1 {
+            anyhow::bail!("community package protocol block is malformed");
+        }
         let (Some(&start), Some(&end)) = (starts.first(), ends.first()) else {
             anyhow::bail!("community package protocol block is malformed");
         };
