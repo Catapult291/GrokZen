@@ -14,25 +14,28 @@
 
 </div>
 
-## 特点
+## 简介
 
-## 项目简介
+基于 xAI 官方 [Grok Build](https://github.com/xai-org/grok-build) 构建的社区版：
 
-本项目是基于 xAI 官方 [Grok Build](https://github.com/xai-org/grok-build)
-终端编程智能体构建的社区版本，面向中文用户提供**简体中文界面与文档**，
-并在源码层面**禁用遥测数据回传**，兼顾使用习惯与隐私。
+- **全中文**：CLI / TUI / 设置 / 文档全简体中文，可 `--locale en-US` 切英文
+- **去遥测**：上报路径源码层禁用，编译期排除，无法远程重开
+- **无 x.ai 登录**：不强制跳转 x.ai，模型与 API Key 自行配置
+- **无内置工具**：模型、联网检索、反馈通道均不预置，检索与扩展走 MCP 服务器
+- **更新独立**：只从本仓库 Releases 更新，永不访问 x.ai 官方通道
 
-## 解决什么问题
+## 相比 Grok Build 的增强
 
-GrokZen 在保留完整功能与官方协议兼容的前提下，针对隐私与本地化做了以下处理：
-
-- **去遥测**：Mixpanel / 产品事件上报与 GCS 研究/会话追踪上传路径在源码层禁用
-- **隐私防护**：上传路径在编译期由 `privacy` 特性排除，无法被环境变量、配置或
-  服务端远程设置重新启用
-- **厂商更新禁用**：不访问 x.ai 官方更新通道，避免被替换回官方版
-- **独立于 x.ai**：内置 Grok 模型已移除；不提供账号登录通道，启动时不再强制跳转
-  `auth.x.ai` / `accounts.x.ai`。请在 `config.toml` 里配置自己的 `[model.*]` 与 API Key
-- **中文界面**：CLI、TUI、设置、提示与文档全简体中文，可 `--locale en-US` 切英文
+- **内置 Astrolabe 语义索引引擎**：进程内代码索引，`search_code` / `find_symbol` / `resolve_context` 等 7 个检索工具替代内置 grep
+- **codemode 元工具**：QuickJS 沙盒编排 MCP 工具调用，中间结果不进主上下文；MCP 工具按 direct / deferred / codemode_only / hidden 四档暴露
+- **安全删除机制**：Windows 删除统一走 safe-delete 校验通道，并拦截盘根、系统目录、格式化等不可恢复操作
+- **子代理强化**：内置 explore / plan / implementer 类型路由，支持并行 fan-out、worktree 隔离收尾与结构化输出
+- **循环护栏**：文本复读熔断、跨轮循环拦截与同轮工具调用去重
+- **缓存与旁路请求**：长会话提示词缓存守卫；标题刷新、记忆整理等旁路请求走轻量模型，不占主回合
+- **niubash 默认 Shell**：Windows 下超长命令自动暂存脚本执行，后台任务补发完成通知
+- **跨会话任务面板**：detach 任务跨会话可见、可终止
+- **会话操作增强**：`/fork` 支持从较早轮次分叉，`/undo` 独立回退对话
+- **公告译文独立更新**：中文公告译文随本仓库独立发布，可先于程序更新
 
 > 隐私验证三层证据链（线路层测试版本 **v1.0.13**）见 [DEVELOPER.md](DEVELOPER.md#隐私验证证据v1013)。
 
