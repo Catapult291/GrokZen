@@ -243,12 +243,12 @@ pub fn pad_to_width(s: &str, width: usize) -> String {
     out
 }
 
-/// Group a count's digits with commas for display: `1234567` becomes `"1,234,567"`.
-pub fn group_thousands(n: u64) -> String {
+/// Group a count's digits with commas, 4 digits per group: `1234567` becomes `"123,4567"`.
+pub fn group_tokens(n: u64) -> String {
     let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    let mut out = String::with_capacity(digits.len() + digits.len() / 4);
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+        if i > 0 && (digits.len() - i).is_multiple_of(4) {
             out.push(',');
         }
         out.push(c);
@@ -288,11 +288,11 @@ mod tests {
     }
 
     #[test]
-    fn group_thousands_inserts_separators() {
-        assert_eq!(group_thousands(0), "0");
-        assert_eq!(group_thousands(999), "999");
-        assert_eq!(group_thousands(1_000), "1,000");
-        assert_eq!(group_thousands(1_234_567), "1,234,567");
+    fn group_tokens_inserts_separators() {
+        assert_eq!(group_tokens(0), "0");
+        assert_eq!(group_tokens(999), "999");
+        assert_eq!(group_tokens(1_000), "1000");
+        assert_eq!(group_tokens(1_234_567), "123,4567");
     }
 
     #[test]

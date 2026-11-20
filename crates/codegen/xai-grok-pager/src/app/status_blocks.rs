@@ -5,7 +5,7 @@
 use crate::app::agent::{BgTaskState, BgTaskStatus};
 use crate::app::agent_view::AgentView;
 use crate::app::subagent::format_subagent_label_with_locale;
-use crate::util::{format_duration, group_thousands};
+use crate::util::{format_duration, group_tokens};
 
 fn status_text<'a>(
     locale: Option<&crate::locale::LocaleContext>,
@@ -278,8 +278,8 @@ pub(crate) fn session_usage_block_text_with_locale(
             "status.usage.input_tokens",
             "  Input tokens:   {input} ({cached} cached)",
         )
-        .replace("{input}", &group_thousands(t.input_tokens))
-        .replace("{cached}", &group_thousands(t.cached_read_tokens)),
+        .replace("{input}", &group_tokens(t.input_tokens))
+        .replace("{cached}", &group_tokens(t.cached_read_tokens)),
     ];
     rows.push(
         status_text(
@@ -287,8 +287,8 @@ pub(crate) fn session_usage_block_text_with_locale(
             "status.usage.output_tokens",
             "  Output tokens:  {output} ({reasoning} reasoning)",
         )
-        .replace("{output}", &group_thousands(t.output_tokens))
-        .replace("{reasoning}", &group_thousands(t.reasoning_tokens)),
+        .replace("{output}", &group_tokens(t.output_tokens))
+        .replace("{reasoning}", &group_tokens(t.reasoning_tokens)),
     );
     rows.push(
         status_text(
@@ -296,7 +296,7 @@ pub(crate) fn session_usage_block_text_with_locale(
             "status.usage.total_tokens",
             "  Total tokens:   {total}",
         )
-        .replace("{total}", &group_thousands(t.total_tokens)),
+        .replace("{total}", &group_tokens(t.total_tokens)),
     );
     rows.push(
         status_text(
@@ -304,7 +304,7 @@ pub(crate) fn session_usage_block_text_with_locale(
             "status.usage.model_calls",
             "  Model calls:    {calls} · API time: {time}",
         )
-        .replace("{calls}", &group_thousands(t.model_calls))
+        .replace("{calls}", &group_tokens(t.model_calls))
         .replace(
             "{time}",
             &format_duration(std::time::Duration::from_millis(t.api_duration_ms)),
@@ -348,7 +348,7 @@ fn format_by_model_row_with_locale(
     m: &xai_grok_shell::extensions::notification::PromptUsageModel,
     locale: Option<&crate::locale::LocaleContext>,
 ) -> String {
-    let tokens = group_thousands(m.total_tokens);
+    let tokens = group_tokens(m.total_tokens);
     let (id, english) = if m.cost_usd_ticks.is_some() {
         (
             "status.usage.model_total_cost",
@@ -521,8 +521,8 @@ mod tests {
         let text = session_usage_block_text_with_locale(&usage, Some(&locale));
         for expected in [
             "会话用量（自启动或上次恢复以来）：",
-            "输入 Token：1,234,567",
-            "输出 Token：45,678",
+            "输入 Token：123,4567",
+            "输出 Token：4,5678",
             "模型调用：42",
             "按模型：",
             "grok-4.5",
@@ -572,7 +572,7 @@ mod tests {
         assert_eq!(
             rows,
             [
-                "    grok-4.7-build: 124,456 Tokens · $0.0020",
+                "    grok-4.7-build: 12,4456 Tokens · $0.0020",
                 "    grok-4: 110 Tokens",
             ],
             "{text}"
@@ -602,11 +602,11 @@ mod tests {
         assert!(text.contains("usage is incomplete"), "{text}");
     }
     #[test]
-    fn group_thousands_groups_digits() {
-        assert_eq!(group_thousands(0), "0");
-        assert_eq!(group_thousands(999), "999");
-        assert_eq!(group_thousands(1_000), "1,000");
-        assert_eq!(group_thousands(1_234_567), "1,234,567");
+    fn group_tokens_groups_digits() {
+        assert_eq!(group_tokens(0), "0");
+        assert_eq!(group_tokens(999), "999");
+        assert_eq!(group_tokens(1_000), "1000");
+        assert_eq!(group_tokens(1_234_567), "123,4567");
     }
     #[test]
     fn first_nonempty_line_skips_blank_leading_lines() {
@@ -651,6 +651,6 @@ mod model_total_translation_tests {
         };
         let row =
             super::format_by_model_row_with_locale("model-{tokens}-{cost}", &usage, Some(&locale));
-        assert_eq!(row, "    model-{tokens}-{cost}：1,234 Token");
+        assert_eq!(row, "    model-{tokens}-{cost}：1234 Token");
     }
 }
