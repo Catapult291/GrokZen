@@ -109,6 +109,7 @@ pub(crate) fn deserialize_response_event(data: &str) -> Result<rs::ResponseStrea
                 // `missing field \`arguments\``. Default it to empty: the tool-input layer then reports a
                 // per-call parse error instead of a terminal response error (same policy as the chat backend).
                 backfill_missing_arguments(&mut value);
+                truncate_integral_float_epochs(&mut value);
                 if let Ok(mut event) = serde_json::from_value::<rs::ResponseStreamEvent>(value) {
                     apply_terminal_event_overrides(&mut event, data);
                     return Ok(event);
@@ -135,6 +136,40 @@ const ARGUMENTS_REQUIRED_TYPE_TAGS: &[&str] = &[
     "response.function_call_arguments.done",
     "response.mcp_call_arguments.done",
 ];
+
+/// Wire fields that async-openai's Responses types parse as strict `u64` but some OpenAI-compatible
+/// upstreams emit as a float (`"created_at": 1795364621.0`); strict parsing fails the whole event
+/// with `invalid type: floating point …, expected u64`. Any other field arriving as a float that a
+/// typed struct needs as an integer can be appended here.
+const FLOAT_EPOCH_FIELDS: &[&str] = &["created_at", "completed_at"];
+
+/// Recursively rewrite float values that are mathematically integral (e.g. `1795364621.0`) into
+/// integers for the epoch fields listed in [`FLOAT_EPOCH_FIELDS`], so strict-`u64` deserialization
+/// succeeds. Non-integral floats and other fields pass through untouched.
+fn truncate_integral_float_epochs(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, val) in map.iter_mut() {
+                if FLOAT_EPOCH_FIELDS.contains(&key.as_str())
+                    && let Some(f) = val.as_f64()
+                    && f.is_finite()
+                    && f.fract() == 0.0
+                    && (0.0..=u64::MAX as f64).contains(&f)
+                {
+                    *val = serde_json::Value::Number(serde_json::Number::from(f as u64));
+                } else {
+                    truncate_integral_float_epochs(val);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                truncate_integral_float_epochs(item);
+            }
+        }
+        _ => {}
+    }
+}
 
 /// Insert `"arguments": ""` on any tagged object that requires the field but omits it, walking the whole
 /// event so `output_item.added` / `output_item.done`, `response.output[]` on terminal events, and the
@@ -1435,15 +1470,20 @@ impl SamplingClient {
             });
         }
 
-        let response_obj = serde_json::from_slice::<rs::Response>(&bytes).map_err(|e| {
-            let raw_body = String::from_utf8_lossy(&bytes);
-            tracing::error!(
-                error = %e,
-                raw_body = %raw_body,
-                "Failed to deserialize rs::Response"
-            );
-            SamplingError::Serialization(e)
-        })?;
+        let response_obj = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .and_then(|mut value| {
+                truncate_integral_float_epochs(&mut value);
+                serde_json::from_value::<rs::Response>(value)
+            })
+            .map_err(|e| {
+                let raw_body = String::from_utf8_lossy(&bytes);
+                tracing::error!(
+                    error = %e,
+                    raw_body = %raw_body,
+                    "Failed to deserialize rs::Response"
+                );
+                SamplingError::Serialization(e)
+            })?;
         Ok(response_obj)
     }
 
@@ -3426,6 +3466,33 @@ mod tests {
         assert_eq!(usage.output_tokens_details.reasoning_tokens, 388);
         // total_tokens is rewritten to ctx.input + ctx.output (5022 + 571), not the wire's cumulative total (6714)
         assert_eq!(usage.total_tokens, 5_593);
+    }
+
+    /// Some OpenAI-compatible upstreams emit the Responses `created_at` epoch as a float
+    /// (`1795364621.0`); async-openai parses it as strict `u64`, which failed the whole event
+    /// with `invalid type: floating point …, expected u64`. An integral float must be truncated
+    /// to an integer instead of failing the stream.
+    #[test]
+    fn deserialize_response_event_accepts_float_created_at() {
+        let sse = r#"{
+            "type": "response.completed",
+            "sequence_number": 0,
+            "response": {
+                "id": "resp_1",
+                "object": "response",
+                "created_at": 1795364621.0,
+                "model": "grok-build",
+                "status": "completed",
+                "output": [],
+                "completed_at": 1795364624.0
+            }
+        }"#;
+        let event = deserialize_response_event(sse).expect("parse");
+        let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
+            panic!("expected ResponseCompleted");
+        };
+        assert_eq!(e.response.created_at, 1_795_364_621);
+        assert_eq!(e.response.completed_at, Some(1_795_364_624));
     }
 
     /// A `function_call` item emitted without `arguments` must deserialize to empty args instead of

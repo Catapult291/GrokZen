@@ -456,6 +456,7 @@ impl ToolCallRequest {
 pub struct ChatCompletionResponse {
     pub id: String,
     pub object: String,
+    #[serde(deserialize_with = "crate::serde_helpers::lenient_u64")]
     pub created: u64,
     pub model: String,
     pub choices: Vec<ChatChoice>,
@@ -573,6 +574,7 @@ pub struct CompletionTokensDetails {
 pub struct ChatCompletionChunk {
     pub id: String,
     pub object: String,
+    #[serde(deserialize_with = "crate::serde_helpers::lenient_u64")]
     pub created: u64,
     pub model: String,
     pub choices: Vec<ChatChunkChoice>,
@@ -1656,6 +1658,47 @@ mod tests {
         assert_eq!(delta.role, Some(Role::Assistant));
         assert_eq!(delta.content, Some("".to_string()));
         assert!(delta.tool_calls.is_empty());
+    }
+
+    /// Regression test: some OpenAI-compatible upstreams emit `created` as a floating-point
+    /// epoch (`1795357515.0`); strict `u64` parsing fails the whole response with
+    /// `invalid type: floating point …, expected u64`.
+    #[test]
+    fn test_chat_response_and_chunk_created_accepts_float_epoch() {
+        let response_json = r#"{
+            "id": "resp-1",
+            "object": "chat.completion",
+            "created": 1795357515.0,
+            "model": "grok",
+            "choices": []
+        }"#;
+
+        let response = serde_json::from_str::<ChatCompletionResponse>(response_json)
+            .expect("float `created` must deserialize");
+        assert_eq!(response.created, 1795357515);
+
+        let chunk_json = r#"{
+            "id": "chunk-1",
+            "object": "chat.completion.chunk",
+            "created": 1795357515.0,
+            "model": "grok",
+            "choices": []
+        }"#;
+
+        let chunk = serde_json::from_str::<ChatCompletionChunk>(chunk_json)
+            .expect("float `created` must deserialize");
+        assert_eq!(chunk.created, 1795357515);
+
+        // Integral values keep parsing as before.
+        let chunk_int = serde_json::from_str::<ChatCompletionChunk>(r#"{
+            "id": "chunk-2",
+            "object": "chat.completion.chunk",
+            "created": 1795357515,
+            "model": "grok",
+            "choices": []
+        }"#)
+        .expect("integer `created` must deserialize");
+        assert_eq!(chunk_int.created, 1795357515);
     }
 
     /// Regression test: cloning `Box<dyn TraceContext>` must not infinitely recurse. Without the dereference in `Clone for
