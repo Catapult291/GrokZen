@@ -7,6 +7,8 @@
 # 本地构建产物与构建日志（不入库，发布产物由 CI 生成）
 /dist/
 /*.exe
+/*.zip
+/*.zip.sha256
 /.release-build-*.log
 
 # 本机工作区数据与一次性产物
@@ -22,3 +24,7 @@
 /run-release-build-a.cmd
 /PLAN-remove-send-feedback.md
 /astrolabe-0.17.9-upgrade-plan.md
+/astrolabe-upstream-pr-plan.md
+/AGENTS.md
+/docs/handoff/
+/docs/pi-prompts/
