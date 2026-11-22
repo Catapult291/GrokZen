@@ -958,6 +958,11 @@ pub struct Config {
     /// Keys are agent names, values are booleans. Omitted agents default to enabled.
     #[serde(skip)]
     pub subagent_toggle: std::collections::HashMap<String, bool>,
+    /// Per-subagent turn-limit overrides from `[subagents.max_turns]` in config.toml.
+    /// Keys are agent names, values are turn counts. Applied between the agent
+    /// definition's own `maxTurns` and parent-session inheritance.
+    #[serde(skip)]
+    pub subagent_max_turns_overrides: std::collections::HashMap<String, u32>,
     /// Trust-independent roles from inline, user, and bundled sources.
     #[serde(skip)]
     pub subagent_roles:
@@ -1230,6 +1235,7 @@ impl Default for Config {
             ),
             subagent_model_overrides: std::collections::HashMap::new(),
             subagent_toggle: std::collections::HashMap::new(),
+            subagent_max_turns_overrides: std::collections::HashMap::new(),
             subagent_roles: std::collections::HashMap::new(),
             subagent_personas: std::collections::HashMap::new(),
             disable_web_search: false,
@@ -1655,6 +1661,7 @@ impl Config {
         self.subagents_enabled = sa.enabled;
         self.subagent_model_overrides = sa.models;
         self.subagent_toggle = sa.toggle;
+        self.subagent_max_turns_overrides = sa.max_turns;
         self.subagent_roles = sa.roles;
         self.subagent_personas = sa.personas;
         let env = std::env::var(crate::config::SubagentsConfig::ENV_MAX_DEPTH).ok();

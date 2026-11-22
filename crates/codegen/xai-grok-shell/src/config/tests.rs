@@ -1431,6 +1431,38 @@ fn subagents_config_models_parsed() {
 }
 #[test]
 #[serial_test::serial]
+fn subagents_config_max_turns_parsed() {
+    without_grok_subagents(|| {
+        let config: toml::Value = toml::from_str(
+                r#"
+                [subagents]
+                enabled = true
+
+                [subagents.max_turns]
+                general-purpose = 60
+                implementer = 80
+                "#,
+            )
+            .unwrap();
+        let sa = SubagentsConfig::resolve(None, &config);
+        assert!(sa.enabled);
+        assert_eq!(sa.max_turns.len(), 2);
+        assert_eq!(sa.max_turns.get("general-purpose").unwrap(), &60);
+        assert_eq!(sa.max_turns.get("implementer").unwrap(), &80);
+    });
+}
+#[test]
+#[serial_test::serial]
+fn subagents_config_max_turns_empty_when_missing() {
+    without_grok_subagents(|| {
+        let config: toml::Value = toml::from_str("[subagents]\nenabled = true").unwrap();
+        let sa = SubagentsConfig::resolve(None, &config);
+        assert!(sa.enabled);
+        assert!(sa.max_turns.is_empty());
+    });
+}
+#[test]
+#[serial_test::serial]
 fn subagents_config_models_empty_when_missing() {
     without_grok_subagents(|| {
         let config: toml::Value = toml::from_str("[subagents]\nenabled = true").unwrap();

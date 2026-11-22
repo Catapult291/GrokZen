@@ -88,6 +88,7 @@ fn spawn_ctx(parent_cwd: PathBuf) -> SubagentSpawnContext {
         available_models: indexmap::IndexMap::new(),
         subagent_model_overrides: HashMap::new(),
         subagent_toggle: HashMap::new(),
+        subagent_max_turns_overrides: HashMap::new(),
         disable_web_search: false,
         todo_gate: false,
         remote_settings: None,

@@ -889,7 +889,21 @@ pub(crate) async fn run_shell_child(
         &ctx,
     )
     .await;
-    let subagent_max_turns = resolve_subagent_max_turns(definition.max_turns, ctx.parent_max_turns);
+    let subagent_max_turns = resolve_subagent_max_turns(
+        definition.max_turns,
+        ctx.subagent_max_turns_overrides
+            .get(&request.subagent_type)
+            .copied()
+            .or(effective_runtime.max_turns),
+        ctx.parent_max_turns,
+    );
+    tracing::debug!(
+        subagent_id = %request.id,
+        agent = %request.subagent_type,
+        ?subagent_max_turns,
+        definition_max_turns = ?definition.max_turns,
+        "resolved subagent max turns"
+    );
     {
         let model_str = &effective_sampling_config.model;
         let model_unknown = !model_str.is_empty()

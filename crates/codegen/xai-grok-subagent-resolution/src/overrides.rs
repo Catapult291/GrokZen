@@ -119,6 +119,9 @@ pub fn resolve_effective_overrides(
         })
         .unwrap_or(SubagentIsolationMode::None);
 
+    // ── Turn limit resolution ────────────────────────────────────
+    let max_turns = role.and_then(|r| r.max_turns);
+
     EffectiveRuntimeConfig {
         model,
         reasoning_effort,
@@ -130,6 +133,7 @@ pub fn resolve_effective_overrides(
         role_name,
         persona_error,
         isolation,
+        max_turns,
     }
 }
 

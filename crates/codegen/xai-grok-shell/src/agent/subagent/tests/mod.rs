@@ -660,9 +660,11 @@ async fn emit_subagent_notification_stamps_one_event_id_on_both_paths() {
     assert_eq!(persisted_id, broadcast_id);
 }
 #[test]
-fn subagent_max_turns_definition_wins_else_inherits_parent() {
-    assert_eq!(super::resolve_subagent_max_turns(Some(2), Some(5)), Some(2));
-    assert_eq!(super::resolve_subagent_max_turns(None, Some(5)), Some(5));
+fn subagent_max_turns_config_or_role_override_wins_else_definition_else_parent() {
+    assert_eq!(super::resolve_subagent_max_turns(Some(2), Some(5), Some(9)), Some(5));
+    assert_eq!(super::resolve_subagent_max_turns(Some(2), None, Some(9)), Some(2));
+    assert_eq!(super::resolve_subagent_max_turns(None, None, Some(9)), Some(9));
+    assert_eq!(super::resolve_subagent_max_turns(None, None, None), None);
 }
 #[test]
 fn resume_worktree_action_covers_three_outcomes() {

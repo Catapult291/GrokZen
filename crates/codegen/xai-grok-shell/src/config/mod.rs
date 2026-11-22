@@ -82,6 +82,12 @@ pub struct SubagentsConfig {
     /// Omitted agents default to enabled (`true`).
     #[serde(default)]
     pub toggle: std::collections::HashMap<String, bool>,
+    /// Per-subagent turn-limit overrides.
+    /// Keys are agent names, values are turn counts (must be greater than 0).
+    /// Precedence: agent definition `maxTurns` > `[subagents.max_turns]` > parent inheritance.
+    /// Parsed from `[subagents.max_turns]` in config.toml.
+    #[serde(default)]
+    pub max_turns: std::collections::HashMap<String, u32>,
     /// Declarative subagent role definitions.
     #[serde(default)]
     pub roles: std::collections::HashMap<String, SubagentRole>,
@@ -103,6 +109,7 @@ impl Default for SubagentsConfig {
             workflow_max_concurrent: None,
             models: std::collections::HashMap::new(),
             toggle: std::collections::HashMap::new(),
+            max_turns: std::collections::HashMap::new(),
             roles: std::collections::HashMap::new(),
             personas: std::collections::HashMap::new(),
         }

@@ -41,6 +41,9 @@ pub struct EffectiveRuntimeConfig {
     pub persona_error: Option<String>,
     /// Isolation mode for the child execution environment.
     pub isolation: xai_tool_types::SubagentIsolationMode,
+    /// Turn limit resolved from the spawn-time request or the matched role.
+    /// `None` falls through to the definition's `maxTurns` / parent inheritance.
+    pub max_turns: Option<u32>,
 }
 
 /// Data about a completed source subagent, needed to validate a resume and to spawn the resumed child.

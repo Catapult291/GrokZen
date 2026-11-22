@@ -229,13 +229,14 @@ impl MvpAgent {
             None => (None, None),
         };
         let project_trusted = crate::agent::folder_trust::project_scope_allowed(&parent_cwd);
-        let (base_roles, base_personas, subagent_model_overrides, subagent_toggle) = {
+        let (base_roles, base_personas, subagent_model_overrides, subagent_toggle, subagent_max_turns_overrides) = {
             let cfg = self.cfg.borrow();
             (
                 cfg.subagent_roles.clone(),
                 cfg.subagent_personas.clone(),
                 cfg.subagent_model_overrides.clone(),
                 cfg.subagent_toggle.clone(),
+                cfg.subagent_max_turns_overrides.clone(),
             )
         };
         let (subagent_roles, subagent_personas) =
@@ -245,6 +246,22 @@ impl MvpAgent {
                 &parent_cwd,
                 project_trusted,
             );
+        // Project `.grok/config.toml` is not part of the boot-time effective config;
+        // overlay its `[subagents.max_turns]` per cwd, gated by folder trust like roles/personas.
+        let mut subagent_max_turns_overrides = subagent_max_turns_overrides;
+        if project_trusted {
+            for config_path in crate::config::find_project_configs(&parent_cwd) {
+                if let Ok(toml_val) = xai_grok_config::load_config_file(&config_path)
+                    && let Some(subagents) = toml_val.get("subagents")
+                    && let Ok(project_subagents) =
+                        subagents.clone().try_into::<crate::config::SubagentsConfig>()
+                {
+                    for (name, turns) in project_subagents.max_turns {
+                        subagent_max_turns_overrides.insert(name, turns);
+                    }
+                }
+            }
+        }
         let inherited_tool_overrides = parent_handle
             .as_ref()
             .and_then(|ps| ps.resolved_tool_overrides.load_full().map(|o| (*o).clone()));
@@ -331,6 +348,7 @@ impl MvpAgent {
             available_models,
             subagent_model_overrides,
             subagent_toggle,
+            subagent_max_turns_overrides,
             subagent_roles,
             subagent_personas,
             disable_web_search: self.cfg.borrow().disable_web_search,

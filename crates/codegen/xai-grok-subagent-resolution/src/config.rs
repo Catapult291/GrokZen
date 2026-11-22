@@ -40,6 +40,10 @@ pub struct SubagentRole {
     /// Default isolation mode ("none" or "worktree").
     #[serde(default)]
     pub default_isolation: Option<String>,
+    /// Turn-limit default for agents using this role (e.g. 60).
+    /// Consumed between the agent definition's own `maxTurns` and parent inheritance.
+    #[serde(default)]
+    pub max_turns: Option<u32>,
     /// Base directory for resolving relative `prompt_file` references.
     /// Set to the parent dir of the source `.toml` file during discovery.
     #[serde(skip)]

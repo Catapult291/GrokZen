@@ -259,6 +259,9 @@ pub(crate) struct SubagentSpawnContext {
     /// Per-subagent enable/disable toggles from config.toml `[subagents.toggle]`.
     /// Omitted agents default to enabled (`true`).
     pub subagent_toggle: std::collections::HashMap<String, bool>,
+    /// Per-subagent turn-limit overrides from config.toml `[subagents.max_turns]`.
+    /// Applied between the agent definition's own `maxTurns` and parent inheritance.
+    pub subagent_max_turns_overrides: std::collections::HashMap<String, u32>,
     /// Whether web search is force-disabled via `--disable-web-search`.
     /// Inherited from the parent session.
     pub disable_web_search: bool,
@@ -1632,13 +1635,17 @@ pub(crate) fn describe_subagent_type(
     resolve_subagent_toolset(subagent_type, harness_agent_type, ctx, &mut definition);
     SubagentDescribeOutcome::Ok(summarize_tool_config(&definition.tool_config))
 }
-/// Resolve a subagent's turn limit: its own `maxTurns` wins, else inherit the parent's.
+/// Resolve a subagent's turn limit. Precedence: the `[subagents.max_turns]`
+/// per-name config override or a resolved role default (user intent) beats the
+/// definition's own `maxTurns`, which beats parent-session inheritance.
 fn resolve_subagent_max_turns(
     definition_max_turns: Option<u32>,
+    config_or_role_override: Option<u32>,
     parent_max_turns: Option<usize>,
 ) -> Option<usize> {
-    definition_max_turns
+    config_or_role_override
         .map(|v| v as usize)
+        .or_else(|| definition_max_turns.map(|v| v as usize))
         .or(parent_max_turns)
 }
 /// What to do with a resumed subagent's isolated worktree directory.

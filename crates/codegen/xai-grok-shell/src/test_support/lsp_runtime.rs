@@ -70,6 +70,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         available_models: indexmap::IndexMap::new(),
         subagent_model_overrides: HashMap::new(),
         subagent_toggle: toggle,
+        subagent_max_turns_overrides: HashMap::new(),
         disable_web_search: false,
         todo_gate: false,
         remote_settings: None,
