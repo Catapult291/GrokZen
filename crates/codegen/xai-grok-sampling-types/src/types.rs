@@ -1690,13 +1690,15 @@ mod tests {
         assert_eq!(chunk.created, 1795357515);
 
         // Integral values keep parsing as before.
-        let chunk_int = serde_json::from_str::<ChatCompletionChunk>(r#"{
+        let chunk_int = serde_json::from_str::<ChatCompletionChunk>(
+            r#"{
             "id": "chunk-2",
             "object": "chat.completion.chunk",
             "created": 1795357515,
             "model": "grok",
             "choices": []
-        }"#)
+        }"#,
+        )
         .expect("integer `created` must deserialize");
         assert_eq!(chunk_int.created, 1795357515);
     }
