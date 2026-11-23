@@ -39,5 +39,6 @@ pub use xai_grok_config::load_effective_config_disk_only;
 pub use xai_grok_config_types::{
     CampaignOverride, ConsentGate, ContextualHintsRemote, DisplayRefreshSettings,
     DoomLoopRecoverySettings, GoalRoleModel, LongReasoningReminderSettings, RemoteSettings,
-    TextRepetitionGuardSettings, WorktreeAutoGcSettings, WorktreeKindMaxAge, deserialize_tolerant,
+    TextRepetitionGuardSettings, TextRepetitionReasoningSettings, WorktreeAutoGcSettings,
+    WorktreeKindMaxAge, deserialize_tolerant,
 };

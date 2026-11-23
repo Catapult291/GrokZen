@@ -22,6 +22,6 @@ pub use sandbox::*;
 pub use xai_grok_config::{
     CampaignOverride, ConsentGate, ContextualHintsRemote, DisplayRefreshSettings,
     DoomLoopRecoverySettings, GoalRoleModel, LongReasoningReminderSettings, RemoteRequestEncoding,
-    RemoteSettings, TextRepetitionGuardSettings, WorktreeAutoGcSettings, WorktreeKindMaxAge,
-    deserialize_tolerant,
+    RemoteSettings, TextRepetitionGuardSettings, TextRepetitionReasoningSettings,
+    WorktreeAutoGcSettings, WorktreeKindMaxAge, deserialize_tolerant,
 };

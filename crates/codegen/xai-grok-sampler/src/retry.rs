@@ -296,6 +296,17 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
                 trigger.as_str(),
             )
         }
+        SamplingError::ReasoningRepetitionDetected {
+            trigger,
+            generated_chars,
+            ..
+        } => {
+            format!(
+                "{}Reasoning repetition guard tripped ({}) after {generated_chars} characters; ending the turn.",
+                retry_prefix,
+                trigger.as_str(),
+            )
+        }
     }
 }
 
@@ -356,6 +367,15 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
             generated_chars,
             threshold,
         } => SamplingError::TextRepetitionDetected {
+            trigger: *trigger,
+            generated_chars: *generated_chars,
+            threshold: *threshold,
+        },
+        SamplingError::ReasoningRepetitionDetected {
+            trigger,
+            generated_chars,
+            threshold,
+        } => SamplingError::ReasoningRepetitionDetected {
             trigger: *trigger,
             generated_chars: *generated_chars,
             threshold: *threshold,

@@ -55,6 +55,65 @@ pub struct TextRepetitionTrip {
     pub threshold: u32,
 }
 
+/// 思考（reasoning）通道的护栏子配置。思考文本天然重复率高（列表、重述），阈值比正文宽松，
+/// 仅在明显洪泛（同 token 长串、整句无限循环）时触发。serde default 全覆盖：老配置文件与
+/// 远端 settings 缺失该子对象时按默认值解析，零迁移；`enforce_on_reasoning=false` 是一键
+/// 关闭思考通道护栏的逃生口。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TextRepetitionReasoningPolicy {
+    /// 思考流是否也受护栏约束（默认启用；线上已出现思考流死循环事故）。
+    #[serde(default = "default_reasoning_enforce_on")]
+    pub enforce_on_reasoning: bool,
+    /// 思考流 D1: 同 token 连续次数上限（默认 128，比正文的 64 宽松一倍）。
+    #[serde(default = "default_reasoning_max_identical_token_run")]
+    pub max_identical_token_run: u32,
+    /// 思考流 D2: 同块重复次数阈值（默认 16，比正文的 10 宽松）。
+    #[serde(default = "default_reasoning_chunk_repeat_threshold")]
+    pub chunk_repeat_threshold: u32,
+}
+
+fn default_reasoning_enforce_on() -> bool {
+    TextRepetitionReasoningPolicy::DEFAULT_ENFORCE_ON_REASONING
+}
+
+fn default_reasoning_max_identical_token_run() -> u32 {
+    TextRepetitionReasoningPolicy::DEFAULT_MAX_IDENTICAL_TOKEN_RUN
+}
+
+fn default_reasoning_chunk_repeat_threshold() -> u32 {
+    TextRepetitionReasoningPolicy::DEFAULT_CHUNK_REPEAT_THRESHOLD
+}
+
+impl Default for TextRepetitionReasoningPolicy {
+    fn default() -> Self {
+        Self {
+            enforce_on_reasoning: Self::DEFAULT_ENFORCE_ON_REASONING,
+            max_identical_token_run: Self::DEFAULT_MAX_IDENTICAL_TOKEN_RUN,
+            chunk_repeat_threshold: Self::DEFAULT_CHUNK_REPEAT_THRESHOLD,
+        }
+    }
+}
+
+impl TextRepetitionReasoningPolicy {
+    pub const DEFAULT_ENFORCE_ON_REASONING: bool = true;
+    pub const DEFAULT_MAX_IDENTICAL_TOKEN_RUN: u32 = 128;
+    pub const DEFAULT_CHUNK_REPEAT_THRESHOLD: u32 = 16;
+
+    /// 越界值同正文一样钳制回默认，不做独立区间：思考阈值与正文共用同一合法范围。
+    pub fn sanitized(self) -> Self {
+        Self {
+            enforce_on_reasoning: self.enforce_on_reasoning,
+            max_identical_token_run: TextRepetitionGuardPolicy::clamp_max_identical_token_run(
+                self.max_identical_token_run,
+            ),
+            chunk_repeat_threshold: TextRepetitionGuardPolicy::clamp_chunk_repeat_threshold(
+                self.chunk_repeat_threshold,
+            ),
+        }
+    }
+}
+
 /// Thresholds for the client-side text-repetition guard.
 /// One type serves the local `[text_repetition_guard]` TOML table and the remote
 /// `text_repetition_guard` JSON object; every field defaults per-field so a partial object parses.
@@ -73,6 +132,9 @@ pub struct TextRepetitionGuardPolicy {
     /// D2: streaming history window in characters; older text is truncated from the front (default 5000).
     #[serde(default = "default_history_limit")]
     pub history_limit: u32,
+    /// 思考（reasoning）通道的护栏子配置：独立阈值 + 总开关，正文通道配置不动。
+    #[serde(default)]
+    pub reasoning: TextRepetitionReasoningPolicy,
 }
 
 fn default_max_identical_token_run() -> u32 {
@@ -98,6 +160,7 @@ impl Default for TextRepetitionGuardPolicy {
             chunk_size: Self::DEFAULT_CHUNK_SIZE,
             chunk_repeat_threshold: Self::DEFAULT_CHUNK_REPEAT_THRESHOLD,
             history_limit: Self::DEFAULT_HISTORY_LIMIT,
+            reasoning: TextRepetitionReasoningPolicy::default(),
         }
     }
 }
@@ -154,6 +217,19 @@ impl TextRepetitionGuardPolicy {
             chunk_size: Self::clamp_chunk_size(self.chunk_size),
             chunk_repeat_threshold: Self::clamp_chunk_repeat_threshold(self.chunk_repeat_threshold),
             history_limit: Self::clamp_history_limit(self.history_limit),
+            reasoning: self.reasoning.sanitized(),
+        }
+    }
+
+    /// 思考通道守卫实际使用的正文策略形态：D1/D2 阈值换成思考子配置，chunk_size 与
+    /// 历史窗沿用正文配置（两个 guard 实例状态互不污染，检测实现共用）。
+    pub fn reasoning_guard_policy(self) -> Self {
+        Self {
+            max_identical_token_run: self.reasoning.max_identical_token_run,
+            chunk_size: self.chunk_size,
+            chunk_repeat_threshold: self.reasoning.chunk_repeat_threshold,
+            history_limit: self.history_limit,
+            reasoning: self.reasoning,
         }
     }
 }

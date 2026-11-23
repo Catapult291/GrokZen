@@ -253,7 +253,10 @@ pub(crate) async fn run_request_task(
                 // A text-repetition trip is terminal for the request: the streamed output is
                 // poisoned, so there is nothing to resample and no transport retry to consult.
                 // The shell maps the kind onto a repetition-guard turn cancellation.
-                if let SamplingError::TextRepetitionDetected { .. } = &error {
+                // 思考通道变体同样终态：该轮推理已不可信，只止损不重采样。
+                if let SamplingError::TextRepetitionDetected { .. }
+                | SamplingError::ReasoningRepetitionDetected { .. } = &error
+                {
                     let terminal_event_queued = emit_failed(&event_tx, &request_id, &error);
                     send_completion(
                         &mut completion,
@@ -680,6 +683,12 @@ async fn drive_l2(
     let mut l2 = pin!(l2);
     let mut repetition_guard =
         text_repetition_guard.map(crate::text_repetition::TextRepetitionGuard::new);
+    // 思考通道用独立 guard 实例：阈值来自子配置、状态与正文 guard 互不污染，检测实现共用。
+    let mut reasoning_repetition_guard = text_repetition_guard
+        .filter(|policy| policy.reasoning.enforce_on_reasoning)
+        .map(|policy| {
+            crate::text_repetition::TextRepetitionGuard::new(policy.reasoning_guard_policy())
+        });
     let mut doom_loop_signals = Vec::new();
     let mut await_first_output_span = Some(tracing::info_span!("sampling.await_first_output"));
     loop {
@@ -772,21 +781,38 @@ async fn drive_l2(
                 Some(other) => {
                     // Judge model-authored message text before it is forwarded: on a trip the
                     // triggering chunk never reaches the session and the attempt fails terminally.
-                    if let SamplingEvent::ChannelToken { channel, text, .. } = &other
-                        && *channel == crate::events::SamplingChannel::Text
-                        && let Some(trip) = repetition_guard
-                            .as_mut()
-                            .and_then(|guard| guard.on_text_chunk(text))
-                    {
-                        return AttemptOutcome::Failed {
-                            error: SamplingError::TextRepetitionDetected {
-                                trigger: trip.trigger,
-                                generated_chars: trip.generated_chars,
-                                threshold: trip.threshold,
-                            },
-                            doom_loop_signals,
-                            recovery_items: Vec::new(),
-                        };
+                    // 正文通道与思考通道各自独立判流；同一 attempt 只报第一个 trip（guard 已 latch）。
+                    if let SamplingEvent::ChannelToken { channel, text, .. } = &other {
+                        if *channel == crate::events::SamplingChannel::Text
+                            && let Some(trip) = repetition_guard
+                                .as_mut()
+                                .and_then(|guard| guard.on_text_chunk(text))
+                        {
+                            return AttemptOutcome::Failed {
+                                error: SamplingError::TextRepetitionDetected {
+                                    trigger: trip.trigger,
+                                    generated_chars: trip.generated_chars,
+                                    threshold: trip.threshold,
+                                },
+                                doom_loop_signals,
+                                recovery_items: Vec::new(),
+                            };
+                        }
+                        if *channel == crate::events::SamplingChannel::Reasoning
+                            && let Some(trip) = reasoning_repetition_guard
+                                .as_mut()
+                                .and_then(|guard| guard.on_text_chunk(text))
+                        {
+                            return AttemptOutcome::Failed {
+                                error: SamplingError::ReasoningRepetitionDetected {
+                                    trigger: trip.trigger,
+                                    generated_chars: trip.generated_chars,
+                                    threshold: trip.threshold,
+                                },
+                                doom_loop_signals,
+                                recovery_items: Vec::new(),
+                            };
+                        }
                     }
                     if matches!(
                         other,
@@ -881,6 +907,20 @@ fn synthesize_from_info(info: &SamplingErrorInfo) -> SamplingError {
                 },
             );
             SamplingError::TextRepetitionDetected {
+                trigger: trip.trigger,
+                generated_chars: trip.generated_chars,
+                threshold: trip.threshold,
+            }
+        }
+        SamplingErrorKind::ReasoningRepetitionDetected => {
+            let trip =
+                info.text_repetition
+                    .unwrap_or(xai_grok_sampling_types::TextRepetitionTrip {
+                        trigger: xai_grok_sampling_types::TextRepetitionTrigger::IdenticalRun,
+                        generated_chars: 0,
+                        threshold: 0,
+                    });
+            SamplingError::ReasoningRepetitionDetected {
                 trigger: trip.trigger,
                 generated_chars: trip.generated_chars,
                 threshold: trip.threshold,
@@ -993,7 +1033,8 @@ fn strip_reason_for_image_error(err: &SamplingError) -> StripReason {
         | SamplingError::EmptyResponse { .. }
         | SamplingError::MaxTokensTruncation
         | SamplingError::DoomLoopDetected { .. }
-        | SamplingError::TextRepetitionDetected { .. } => StripReason::PayloadHeuristic,
+        | SamplingError::TextRepetitionDetected { .. }
+        | SamplingError::ReasoningRepetitionDetected { .. } => StripReason::PayloadHeuristic,
     }
 }
 
@@ -1346,6 +1387,213 @@ mod tests {
                 "guard must trip within the first 2,000 characters, fired at {generated_chars}"
             );
         }
+    }
+
+    /// §4.3 场景 1：思考通道 `!!9D4D4C…` 式符号洪泛必须以 `ReasoningRepetitionDetected` 终止
+    /// 该 attempt，正文 guard 不误触发（错误变体是思考通道的）。
+    #[tokio::test]
+    async fn reasoning_guard_aborts_attempt_on_reasoning_flood() {
+        use crate::events::SamplingChannel;
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let normal_text = SamplingEvent::ChannelToken {
+            request_id: RequestId::from("reasoning-flood"),
+            channel: SamplingChannel::Text,
+            text: "一段正常的正文文本，含标点与换行。\n".to_string(),
+            chunk_index: 0,
+        };
+        let deltas = (0u64..600).map(|chunk_index| SamplingEvent::ChannelToken {
+            request_id: RequestId::from("reasoning-flood"),
+            channel: SamplingChannel::Reasoning,
+            text: "!!9D4D4C".to_string(),
+            chunk_index,
+        });
+        let outcome = drive_l2(
+            stream::iter(std::iter::once(normal_text).chain(deltas)),
+            RequestId::from("reasoning-flood"),
+            &event_tx,
+            &CancellationToken::new(),
+            Arc::new(Mutex::new(None)),
+            None,
+            FailedResponseCapture::default(),
+            Arc::new(AtomicBool::new(false)),
+            xai_grok_sampling_types::LengthPolicy::Fail,
+            Some(xai_grok_sampling_types::TextRepetitionGuardPolicy::default()),
+        )
+        .await;
+        let AttemptOutcome::Failed { error, .. } = outcome else {
+            panic!("flooded reasoning stream must fail the attempt, got {outcome:?}");
+        };
+        assert!(
+            matches!(
+                error,
+                xai_grok_sampling_types::SamplingError::ReasoningRepetitionDetected { .. }
+            ),
+            "expected ReasoningRepetitionDetected, got {error:?}"
+        );
+        if let xai_grok_sampling_types::SamplingError::ReasoningRepetitionDetected {
+            trigger,
+            generated_chars,
+            threshold,
+        } = error
+        {
+            // D2 的 50 字符窗口以步长 8 重复，远早于 D1 的 128 次 run 上限。
+            assert_eq!(
+                trigger,
+                xai_grok_sampling_types::TextRepetitionTrigger::ChunkPeriodicity
+            );
+            assert!(
+                generated_chars < 4_000,
+                "reasoning guard must trip early, fired at {generated_chars}"
+            );
+            assert_eq!(threshold, 16, "思考通道 D2 阈值默认 16");
+        }
+    }
+
+    /// §4.3 场景 2：思考流整句循环（`"xxx\n\n"` × N）在 attempt 级由 D2 命中并终止。
+    #[tokio::test]
+    async fn reasoning_guard_aborts_attempt_on_sentence_loop() {
+        use crate::events::SamplingChannel;
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let deltas = (0u64..600).map(|chunk_index| SamplingEvent::ChannelToken {
+            request_id: RequestId::from("reasoning-loop"),
+            channel: SamplingChannel::Reasoning,
+            text: "That paddinginese text is not the task.\n\n".to_string(),
+            chunk_index,
+        });
+        let outcome = drive_l2(
+            stream::iter(deltas),
+            RequestId::from("reasoning-loop"),
+            &event_tx,
+            &CancellationToken::new(),
+            Arc::new(Mutex::new(None)),
+            None,
+            FailedResponseCapture::default(),
+            Arc::new(AtomicBool::new(false)),
+            xai_grok_sampling_types::LengthPolicy::Fail,
+            Some(xai_grok_sampling_types::TextRepetitionGuardPolicy::default()),
+        )
+        .await;
+        let AttemptOutcome::Failed { error, .. } = outcome else {
+            panic!("looping reasoning stream must fail the attempt, got {outcome:?}");
+        };
+        let xai_grok_sampling_types::SamplingError::ReasoningRepetitionDetected { trigger, .. } =
+            error
+        else {
+            panic!("expected ReasoningRepetitionDetected, got {error:?}");
+        };
+        assert_eq!(
+            trigger,
+            xai_grok_sampling_types::TextRepetitionTrigger::ChunkPeriodicity,
+            "整句循环必须由 D2 命中"
+        );
+    }
+
+    /// §4.3 场景 3：含重复结构（编号列表 / 重述句式）的正常长思考不得触发，流正常完成。
+    #[tokio::test]
+    async fn normal_reasoning_stream_completes_without_trip() {
+        use crate::events::SamplingChannel;
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut events = Vec::new();
+        events.push(SamplingEvent::ChannelToken {
+            request_id: RequestId::from("reasoning-normal"),
+            channel: SamplingChannel::Reasoning,
+            text: "Let me work through this step by step.\n\n".to_string(),
+            chunk_index: 0,
+        });
+        for i in 0..200u64 {
+            events.push(SamplingEvent::ChannelToken {
+                request_id: RequestId::from("reasoning-normal"),
+                channel: SamplingChannel::Reasoning,
+                text: format!("{i}. check candidate {i} against the constraint set\n"),
+                chunk_index: i * 2 + 1,
+            });
+            events.push(SamplingEvent::ChannelToken {
+                request_id: RequestId::from("reasoning-normal"),
+                channel: SamplingChannel::Reasoning,
+                text: format!("   verdict for candidate {i}: keep it for the next pass\n\n"),
+                chunk_index: i * 2 + 2,
+            });
+        }
+        let mut response = completed_response(None, "plain answer after reasoning");
+        response.doom_loop_signals.clear();
+        events.push(SamplingEvent::Completed {
+            request_id: RequestId::from("reasoning-normal"),
+            response: Box::new(response),
+            metrics: InferenceLatencyStats::default(),
+        });
+        let outcome = drive_l2(
+            stream::iter(events),
+            RequestId::from("reasoning-normal"),
+            &event_tx,
+            &CancellationToken::new(),
+            Arc::new(Mutex::new(None)),
+            None,
+            FailedResponseCapture::default(),
+            Arc::new(AtomicBool::new(false)),
+            xai_grok_sampling_types::LengthPolicy::Fail,
+            Some(xai_grok_sampling_types::TextRepetitionGuardPolicy::default()),
+        )
+        .await;
+        assert!(
+            matches!(outcome, AttemptOutcome::Completed { .. }),
+            "正常思考流必须完整完成，got {outcome:?}"
+        );
+    }
+
+    /// §4.3 场景 4：`enforce_on_reasoning=false` 旧行为回归——思考洪泛直通（guard 不判流），
+    /// 流正常完成且全部 delta 转发。
+    #[tokio::test]
+    async fn reasoning_guard_disabled_passes_flood_through() {
+        use crate::events::SamplingChannel;
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let mut policy = xai_grok_sampling_types::TextRepetitionGuardPolicy::default();
+        policy.reasoning.enforce_on_reasoning = false;
+        let deltas = (0u64..600).map(|chunk_index| SamplingEvent::ChannelToken {
+            request_id: RequestId::from("reasoning-off"),
+            channel: SamplingChannel::Reasoning,
+            text: "!!9D4D4C".to_string(),
+            chunk_index,
+        });
+        let mut response = completed_response(None, "plain answer after reasoning");
+        response.doom_loop_signals.clear();
+        let completed = SamplingEvent::Completed {
+            request_id: RequestId::from("reasoning-off"),
+            response: Box::new(response),
+            metrics: InferenceLatencyStats::default(),
+        };
+        let outcome = drive_l2(
+            stream::iter(deltas.chain(std::iter::once(completed))),
+            RequestId::from("reasoning-off"),
+            &event_tx,
+            &CancellationToken::new(),
+            Arc::new(Mutex::new(None)),
+            None,
+            FailedResponseCapture::default(),
+            Arc::new(AtomicBool::new(false)),
+            xai_grok_sampling_types::LengthPolicy::Fail,
+            Some(policy),
+        )
+        .await;
+        assert!(
+            matches!(outcome, AttemptOutcome::Completed { .. }),
+            "关闭思考护栏后洪泛直通，got {outcome:?}"
+        );
+        // 全部 600 个思考 delta 都应被转发（Completed 终端事件由 drive_l2 自行消化，不转发）。
+        let mut forwarded = 0usize;
+        while let Ok(event) = event_rx.try_recv() {
+            assert!(
+                !matches!(
+                    event,
+                    SamplingEvent::Failed { ref error, .. } if matches!(
+                        &error.text_repetition,
+                        Some(..)
+                    )
+                ),
+                "关闭思考护栏后不得出现复读失败事件: {event:?}"
+            );
+            forwarded += 1;
+        }
+        assert_eq!(forwarded, 600, "600 个思考 delta 直通");
     }
 
     fn with_tool_call(mut event: SamplingEvent, arguments: &str) -> SamplingEvent {

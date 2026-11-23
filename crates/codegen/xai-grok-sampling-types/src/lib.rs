@@ -31,7 +31,8 @@ pub use self::error::{
 };
 pub use self::prefix_debug::{input_prefix_lcp, responses_input_json};
 pub use self::text_repetition::{
-    TextRepetitionGuardPolicy, TextRepetitionTrigger, TextRepetitionTrip,
+    TextRepetitionGuardPolicy, TextRepetitionReasoningPolicy, TextRepetitionTrigger,
+    TextRepetitionTrip,
 };
 pub use self::tool_overrides::{
     ClearableField, MAX_WEB_SEARCH_DOMAINS, SearchDateBound, SearchDateBoundError, ToolOverrides,

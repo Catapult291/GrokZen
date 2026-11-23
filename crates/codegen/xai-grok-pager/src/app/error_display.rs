@@ -71,6 +71,7 @@ impl From<xai_grok_shell::sampling::error::SamplingErrorKind> for WireErrorType 
             // The guard's user copy rides the message text (the turn ends via its own
             // cancellation category, not a typed retry-failure banner).
             K::TextRepetitionDetected => Self::Other,
+            K::ReasoningRepetitionDetected => Self::Other,
         }
     }
 }

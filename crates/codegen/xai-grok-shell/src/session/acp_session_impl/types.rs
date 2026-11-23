@@ -57,6 +57,11 @@ pub(crate) enum SamplerFailureRecovery {
     TurnCancelledByRepetitionGuard {
         trip: xai_grok_sampling_types::TextRepetitionTrip,
     },
+    /// 思考（reasoning）通道的复读护栏触发：与正文变体同走取消终态（该轮推理已不可信），
+    /// 但 UI 文案提示本轮失败、建议换模型，思考前缀留在 UI。
+    TurnCancelledByReasoningRepetitionGuard {
+        trip: xai_grok_sampling_types::TextRepetitionTrip,
+    },
 }
 
 /// Outcome of a single turn attempt via the sampler-based path.
@@ -79,6 +84,10 @@ pub(crate) enum SamplerTurnOutcome {
     },
     /// Mirrors [`SamplerFailureRecovery::TurnCancelledByRepetitionGuard`].
     TurnCancelledByRepetitionGuard {
+        trip: xai_grok_sampling_types::TextRepetitionTrip,
+    },
+    /// Mirrors [`SamplerFailureRecovery::TurnCancelledByReasoningRepetitionGuard`].
+    TurnCancelledByReasoningRepetitionGuard {
         trip: xai_grok_sampling_types::TextRepetitionTrip,
     },
 }

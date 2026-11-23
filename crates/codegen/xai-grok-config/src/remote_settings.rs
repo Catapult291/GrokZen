@@ -57,6 +57,25 @@ pub struct TextRepetitionGuardSettings {
     /// D2: history window in characters (clamped to 250..=50000; absent uses the client default, 5000).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub history_limit: Option<u32>,
+    /// 思考（reasoning）通道子配置：`[text_repetition_guard.reasoning]` 子表与远端 `reasoning`
+    /// 子对象共用；absent 表示全部走客户端默认（默认启用思考通道护栏）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<TextRepetitionReasoningSettings>,
+}
+
+/// 思考通道护栏的设置子对象：正文配置之外只有独立的开关与两个阈值。
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TextRepetitionReasoningSettings {
+    /// 思考流是否受护栏约束（默认启用；`Some(false)` 关闭思考通道护栏）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enforce_on_reasoning: Option<bool>,
+    /// 思考流 D1: 同 token 连续次数上限（clamped 8..=4096；absent 用客户端默认 128）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_identical_token_run: Option<u32>,
+    /// 思考流 D2: 同块重复次数阈值（clamped 4..=64；absent 用客户端默认 16）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_repeat_threshold: Option<u32>,
 }
 /// Shared shape of the `[long_reasoning_reminder]` TOML table and the remote `long_reasoning_reminder` object; unset fields fall through per field.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]

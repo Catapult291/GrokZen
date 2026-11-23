@@ -200,6 +200,18 @@ pub enum SamplingError {
         generated_chars: u64,
         threshold: u32,
     },
+    /// 思考（reasoning）通道的复读护栏触发：模型的思考流退化为重复循环（长上下文洪泛事故
+    /// 见 stage-log §162）。与正文变体同样终结该次采样尝试：不重试、不重采样，已流出的思考
+    /// 前缀留在 UI。`generated_chars` / `threshold` 仅作遥测，不含生成内容。
+    #[error(
+        "reasoning repetition guard tripped ({}) after {generated_chars} characters",
+        trigger.as_str()
+    )]
+    ReasoningRepetitionDetected {
+        trigger: TextRepetitionTrigger,
+        generated_chars: u64,
+        threshold: u32,
+    },
 }
 
 /// Semantic `error.code` the server stamps on invalid-image rejections, on both non-stream error bodies and mid-stream SSE error events.
@@ -416,7 +428,8 @@ impl SamplingError {
             | SamplingError::EmptyResponse { .. }
             | SamplingError::MaxTokensTruncation
             | SamplingError::DoomLoopDetected { .. }
-            | SamplingError::TextRepetitionDetected { .. } => false,
+            | SamplingError::TextRepetitionDetected { .. }
+            | SamplingError::ReasoningRepetitionDetected { .. } => false,
         }
     }
 
@@ -436,6 +449,7 @@ impl SamplingError {
             SamplingError::DoomLoopDetected { .. } => true,
             // Terminal by design: the poisoned output must not be retried or resampled.
             SamplingError::TextRepetitionDetected { .. } => false,
+            SamplingError::ReasoningRepetitionDetected { .. } => false,
         }
     }
 
@@ -501,7 +515,8 @@ impl SamplingError {
             | SamplingError::EmptyResponse { .. }
             | SamplingError::MaxTokensTruncation
             | SamplingError::DoomLoopDetected { .. }
-            | SamplingError::TextRepetitionDetected { .. } => false,
+            | SamplingError::TextRepetitionDetected { .. }
+            | SamplingError::ReasoningRepetitionDetected { .. } => false,
         }
     }
 
@@ -525,7 +540,8 @@ impl SamplingError {
             | SamplingError::EmptyResponse { .. }
             | SamplingError::MaxTokensTruncation
             | SamplingError::DoomLoopDetected { .. }
-            | SamplingError::TextRepetitionDetected { .. } => false,
+            | SamplingError::TextRepetitionDetected { .. }
+            | SamplingError::ReasoningRepetitionDetected { .. } => false,
         }
     }
 

@@ -4472,6 +4472,7 @@ fn resolve_text_repetition_guard_precedence() {
             chunk_repeat_threshold: Some(6),
             chunk_size: None,
             history_limit: None,
+            ..Default::default()
         },
         remote_settings: Some(crate::util::config::RemoteSettings {
             text_repetition_guard: Some(TextRepetitionGuardSettings {
@@ -4487,6 +4488,73 @@ fn resolve_text_repetition_guard_precedence() {
     assert_eq!(p.chunk_repeat_threshold, 6, "TOML beats remote");
     assert_eq!(p.history_limit, 8000, "per-field remote merge");
     assert_eq!(p.chunk_size, 50, "unset field keeps the default");
+}
+
+/// 思考通道子配置：默认启用（128/16）；`[text_repetition_guard.reasoning]` TOML 子表与远端
+/// `reasoning` 子对象按同一 precedence 逐字段合并；`enforce_on_reasoning=false` 关闭思考通道。
+#[test]
+#[serial]
+fn resolve_text_repetition_guard_reasoning_subconfig() {
+    use crate::util::config::{TextRepetitionGuardSettings, TextRepetitionReasoningSettings};
+
+    let p = Config::default()
+        .resolve_text_repetition_guard()
+        .expect("default is ON");
+    assert!(p.reasoning.enforce_on_reasoning, "思考通道默认启用");
+    assert_eq!(
+        p.reasoning.max_identical_token_run, 128,
+        "思考流 D1 默认阈值"
+    );
+    assert_eq!(p.reasoning.chunk_repeat_threshold, 16, "思考流 D2 默认阈值");
+
+    // TOML 子表 > 远端 reasoning 子对象，逐字段合并；越界值钳回合法区间。
+    let tuned = Config {
+        text_repetition_guard: TextRepetitionGuardSettings {
+            reasoning: Some(TextRepetitionReasoningSettings {
+                max_identical_token_run: Some(256),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        remote_settings: Some(crate::util::config::RemoteSettings {
+            text_repetition_guard: Some(TextRepetitionGuardSettings {
+                reasoning: Some(TextRepetitionReasoningSettings {
+                    enforce_on_reasoning: Some(true),
+                    chunk_repeat_threshold: Some(20),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let p = tuned.resolve_text_repetition_guard().expect("on");
+    assert_eq!(
+        p.reasoning.max_identical_token_run, 256,
+        "TOML beats remote"
+    );
+    assert_eq!(
+        p.reasoning.chunk_repeat_threshold, 20,
+        "per-field remote merge"
+    );
+
+    // 逃生口：TOML 关闭思考通道护栏（正文通道配置不受影响）。
+    let reasoning_off = Config {
+        text_repetition_guard: TextRepetitionGuardSettings {
+            reasoning: Some(TextRepetitionReasoningSettings {
+                enforce_on_reasoning: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let p = reasoning_off
+        .resolve_text_repetition_guard()
+        .expect("正文 guard 仍在");
+    assert!(!p.reasoning.enforce_on_reasoning, "TOML 一键关闭思考通道");
+    assert_eq!(p.max_identical_token_run, 64, "正文通道阈值不受影响");
 }
 
 /// Gate precedence: env > `[doom_loop_recovery]` > remote settings > default(ON).

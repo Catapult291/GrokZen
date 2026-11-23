@@ -110,7 +110,8 @@ pub(super) fn transient_retry_eligible(error: &xai_grok_sampler::SamplingErrorIn
         | SamplingErrorKind::EmptyResponse
         | SamplingErrorKind::MaxTokensTruncation
         | SamplingErrorKind::DoomLoopDetected
-        | SamplingErrorKind::TextRepetitionDetected => false,
+        | SamplingErrorKind::TextRepetitionDetected
+        | SamplingErrorKind::ReasoningRepetitionDetected => false,
     }
 }
 
@@ -1202,6 +1203,17 @@ impl SessionActor {
             );
             return Ok(SamplerFailureRecovery::TurnCancelledByRepetitionGuard { trip });
         }
+        // 思考通道护栏同样终结该轮（本轮推理已不可信）；文案走独立的 reasoning 取消臂。
+        if error.kind == SamplingErrorKind::ReasoningRepetitionDetected {
+            let trip = error.text_repetition.clone().unwrap_or(
+                xai_grok_sampling_types::TextRepetitionTrip {
+                    trigger: xai_grok_sampling_types::TextRepetitionTrigger::IdenticalRun,
+                    generated_chars: 0,
+                    threshold: 0,
+                },
+            );
+            return Ok(SamplerFailureRecovery::TurnCancelledByReasoningRepetitionGuard { trip });
+        }
 
         // On an in-flight salvage continuation, a max-tokens failure or a probable context overflow is not terminal.
         // Return before the budgeted-child rewrites so the marker survives for workflow children.
@@ -1921,6 +1933,9 @@ impl SessionActor {
             }
             SamplerFailureRecovery::TurnCancelledByRepetitionGuard { trip } => {
                 Ok(SamplerTurnOutcome::TurnCancelledByRepetitionGuard { trip })
+            }
+            SamplerFailureRecovery::TurnCancelledByReasoningRepetitionGuard { trip } => {
+                Ok(SamplerTurnOutcome::TurnCancelledByReasoningRepetitionGuard { trip })
             }
         }
     }

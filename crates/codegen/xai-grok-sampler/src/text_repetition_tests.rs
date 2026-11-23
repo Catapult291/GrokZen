@@ -274,3 +274,109 @@ fn divider_walls_never_trip() {
     }
     assert!(guard.on_text_chunk(&text).is_none());
 }
+
+// ── 思考（reasoning）通道子配置 ──────────────────────────────────────────────
+
+/// 思考流整句循环（stage-log §162 复现样本形状）：同一句无限重复、上游缺终止事件。
+fn reasoning_sentence_loop() -> String {
+    "That paddinginese text is not the task.\n\n".repeat(600)
+}
+
+/// 思考流符号洪泛（真实事故样本形状）：`!!9D4D4C…` 式无空白 token 无限流。
+fn reasoning_symbol_flood() -> String {
+    "!!9D4D4C".repeat(3_000)
+}
+
+/// 行长 60 字符的周期行：同块（50 字符窗口）以步长 60 重复 `repeats` 次；
+/// 无列表/标题/围栏形状，D1 无连续同 token 长串，纯测 D2 阈值边界。
+fn periodic_lines(repeats: usize) -> String {
+    "reasoning loop boundary line for the guard check 0123456789\n".repeat(repeats)
+}
+
+#[test]
+fn reasoning_guard_policy_defaults_and_derivation() {
+    let policy = TextRepetitionGuardPolicy::default();
+    assert!(policy.reasoning.enforce_on_reasoning, "思考通道默认启用");
+    assert_eq!(
+        policy.reasoning.max_identical_token_run, 128,
+        "思考 D1 阈值"
+    );
+    assert_eq!(policy.reasoning.chunk_repeat_threshold, 16, "思考 D2 阈值");
+
+    let derived = policy.reasoning_guard_policy();
+    assert_eq!(derived.max_identical_token_run, 128);
+    assert_eq!(derived.chunk_repeat_threshold, 16);
+    // chunk_size 与历史窗沿用正文配置：两个 guard 实例共用检测实现，仅阈值不同。
+    assert_eq!(derived.chunk_size, policy.chunk_size);
+    assert_eq!(derived.history_limit, policy.history_limit);
+}
+
+#[test]
+fn reasoning_chunk_threshold_is_looser_than_the_text_guard() {
+    // 14 次同块重复：正文 guard（阈值 10）熔断，思考 guard（阈值 16）放行——
+    // 思考文本天然重复率高，宁可漏报不误报。
+    let text = periodic_lines(14);
+
+    let mut text_guard = TextRepetitionGuard::new(TextRepetitionGuardPolicy::default());
+    assert!(
+        feed_chunked(&mut text_guard, &text).is_some(),
+        "正文 guard 第 10 次同块重复即熔断"
+    );
+
+    let mut reasoning_guard =
+        TextRepetitionGuard::new(TextRepetitionGuardPolicy::default().reasoning_guard_policy());
+    assert!(
+        feed_chunked(&mut reasoning_guard, &text).is_none(),
+        "思考 guard 阈值 16：14 次重复必须放行"
+    );
+
+    // 补到 18 次重复后思考 guard 也熔断（D2 命中）。
+    let mut reasoning_guard =
+        TextRepetitionGuard::new(TextRepetitionGuardPolicy::default().reasoning_guard_policy());
+    let (trip, fed) =
+        feed_chunked(&mut reasoning_guard, &periodic_lines(18)).expect("18 次同块重复必须熔断");
+    assert_eq!(trip.trigger, TextRepetitionTrigger::ChunkPeriodicity);
+    assert!(fed <= 18 * 60, "同块周期熔断不应晚于第 18 行，实际 {fed}");
+}
+
+#[test]
+fn reasoning_sentence_loop_trips_chunk_periodicity() {
+    let mut guard =
+        TextRepetitionGuard::new(TextRepetitionGuardPolicy::default().reasoning_guard_policy());
+    let (trip, fed) =
+        feed_chunked(&mut guard, &reasoning_sentence_loop()).expect("整句无限循环必须熔断");
+    assert_eq!(trip.trigger, TextRepetitionTrigger::ChunkPeriodicity);
+    assert!(fed < 4_000, "整句循环应在千字符级熔断，实际 {fed}");
+}
+
+#[test]
+fn reasoning_symbol_flood_trips_early() {
+    let mut guard =
+        TextRepetitionGuard::new(TextRepetitionGuardPolicy::default().reasoning_guard_policy());
+    let (trip, fed) =
+        feed_chunked(&mut guard, &reasoning_symbol_flood()).expect("符号洪泛必须熔断");
+    // 无空白 token 以 1024 字节强制刷出的 D1 需 128 次重复（约 128 KB），
+    // D2 的 50 字符窗口以步长 8 重复，先于 D1 命中。
+    assert_eq!(trip.trigger, TextRepetitionTrigger::ChunkPeriodicity);
+    assert!(fed < 4_000, "符号洪泛应在千字符级熔断，实际 {fed}");
+}
+
+/// 正常长思考：编号列表、重述句式、重复关键词——结构化重复经 markdown 形状重置后不得触发。
+#[test]
+fn normal_reasoning_with_repetitive_structure_does_not_trip() {
+    let mut text = String::from("Let me work through this step by step.\n\n");
+    for i in 0..200 {
+        text.push_str(&format!(
+            "{i}. check candidate {i} against the constraint set\n"
+        ));
+        text.push_str(&format!(
+            "   verdict for candidate {i}: keep it for the next pass\n\n"
+        ));
+    }
+    let mut guard =
+        TextRepetitionGuard::new(TextRepetitionGuardPolicy::default().reasoning_guard_policy());
+    assert!(
+        feed_chunked(&mut guard, &text).is_none(),
+        "结构化重复的正常思考不得触发"
+    );
+}

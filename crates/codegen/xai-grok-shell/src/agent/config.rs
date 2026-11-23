@@ -2054,7 +2054,8 @@ impl Config {
     }
     /// Client-side text-repetition guard policy for streamed model output.
     /// Merged PER-FIELD across the `[text_repetition_guard]` TOML table and the remote settings
-    /// `text_repetition_guard` object (TOML > remote > default; no env layer).
+    /// `text_repetition_guard` object (TOML > remote > default; no env layer). The `reasoning`
+    /// sub-config merges the same way from `[text_repetition_guard.reasoning]` / remote `reasoning`.
     /// Gate: local `enabled` > remote `enabled` > default ON; `Some(false)` is the kill switch.
     /// `None` disables the guard entirely, so disabled has exactly one spelling.
     pub(crate) fn resolve_text_repetition_guard(
@@ -2097,6 +2098,33 @@ impl Config {
                 .history_limit
                 .or(remote.and_then(|s| s.history_limit))
                 .map_or(Policy::DEFAULT_HISTORY_LIMIT, Policy::clamp_history_limit),
+            // 思考通道子配置按同一条 precedence 合并：TOML 子表 > 远端 `reasoning` 子对象 > 默认（启用）。
+            reasoning: {
+                let reasoning_toml = self.text_repetition_guard.reasoning.as_ref();
+                let reasoning_remote = remote.and_then(|s| s.reasoning.as_ref());
+                xai_grok_sampling_types::TextRepetitionReasoningPolicy {
+                    enforce_on_reasoning: reasoning_toml
+                        .and_then(|r| r.enforce_on_reasoning)
+                        .or(reasoning_remote.and_then(|r| r.enforce_on_reasoning))
+                        .unwrap_or(true),
+                    max_identical_token_run: reasoning_toml
+                        .and_then(|r| r.max_identical_token_run)
+                        .or(reasoning_remote.and_then(|r| r.max_identical_token_run))
+                        .map_or(
+                            xai_grok_sampling_types::TextRepetitionReasoningPolicy::
+                            DEFAULT_MAX_IDENTICAL_TOKEN_RUN,
+                            Policy::clamp_max_identical_token_run,
+                        ),
+                    chunk_repeat_threshold: reasoning_toml
+                        .and_then(|r| r.chunk_repeat_threshold)
+                        .or(reasoning_remote.and_then(|r| r.chunk_repeat_threshold))
+                        .map_or(
+                            xai_grok_sampling_types::TextRepetitionReasoningPolicy::
+                            DEFAULT_CHUNK_REPEAT_THRESHOLD,
+                            Policy::clamp_chunk_repeat_threshold,
+                        ),
+                }
+            },
         })
     }
     pub(crate) fn resolve_long_reasoning_reminder(

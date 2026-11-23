@@ -506,10 +506,13 @@ impl SessionActor {
                 );
                 self.signals_handle()
                     .record_error_typed(error.kind.as_ref());
-                // Text-repetition guard: the trip detail rides the error payload (request still
+                // Text-repetition guard (正文/思考通道): the trip detail rides the error payload (request still
                 // owned above, so this lands on the aborting turn and cannot leak into the next).
-                if error.kind == xai_grok_sampler::SamplingErrorKind::TextRepetitionDetected
-                    && let Some(trip) = &error.text_repetition
+                if matches!(
+                    error.kind,
+                    xai_grok_sampler::SamplingErrorKind::TextRepetitionDetected
+                        | xai_grok_sampler::SamplingErrorKind::ReasoningRepetitionDetected
+                ) && let Some(trip) = &error.text_repetition
                 {
                     self.signals_handle()
                         .record_text_repetition_abort(trip.trigger.as_str());

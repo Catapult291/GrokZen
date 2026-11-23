@@ -180,6 +180,10 @@ pub(crate) fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
         SamplingError::TextRepetitionDetected { .. } => {
             acp::Error::internal_error().data(err.to_string())
         }
+        // 思考通道变体：正文取消臂之外的散落路径同样显示触发器标签。
+        SamplingError::ReasoningRepetitionDetected { .. } => {
+            acp::Error::internal_error().data(err.to_string())
+        }
     }
 }
 
@@ -430,6 +434,33 @@ pub(crate) fn prompt_complete_fields(
 mod tests {
     use super::*;
     use reqwest::StatusCode;
+
+    /// 思考通道复读错误：散落路径（/btw、无 turn 循环的子代理）映射为 internal_error，
+    /// data 携带触发器标签文案；turn 循环内则由 reasoning 取消臂承担专属 UI 文案。
+    #[test]
+    fn reasoning_repetition_maps_to_internal_error_with_trip_label() {
+        let err = xai_grok_sampling_types::SamplingError::ReasoningRepetitionDetected {
+            trigger: xai_grok_sampling_types::TextRepetitionTrigger::ChunkPeriodicity,
+            generated_chars: 656,
+            threshold: 16,
+        };
+        let rendered = err.to_string();
+        let acp_err = map_sampling_err_to_acp(err);
+        assert_eq!(acp_err.code, acp::ErrorCode::InternalError.into());
+        assert!(
+            rendered.contains("reasoning repetition guard tripped")
+                && rendered.contains("chunk_periodicity"),
+            "映射文案必须包含触发器标签: {rendered}"
+        );
+        assert!(
+            acp_err
+                .data
+                .as_ref()
+                .and_then(|d| d.as_str())
+                .is_some_and(|s| s.contains("chunk_periodicity")),
+            "data 必须原样携带触发器标签文案"
+        );
+    }
 
     #[test]
     fn rewrite_service_names_is_ascii_case_insensitive() {

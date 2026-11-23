@@ -208,7 +208,7 @@ pub struct SamplingErrorInfo {
     /// Telemetry only; `None` for terminal-response detections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doom_loop_aborted_at_chunk: Option<u64>,
-    /// Present only when `kind == TextRepetitionDetected`.
+    /// Present only when `kind == TextRepetitionDetected` or `kind == ReasoningRepetitionDetected`.
     /// Which sub-detector fired, how much text had been generated, and the reading that reached
     /// the threshold — telemetry only, never generation content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -237,6 +237,8 @@ pub enum SamplingErrorKind {
     MaxTokensTruncation,
     DoomLoopDetected,
     TextRepetitionDetected,
+    /// 思考（reasoning）通道的复读护栏触发；正文变体的姊妹终态。
+    ReasoningRepetitionDetected,
 }
 /// [`SamplingErrorKind::from_str`] error: the wire string matched no known kind (a newer peer's kind); callers degrade to untyped via `.ok()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,6 +260,7 @@ impl std::str::FromStr for SamplingErrorKind {
             "max_tokens_truncation" => Self::MaxTokensTruncation,
             "doom_loop_detected" => Self::DoomLoopDetected,
             "text_repetition_detected" => Self::TextRepetitionDetected,
+            "reasoning_repetition_detected" => Self::ReasoningRepetitionDetected,
             _ => return Err(UnknownSamplingErrorKind),
         })
     }
@@ -308,6 +311,12 @@ impl From<&SamplingError> for SamplingErrorInfo {
             SamplingError::TextRepetitionDetected { .. } => {
                 (SamplingErrorKind::TextRepetitionDetected, None, None, None)
             }
+            SamplingError::ReasoningRepetitionDetected { .. } => (
+                SamplingErrorKind::ReasoningRepetitionDetected,
+                None,
+                None,
+                None,
+            ),
         };
 
         let empty_response_context = match err {
@@ -323,6 +332,11 @@ impl From<&SamplingError> for SamplingErrorInfo {
         };
         let text_repetition = match err {
             SamplingError::TextRepetitionDetected {
+                trigger,
+                generated_chars,
+                threshold,
+            }
+            | SamplingError::ReasoningRepetitionDetected {
                 trigger,
                 generated_chars,
                 threshold,
@@ -560,6 +574,7 @@ mod tests {
             MaxTokensTruncation,
             DoomLoopDetected,
             TextRepetitionDetected,
+            ReasoningRepetitionDetected,
         ];
         for kind in all {
             // Exhaustive match, no `_` arm: a new variant refuses to compile this test until an arm is added
@@ -575,7 +590,8 @@ mod tests {
                 | EmptyResponse
                 | MaxTokensTruncation
                 | DoomLoopDetected
-                | TextRepetitionDetected => {}
+                | TextRepetitionDetected
+                | ReasoningRepetitionDetected => {}
             }
             assert_eq!(kind.as_ref().parse(), Ok(kind));
         }

@@ -1552,3 +1552,70 @@ async fn text_repetition_trip_records_signals_and_event() {
         })
         .await;
 }
+
+/// 思考（reasoning）通道的复读护栏触发走同一信号/事件记账：计数 +1、首触发器入 top slot、
+/// `text_repetition_tripped` 事件记录 trip 细节（思考通道复用同一事件形状）。
+#[tokio::test]
+async fn reasoning_repetition_trip_records_signals_and_event() {
+    use xai_grok_sampler::{RequestId, SamplingErrorInfo, SamplingErrorKind, SamplingEvent};
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let mut fixture = make_replay_send_update_fixture().await;
+            let events_dir = tempfile::tempdir().expect("temp events dir");
+            fixture.actor.events = crate::session::events::EventTracker::new(events_dir.path());
+            let actor = Arc::new(fixture.actor);
+            let req = RequestId::random();
+            own_request(&actor, &req);
+
+            actor
+                .handle_sampling_event(SamplingEvent::Failed {
+                    request_id: req.clone(),
+                    error: SamplingErrorInfo {
+                        kind: SamplingErrorKind::ReasoningRepetitionDetected,
+                        status_code: None,
+                        message:
+                            "reasoning repetition guard tripped (chunk_periodicity) after 656 characters"
+                                .to_string(),
+                        is_retryable: false,
+                        retry_after_secs: None,
+                        should_retry: None,
+                        error_code: None,
+                        model_metadata: None,
+                        empty_response_context: None,
+                        doom_loop_triggers: None,
+                        doom_loop_aborted_at_chunk: None,
+                        text_repetition: Some(xai_grok_sampling_types::TextRepetitionTrip {
+                            trigger: xai_grok_sampling_types::TextRepetitionTrigger::ChunkPeriodicity,
+                            generated_chars: 656,
+                            threshold: 16,
+                        }),
+                        credential: xai_grok_sampling_types::SentCredential::Unknown,
+                    },
+                })
+                .await;
+
+            let snap = actor
+                .signals_handle()
+                .snapshot()
+                .await
+                .expect("signals snapshot");
+            assert_eq!(snap.text_repetition_aborts, 1);
+            assert_eq!(
+                snap.text_repetition_guard_top_trigger.as_deref(),
+                Some("chunk_periodicity")
+            );
+
+            let log =
+                std::fs::read_to_string(events_dir.path().join("events.jsonl")).unwrap_or_default();
+            assert!(
+                super::super::support::has_event_with(&log, "text_repetition_tripped", |v| {
+                    v.get("trigger").and_then(|t| t.as_str()) == Some("chunk_periodicity")
+                        && v.get("generated_chars").and_then(|n| n.as_u64()) == Some(656)
+                        && v.get("threshold").and_then(|n| n.as_u64()) == Some(16)
+                }),
+                "events.jsonl must record the reasoning trip; log:\n{log}"
+            );
+        })
+        .await;
+}

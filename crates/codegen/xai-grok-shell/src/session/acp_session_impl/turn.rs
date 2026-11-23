@@ -3229,6 +3229,36 @@ impl SessionActor {
                         }),
                     });
                 }
+                Ok(SamplerTurnOutcome::TurnCancelledByReasoningRepetitionGuard { trip }) => {
+                    // 思考通道护栏触发：已流出的思考前缀留在 UI，但本轮推理已不可信，立即止损。
+                    // 文案与正文变体区分开：明确本轮失败，建议换模型而非重试。
+                    let trigger = trip.trigger.as_str();
+                    let notice = format!(
+                        "已自动中止本轮：检测到思考（reasoning）流复读循环（触发器 {trigger}）。\
+                         本轮已失败；若反复出现，建议更换模型或新开会话。"
+                    );
+                    self.send_hook_annotation_with_kind(
+                        crate::extensions::notification::HookAnnotationKind::Note,
+                        &format!("\u{26a0} {notice}"),
+                    )
+                    .await;
+                    self.push_system_reminder(&format!(
+                        "The previous turn was automatically stopped because the model's hidden \
+                         reasoning stream entered a repetition loop (detector: {trigger}). That \
+                         reasoning is untrustworthy; address the user's latest message afresh. If \
+                         this keeps happening, the user should switch models."
+                    ));
+                    return Ok(TurnOutcome::Cancelled {
+                        category: Some(
+                            crate::session::events::CancellationCategory::RepetitionGuard,
+                        ),
+                        context: Some(crate::session::commands::CancellationContext {
+                            reason: Some(format!("reasoning_repetition:{trigger}")),
+                            trigger: Some("auto".to_string()),
+                            ..Default::default()
+                        }),
+                    });
+                }
                 Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store }) => {
                     if auth_retry_schedule.reset_if_incident_spans_suspend() {
                         tracing::info!("auth 401 retry: incident spanned a suspend; budget reset");
