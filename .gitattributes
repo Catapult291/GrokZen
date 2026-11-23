@@ -6,3 +6,6 @@ packaging/linux/*.sh text eol=lf
 community/announcements/**/*.json text eol=lf
 community/announcements/manifest.json text eol=lf
 community/display-translations/**/*.json text eol=lf
+
+# Rust sources are text: normalize to LF in the index and on checkout.
+*.rs text eol=lf
