@@ -454,9 +454,6 @@ pub enum CancellationCategory {
     /// The text-repetition guard aborted the turn: the model's streamed output degenerated into a
     /// repetition loop. Automatic, never a user gesture.
     RepetitionGuard,
-    /// The cross-turn loop breaker aborted the turn: consecutive steps repeated the same visible
-    /// preamble and the same tool-name set. Automatic, never a user gesture.
-    CrossTurnLoop,
 }
 
 #[cfg(test)]
@@ -491,7 +488,6 @@ mod tests {
             CancellationCategory::PermissionCancelled,
             CancellationCategory::MidTurnAbort,
             CancellationCategory::RepetitionGuard,
-            CancellationCategory::CrossTurnLoop,
         ] {
             let value = serde_json::to_value(variant).unwrap();
             let decoded: CancellationCategory = serde_json::from_value(value).unwrap();
@@ -516,7 +512,6 @@ mod tests {
                 CancellationCategory::RepetitionGuard,
                 "\"repetition_guard\"",
             ),
-            (CancellationCategory::CrossTurnLoop, "\"cross_turn_loop\""),
         ] {
             let json = serde_json::to_string(&variant).unwrap();
             assert_eq!(json, expected, "{variant:?} must serialize to {expected}");
