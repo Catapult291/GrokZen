@@ -1,27 +1,27 @@
 [
   {
-    "category": "fixes",
-    "description": "**运行时长显示**现在会进位为小时（例如 `3h14m`），不再停在 60 分钟。",
+    "category": "features",
+    "description": "**子代理回合上限覆盖** —— 支持按名称与角色覆盖子代理回合上限，explore / plan / implementer 子代理可按项目需要跑更多或更少回合。",
     "breaking_change": false
   },
   {
     "category": "features",
-    "description": "**会话标题栏**重新设计为单行，承载覆盖视图上下文和仪表盘按钮。",
+    "description": "**思考通道复读护栏** —— 文本复读护栏扩展到思考通道，循环中的模型不再在重复思考上烧 token。",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "**停靠面板中的监视器与循环任务行**现在会显示下次执行时间。",
-    "breaking_change": false
-  },
-  {
-    "category": "performance",
-    "description": "通过省略逐帧同步更新包装，修复 **tmux 窗格中的卡顿**。",
+    "description": "**会话面板历史** —— 会话面板不再丢弃 30 天前的会话。",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "**工作流状态**现在会在停靠面板中显示为可点击的一行。",
+    "description": "**OpenAI 兼容上游 epoch 字段** —— 兼容 OpenAI 兼容上游以浮点数报告的 epoch 时间戳字段。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Token 数字分组** —— 会话用量 Token 数字改为 4 位一组显示，便于阅读。",
     "breaking_change": false
   }
 ]

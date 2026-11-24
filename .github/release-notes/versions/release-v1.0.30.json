@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "tag": "release-v1.0.30",
+  "prerelease": false,
+  "previous_tag": "release-v1.0.29",
+  "community": [
+    {
+      "text": "子代理回合上限支持按名称与角色覆盖，explore / plan / implementer 子代理可按项目需要调整回合数。",
+      "commits": [
+        "823c6f8ff7bcb2769dee7fdb43f96f04678b4941"
+      ]
+    },
+    {
+      "text": "文本复读护栏扩展到思考通道，循环中的模型不再在重复思考上烧 token。",
+      "commits": [
+        "cafe740b3447d292c4dc226ac4e481ab47756c60"
+      ]
+    },
+    {
+      "text": "会话面板不再丢弃 30 天前的会话。",
+      "commits": [
+        "4de5745839b66f2052abd506f25722e254e469ce"
+      ]
+    },
+    {
+      "text": "兼容 OpenAI 兼容上游以浮点数报告的 epoch 时间戳字段。",
+      "commits": [
+        "4b9daf4a7bd858c07ee7ac5aee02067964e67ecf"
+      ]
+    },
+    {
+      "text": "会话用量 Token 数字改为 4 位一组显示，便于阅读。",
+      "commits": [
+        "0b0ff22336b344d6103085502ca2dbcee906d208"
+      ]
+    }
+  ],
+  "upstream": []
+}

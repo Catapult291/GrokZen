@@ -1,27 +1,27 @@
 [
   {
-    "category": "fixes",
-    "description": "**Elapsed-time display** now rolls over into hours (for example `3h14m`) instead of stopping at 60 minutes.",
+    "category": "features",
+    "description": "**Subagent turn overrides** — subagent turn limits can now be overridden by name and by role, so explore / plan / implementer subagents can run longer or shorter per project.",
     "breaking_change": false
   },
   {
     "category": "features",
-    "description": "**Session header** redesigned as a single row that carries the overlay context and a Dashboard button.",
+    "description": "**Repetition guard for reasoning** — the text repetition guard now also covers the reasoning channel, stopping looping models from burning tokens on repeated thinking.",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "**Dock Watchers and Loops rows** now show when the next run is due.",
-    "breaking_change": false
-  },
-  {
-    "category": "performance",
-    "description": "**Fixed lag in tmux** panes by omitting per-frame synchronized-update wrappers.",
+    "description": "**Session panel history** — the session panel no longer drops sessions older than 30 days.",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "**Workflow status** now shows a clickable row in the dock.",
+    "description": "**OpenAI-compatible epoch fields** — usage timestamps from OpenAI-compatible upstreams that report floating-point epochs are now parsed correctly.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Token number grouping** — session usage token numbers are now grouped in fours for readability.",
     "breaking_change": false
   }
 ]
