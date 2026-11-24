@@ -21,7 +21,13 @@
 
 ## 安装
 
-从 [Releases](https://github.com/Catapult291/GrokZen/releases) 下载对应平台的完整包，解压后运行包内 `Install-GrokZh.ps1` 完成安装。
+不想下载 ZIP 时，在 Windows PowerShell 5.1 或 PowerShell 7 中粘贴下面一行：
+
+```powershell
+$p=Join-Path $env:TEMP ('grok-zh-install-'+[guid]::NewGuid().ToString('N')+'.ps1'); $tls=[Net.ServicePointManager]::SecurityProtocol; try { [Net.ServicePointManager]::SecurityProtocol=$tls -bor [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Catapult291/GrokZen/zh-dev/packaging/windows/Install-GrokZhOnline.ps1' -OutFile $p; & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $p; if ($LASTEXITCODE -ne 0) { throw "安装未完成，退出码：$LASTEXITCODE" } } finally { [Net.ServicePointManager]::SecurityProtocol=$tls; Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+```
+
+也可以从 [Releases](https://github.com/Catapult291/GrokZen/releases) 下载对应平台的完整包，解压后运行包内 `Install-GrokZh.ps1` 完成安装；安装说明见 [Windows](packaging/windows/INSTALL-WINDOWS.md) · [macOS](packaging/macos/INSTALL-MACOS.md) · [Linux](packaging/linux/INSTALL-LINUX.md)。
 
 ## 独立功能
 
