@@ -65,6 +65,7 @@ fn build_context_window(
     size: u64,
     used_tokens: Option<u64>,
     totals: Option<&PromptUsageModel>,
+    auto_compact_threshold_percent: u8,
 ) -> StatusLineContextWindow {
     // The shared rounding, not a fourth spelling of it
     // The field is omitted rather than zero when the window is unknown, which is the only part the helper cannot express
@@ -98,6 +99,8 @@ fn build_context_window(
         }),
         used_percentage,
         remaining_percentage: used_percentage.map(|pct| 100 - pct),
+        auto_compact_threshold_percent: (auto_compact_threshold_percent > 0)
+            .then_some(auto_compact_threshold_percent),
     }
 }
 
@@ -204,7 +207,12 @@ impl SessionActor {
                 total_duration_ms: self.session_start.elapsed().as_millis() as u64,
                 total_api_duration_ms: totals.map(|t| t.api_duration_ms),
             },
-            context_window: build_context_window(context_window_size, used_tokens, totals),
+            context_window: build_context_window(
+                context_window_size,
+                used_tokens,
+                totals,
+                self.compaction.threshold_percent.get(),
+            ),
             effort,
             worktree,
             turn: live_turn(turn_start_ms, prompt_id.as_deref()),

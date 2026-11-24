@@ -18,6 +18,23 @@ pub enum CompactionModeLabel {
     Segments,
 }
 
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TwoPassOutcome {
+    /// Policy or product-exception off (cursor, subagents).
+    Disabled,
+    /// Enabled, fell back to single-pass.
+    SinglePass,
+    /// Pass-2 summary applied.
+    TwoPass,
+}
+
+#[derive(Serialize)]
+pub struct AutoCompactFired {
+    pub tokens_before: u64,
+    pub percentage: u8,
+}
+
 #[derive(Serialize)]
 pub struct CompactionTriggered {
     pub trigger: CompactionTrigger,
@@ -27,6 +44,7 @@ pub struct CompactionTriggered {
     pub model_id: String,
     pub compaction_id: String,
     pub compaction_mode: CompactionModeLabel,
+    pub two_pass_enabled: bool,
     pub is_subagent: bool,
 }
 
@@ -39,6 +57,7 @@ pub struct CompactionCompleted {
     pub model_id: Option<String>,
     pub compaction_id: String,
     pub compaction_mode: CompactionModeLabel,
+    pub two_pass: TwoPassOutcome,
     pub segments_queued: u32,
     pub degenerate_retries: u32,
     pub input_overflow_retries: u32,
@@ -57,11 +76,13 @@ pub struct CompactionBeginParams {
     pub context_window: u64,
     pub model_id: String,
     pub compaction_mode: CompactionModeLabel,
+    pub two_pass_enabled: bool,
     pub is_subagent: bool,
 }
 
 pub struct CompactionCompleteStats {
     pub tokens_after: u64,
+    pub two_pass_used: bool,
     pub segments_queued: u32,
     pub degenerate_retries: u32,
     pub input_overflow_retries: u32,
@@ -83,6 +104,7 @@ pub struct CompactionScope {
     start: std::time::Instant,
     _active: crate::activity::ActivityGaugeGuard,
     compaction_mode: CompactionModeLabel,
+    two_pass_enabled: bool,
     is_subagent: bool,
 }
 
@@ -94,6 +116,7 @@ impl CompactionScope {
             context_window,
             model_id,
             compaction_mode,
+            two_pass_enabled,
             is_subagent,
         } = params;
         let compaction_id = uuid::Uuid::new_v4().to_string();
@@ -111,6 +134,7 @@ impl CompactionScope {
             model_id: model_id.clone(),
             compaction_id: compaction_id.clone(),
             compaction_mode,
+            two_pass_enabled,
             is_subagent,
         });
         Self {
@@ -120,11 +144,17 @@ impl CompactionScope {
             start: std::time::Instant::now(),
             _active: active,
             compaction_mode,
+            two_pass_enabled,
             is_subagent,
         }
     }
 
     pub fn complete(self, stats: CompactionCompleteStats, timing: CompactionTiming) {
+        let two_pass = match (self.two_pass_enabled, stats.two_pass_used) {
+            (false, _) => TwoPassOutcome::Disabled,
+            (true, true) => TwoPassOutcome::TwoPass,
+            (true, false) => TwoPassOutcome::SinglePass,
+        };
         crate::session_ctx::log_event(CompactionCompleted {
             duration_ms: self.start.elapsed().as_millis() as u64,
             tokens_before: self.tokens_before,
@@ -132,6 +162,7 @@ impl CompactionScope {
             model_id: Some(self.model_id),
             compaction_id: self.compaction_id,
             compaction_mode: self.compaction_mode,
+            two_pass,
             segments_queued: stats.segments_queued,
             degenerate_retries: stats.degenerate_retries,
             input_overflow_retries: stats.input_overflow_retries,
@@ -141,6 +172,15 @@ impl CompactionScope {
             post_compaction_ms: timing.post_compaction_ms,
         });
     }
+}
+
+/// Auto-compaction suppressed after a deterministic failure so the turn loop stops re-firing a doomed compaction.
+/// Fires once per transition into the suppressed state; `reason` is a fixed classification: `credit_block | size | auth | schema | other`.
+#[derive(Serialize)]
+pub struct AutoCompactSuppressed {
+    pub reason: &'static str,
+    pub estimated_tokens: u64,
+    pub context_window: u64,
 }
 
 #[derive(Serialize)]

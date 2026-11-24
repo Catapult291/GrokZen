@@ -10,7 +10,8 @@ use xai_grok_sampling_types::{
 
 use crate::commands::{ChatStateCommand, RepairHistoryBlocked, StrictAppendAck, StrictAppendError};
 use crate::types::{
-    ChatStateSnapshot, ConversationCounts, Credentials, NotificationMeta, TurnCapture,
+    AutoCompactTrigger, ChatStateSnapshot, ConversationCounts, Credentials, NotificationMeta,
+    TurnCapture,
 };
 
 /// Handle to communicate with ChatStateActor.
@@ -638,6 +639,21 @@ impl ChatStateHandle {
         })
         .await
         .unwrap_or_default()
+    }
+
+    /// Check if auto-compact is needed.
+    pub async fn check_auto_compact_needed(
+        &self,
+        threshold_percent: u8,
+    ) -> Option<AutoCompactTrigger> {
+        self.query("CheckAutoCompactNeeded", |reply| {
+            ChatStateCommand::CheckAutoCompactNeeded {
+                threshold_percent,
+                reply,
+            }
+        })
+        .await
+        .flatten()
     }
 
     // ═══ Narrow targeted queries ═══

@@ -109,7 +109,11 @@ async fn handle_session_info(
         conversation_id: None,
         turns: 0,
         turn_index: 0,
-        context: ContextInfo::default(),
+        context: ContextInfo {
+            auto_compact_threshold_percent:
+                crate::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
+            ..ContextInfo::default()
+        },
     });
 
     data.model_display_name = agent

@@ -143,19 +143,19 @@ impl Lifecycle {
     pub(crate) fn plain_message(&self) -> String {
         match self {
             Lifecycle::CompactStarted { percentage } => {
-                format!("Compacting conversation ({percentage}% full)...")
+                format!("Auto-compacting conversation ({percentage}% full)...")
             }
             Lifecycle::CompactCompleted { .. } => "Conversation compacted.".to_string(),
             Lifecycle::CompactFailed { error } if error.trim().is_empty() => {
-                "Compaction failed.".to_string()
+                "Auto-compact failed.".to_string()
             }
             Lifecycle::CompactFailed { error } => {
                 // Plain output is line-oriented, so the two-line error message collapses to one; JSON carries the raw string
                 // The hyphen matches the TUI
                 let single_line = error.split_whitespace().collect::<Vec<_>>().join(" ");
-                format!("Compaction failed - {single_line}")
+                format!("Auto-compact failed - {single_line}")
             }
-            Lifecycle::CompactCancelled => "Compaction cancelled.".to_string(),
+            Lifecycle::CompactCancelled => "Auto-compact cancelled.".to_string(),
             Lifecycle::AutoContinue { .. } => "Resumed after compaction.".to_string(),
             Lifecycle::ImageCompressed { message } => message.clone(),
             Lifecycle::MemoryFlushStarted => "Memory flush started.".to_string(),
@@ -201,7 +201,7 @@ impl Lifecycle {
             Lifecycle::CompactFailed { error } if error.trim().is_empty() => locale
                 .named_text(
                     "headless.lifecycle.compact_failed_empty",
-                    "Compaction failed.",
+                    "Auto-compact failed.",
                 )
                 .into_owned(),
             Lifecycle::CompactFailed { error } => {
@@ -209,7 +209,7 @@ impl Lifecycle {
                 locale
                     .named_text(
                         "headless.lifecycle.compact_failed",
-                        "Compaction failed - {error}",
+                        "Auto-compact failed - {error}",
                     )
                     .replace("{error}", &single_line)
             }
@@ -248,7 +248,7 @@ impl Lifecycle {
             Lifecycle::CompactStarted { percentage } => locale
                 .named_text(
                     "headless.lifecycle.compact_started",
-                    "Compacting conversation ({percentage}% full)...",
+                    "Auto-compacting conversation ({percentage}% full)...",
                 )
                 .replace("{percentage}", &percentage.to_string()),
             Lifecycle::CompactCompleted { .. } => locale
@@ -260,7 +260,7 @@ impl Lifecycle {
             Lifecycle::CompactCancelled => locale
                 .named_text(
                     "headless.lifecycle.compact_cancelled",
-                    "Compaction cancelled.",
+                    "Auto-compact cancelled.",
                 )
                 .into_owned(),
             Lifecycle::AutoContinue { .. } => locale
