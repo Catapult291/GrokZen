@@ -113,7 +113,7 @@ pub(super) async fn parse_session_picker_entries_blocking(
     .await
     .map_err(|error| format!("session list parse task failed: {error}"))?
 }
-/// Sessions older than 30 days, and sessions with no usable user prompt (empty `summary` after fallbacks), are dropped.
+/// Sessions with no usable user prompt (empty `summary` after fallbacks) are dropped; age is not a filter, so old sessions stay resumable.
 ///
 /// `resolve_local` receives the candidate ids for `presence` and returns the subset that exists on disk; each call is a full `~/.grok/sessions` walk.
 fn parse_session_picker_entries_with(
@@ -125,7 +125,6 @@ fn parse_session_picker_entries_with(
         Some(Value::Array(entries)) => entries,
         _ => Vec::new(),
     };
-    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
     let mut parsed: Vec<SessionPickerEntry> = entries
         .into_iter()
         .filter_map(|v| {
@@ -161,12 +160,7 @@ fn parse_session_picker_entries_with(
                 .and_then(Value::as_str)
                 .and_then(|s| s.parse().ok());
             let updated_at: chrono::DateTime<chrono::Utc> = match parsed_updated {
-                Some(ts) => {
-                    if !is_conversation && ts < cutoff {
-                        return None;
-                    }
-                    ts
-                }
+                Some(ts) => ts,
                 None => {
                     if !is_conversation {
                         return None;

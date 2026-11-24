@@ -64,6 +64,25 @@ fn picker_keeps_old_conversation_past_cutoff() {
     );
 }
 #[test]
+fn picker_keeps_local_session_past_30_days() {
+    let payload = serde_json::json!({
+        "sessions": [{
+            "sessionId": "local_ancient",
+            "cwd": "/Users/me/xai",
+            "summary": "Old but resumable",
+            "source": "local",
+            "updatedAt": "2020-01-01T00:00:00Z",
+        }]
+    });
+    let entries = parse(payload);
+    assert_eq!(entries.len(), 1, "local sessions must not age out");
+    let Some(entry) = entries.first() else {
+        panic!("expected old local session: {entries:?}");
+    };
+    assert_eq!(entry.id, "local_ancient");
+    assert_eq!(entry.source, "local");
+}
+#[test]
 fn picker_reads_last_reply_at_from_the_wire() {
     let now = chrono::Utc::now();
     let reply = (now - chrono::Duration::hours(2)).to_rfc3339();
