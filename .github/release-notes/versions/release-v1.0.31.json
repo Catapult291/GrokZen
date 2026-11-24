@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "tag": "release-v1.0.31",
+  "prerelease": false,
+  "previous_tag": "release-v1.0.30",
+  "community": [
+    {
+      "text": "自动压缩与两遍压缩恢复，长会话在上下文用量达到 90% 时自动压缩，不再因上下文耗尽而中断。",
+      "commits": [
+        "43528d33b235ba34a3c30559241b83eb696d7376"
+      ]
+    },
+    {
+      "text": "删除跨轮复读自动中止，回合不再因连续相同的步骤组合被自动打断。",
+      "commits": [
+        "029b2b7a037cbaefd8596b89d9e682c1e1cdfd68"
+      ]
+    }
+  ],
+  "upstream": []
+}
