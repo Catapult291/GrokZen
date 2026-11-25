@@ -37,6 +37,7 @@ async fn create_test_actor(
     let tool_context = ToolContext::new(cwd.clone(), None, None, fs, terminal, hunk_tracker_handle);
     let state = TokioMutex::new(State {
         running_task: None,
+        turn_cancel: tokio_util::sync::CancellationToken::new(),
         finalization_gate: Default::default(),
         message_delivery: Default::default(),
         pending_inputs: VecDeque::new(),
@@ -81,6 +82,7 @@ async fn create_test_actor(
         attribution_callback: None,
         auth_manager: None,
         is_chat_kind: false,
+        cancel_slot: Default::default(),
         state,
         notifications: NotificationSender::for_tests(
             GatewaySender::new(gateway_tx),
@@ -490,6 +492,7 @@ async fn create_test_actor_with_memory(
         .map(|_| crate::session::memory::MemoryStorage::new(&cwd_path, None));
     let state = TokioMutex::new(State {
         running_task: None,
+        turn_cancel: tokio_util::sync::CancellationToken::new(),
         finalization_gate: Default::default(),
         message_delivery: Default::default(),
         pending_inputs: VecDeque::new(),
@@ -538,6 +541,7 @@ async fn create_test_actor_with_memory(
         attribution_callback: None,
         auth_manager: None,
         is_chat_kind: false,
+        cancel_slot: Default::default(),
         state,
         notifications: NotificationSender::for_tests(
             GatewaySender::new(gateway_tx),
