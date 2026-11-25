@@ -1017,8 +1017,8 @@ mod cancellation_category_meta_tests {
     #[test]
     fn pins_every_wire_name() {
         use super::{
-            HOOK_DENIED_CATEGORY, MID_TURN_ABORT_CATEGORY,
-            PERMISSION_CANCELLED_CATEGORY, PERMISSION_REJECTED_CATEGORY, REPETITION_GUARD_CATEGORY,
+            HOOK_DENIED_CATEGORY, MID_TURN_ABORT_CATEGORY, PERMISSION_CANCELLED_CATEGORY,
+            PERMISSION_REJECTED_CATEGORY, REPETITION_GUARD_CATEGORY,
         };
         let cancelled = |category| PromptCompletionKind::Cancelled {
             category,
